@@ -1,0 +1,68 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "quant-warehouse"
+version = "0.1.0"
+description = "Multi-vendor point-in-time market data and features for ML and backtesting."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Quant Warehouse" }]
+keywords = ["quant", "finance", "openbb", "arcticdb", "feature-store", "point-in-time"]
+dependencies = [
+    "numpy>=1.26",
+    "pandas>=2.1",
+    # PyPI wheels: Linux x86_64, macOS, Windows. Linux arm64 → conda-forge only.
+    'arcticdb>=5.0; platform_machine != "aarch64" or sys_platform != "linux"',
+]
+
+[project.optional-dependencies]
+openbb = [
+    "openbb>=4.7",
+    "openbb-fmp>=1.0",
+    "openbb-yfinance>=1.0",
+    "openbb-sec>=1.0",
+    "openbb-tiingo>=1.0",
+    "openbb-intrinio>=1.0",
+    "openbb-equity>=1.0",
+    "openbb-etf>=1.0",
+    "openbb-crypto>=1.0",
+    "openbb-currency>=1.0",
+    "openbb-derivatives>=1.0",
+    "openbb-economy>=1.0",
+    "openbb-index>=1.0",
+    "openbb-news>=1.0",
+    "openbb-regulators>=1.0",
+    "openbb-fred>=1.0",
+    "openbb-bls>=1.0",
+    "openbb-oecd>=1.0",
+    "openbb-tradingeconomics>=1.0",
+    "openbb-government-us>=1.0",
+    "openbb-federal-reserve>=1.0",
+    "openbb-fixedincome>=1.0",
+    "openbb-commodity>=1.0",
+    "openbb-benzinga>=1.0",
+    "openbb-congress-gov>=1.0",
+    "openbb-cftc>=1.0",
+    "openbb-imf>=1.0",
+    "openbb-us-eia>=1.0",
+    "openbb-econdb>=1.0",
+    "openbb-platform-api>=1.0",
+]
+dev = ["pytest>=8.0", "ruff>=0.6"]
+all = ["quant-warehouse[openbb,dev]"]
+
+[project.scripts]
+quant-warehouse = "quant_warehouse.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["quant_warehouse"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
