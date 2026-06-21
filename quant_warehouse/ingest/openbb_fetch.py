@@ -83,6 +83,15 @@ def provider_period(provider: str, period: str) -> str:
     return period
 
 
+def _is_empty_fetch_error(exc: BaseException) -> bool:
+    message = str(exc).lower()
+    return (
+        "[empty]" in message
+        or "no results found" in message
+        or "no data found" in message
+    )
+
+
 def _call_route(route: str, *, symbol: str | None, provider: str, **kwargs: Any):
     try:
         from openbb import obb
@@ -113,7 +122,19 @@ def fetch_openbb(
     if route is None:
         raise ValueError(f"Unknown section: {section}")
 
-    result = _call_route(route, symbol=symbol, provider=provider, **kwargs)
+    try:
+        result = _call_route(route, symbol=symbol, provider=provider, **kwargs)
+    except Exception as exc:
+        if _is_empty_fetch_error(exc):
+            return OpenBBFetchResult(
+                section=section,
+                symbol=symbol.strip().upper(),
+                provider_requested=str(provider).strip().lower(),
+                provider_used=str(provider).strip().lower(),
+                df=pd.DataFrame(),
+                records=(),
+            )
+        raise
     df = result.to_df()
     if df is None:
         df = pd.DataFrame()

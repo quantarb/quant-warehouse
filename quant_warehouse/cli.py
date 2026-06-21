@@ -357,6 +357,11 @@ def cmd_backfill_fixes(args: argparse.Namespace) -> int:
 
     summary = backfill_calendar_and_etf_composition(
         calendar_start_date=args.calendar_start_date,
+        full_refresh_earnings=args.full_refresh_earnings,
+        calendar_sections=_parse_csv(args.calendar_sections) if args.calendar_sections else None,
+        include_calendars=not args.skip_calendars,
+        include_etf_composition=not args.skip_etf_composition,
+        etf_retry_missing_holdings=args.etf_retry_missing_holdings,
         max_workers=int(args.workers),
         progress_logger=_log,
     )
@@ -593,6 +598,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="Backfill failed equity calendars and ETF composition sections",
     )
     backfill_fixes.add_argument("--calendar-start-date", default="2005-01-01")
+    backfill_fixes.add_argument(
+        "--calendar-sections",
+        default="",
+        help="Comma-separated equity calendar sections (default: all four)",
+    )
+    backfill_fixes.add_argument(
+        "--full-refresh-earnings",
+        action="store_true",
+        help="Rebuild equity_calendar_earnings from calendar-start-date",
+    )
+    backfill_fixes.add_argument("--skip-calendars", action="store_true")
+    backfill_fixes.add_argument("--skip-etf-composition", action="store_true")
+    backfill_fixes.add_argument(
+        "--etf-retry-missing-holdings",
+        action="store_true",
+        help="Only retry ETF symbols still missing etf_holdings rows",
+    )
     backfill_fixes.add_argument("--workers", type=int, default=8)
     backfill_fixes.add_argument(
         "--log",

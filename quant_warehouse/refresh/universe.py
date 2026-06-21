@@ -311,18 +311,19 @@ def _process_symbol_fundamentals(
                         period=period,
                         **refresh_kwargs,
                     )
-                key = f"{section}:{provider}"
-                results.append(
-                    {
-                        "symbol": symbol,
-                        "section": section,
-                        "provider": provider,
-                        "status": "updated",
-                        "reason": plan.reason,
-                        "fetch_mode": plan.mode,
-                        "rows": int(stats.get(key) or 0),
-                    }
-                )
+                    key = f"{section}:{provider}"
+                    rows = int(stats.get(key) or 0)
+                    results.append(
+                        {
+                            "symbol": symbol,
+                            "section": section,
+                            "provider": provider,
+                            "status": "updated" if rows > 0 else "empty",
+                            "reason": plan.reason,
+                            "fetch_mode": plan.mode,
+                            "rows": rows,
+                        }
+                    )
             except Exception as exc:
                 results.append(
                     {
