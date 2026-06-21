@@ -311,6 +311,7 @@ def cmd_backfill_fmp_all(args: argparse.Namespace) -> int:
         include_calendars=not args.skip_calendars,
         include_transcripts=args.include_transcripts,
         include_etf_universe=not args.skip_etf_universe,
+        skip_equity_core=args.skip_equity_core,
         max_equity_symbols=args.limit,
         max_etf_symbols=args.etf_limit,
         staleness_days=int(args.staleness_days),
@@ -568,6 +569,11 @@ def build_parser() -> argparse.ArgumentParser:
     backfill_all.add_argument("--transcript-start-year", type=int, default=2005)
     backfill_all.add_argument("--include-macro", action="store_true")
     backfill_all.add_argument("--skip-prices", action="store_true")
+    backfill_all.add_argument(
+        "--skip-equity-core",
+        action="store_true",
+        help="Skip equity prices/fundamentals core phase; run ETF expansion with --workers",
+    )
     backfill_all.add_argument("--skip-profiles", action="store_true")
     backfill_all.add_argument("--skip-calendars", action="store_true")
     backfill_all.add_argument(

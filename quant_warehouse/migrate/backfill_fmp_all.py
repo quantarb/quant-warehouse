@@ -50,6 +50,7 @@ def backfill_fmp_all(
     include_calendars: bool = True,
     include_transcripts: bool = False,
     include_etf_universe: bool = True,
+    skip_equity_core: bool = False,
     max_equity_symbols: int | None = None,
     max_etf_symbols: int | None = None,
     staleness_days: int = 90,
@@ -74,28 +75,34 @@ def backfill_fmp_all(
         "include_calendars": include_calendars,
         "include_transcripts": include_transcripts,
         "include_etf_universe": include_etf_universe,
+        "skip_equity_core": skip_equity_core,
         "max_workers": max(1, int(max_workers)),
     }
 
-    equity_sections = list(FMP_ALL_EQUITY_SECTIONS)
-    core_summary = backfill_missing_fmp_historical(
-        warehouse=warehouse,
-        equity_sections=equity_sections,
-        equity_provider=equity_provider,
-        etf_provider=etf_provider,
-        period=period,
-        nport_start_year=nport_start_year,
-        include_macro=include_macro,
-        include_prices=include_prices,
-        macro_start_date=MIN_HISTORICAL_DATE,
-        max_equity_symbols=max_equity_symbols,
-        max_etf_symbols=None,
-        staleness_days=staleness_days,
-        skip_recent_hours=skip_recent_hours,
-        max_workers=max_workers,
-        progress_logger=progress_logger,
-    )
-    summary["core"] = core_summary
+    if skip_equity_core:
+        if callable(progress_logger):
+            progress_logger("Backfill-all: skipping equity core phase (prices + fundamentals)")
+        summary["core"] = {"status": "skipped_equity_core"}
+    else:
+        equity_sections = list(FMP_ALL_EQUITY_SECTIONS)
+        core_summary = backfill_missing_fmp_historical(
+            warehouse=warehouse,
+            equity_sections=equity_sections,
+            equity_provider=equity_provider,
+            etf_provider=etf_provider,
+            period=period,
+            nport_start_year=nport_start_year,
+            include_macro=include_macro,
+            include_prices=include_prices,
+            macro_start_date=MIN_HISTORICAL_DATE,
+            max_equity_symbols=max_equity_symbols,
+            max_etf_symbols=None,
+            staleness_days=staleness_days,
+            skip_recent_hours=skip_recent_hours,
+            max_workers=max_workers,
+            progress_logger=progress_logger,
+        )
+        summary["core"] = core_summary
 
     equity_symbols = _catalog_symbols(cfg.catalog_path, section="prices", provider=equity_provider)
     if max_equity_symbols is not None:
