@@ -6,6 +6,10 @@ import sys
 from pathlib import Path
 
 from quant_warehouse.migrate.backfill_macro_alt import backfill_fmp_macro_alt, write_backfill_log as write_macro_alt_log
+from quant_warehouse.migrate.backfill_fixes import (
+    backfill_calendar_and_etf_composition,
+    write_backfill_log as write_backfill_fixes_log,
+)
 from quant_warehouse.migrate.backfill_fmp_all import backfill_fmp_all, write_backfill_log as write_fmp_all_log
 from quant_warehouse.migrate.backfill_missing_fmp import backfill_missing_fmp_historical, write_backfill_log
 from quant_warehouse.migrate.django_historical import migrate_django_historical
@@ -345,6 +349,22 @@ def cmd_backfill_missing_fmp(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_backfill_fixes(args: argparse.Namespace) -> int:
+    log_path = Path(args.log).expanduser().resolve()
+
+    def _log(message: str) -> None:
+        print(message, flush=True)
+
+    summary = backfill_calendar_and_etf_composition(
+        calendar_start_date=args.calendar_start_date,
+        max_workers=int(args.workers),
+        progress_logger=_log,
+    )
+    write_backfill_fixes_log(summary, log_path=log_path)
+    print(json.dumps(summary, indent=2, default=str))
+    return 0
+
+
 def cmd_separate_fundamentals(args: argparse.Namespace) -> int:
     symbols = _parse_csv(args.symbols) if args.symbols else None
     sections = _parse_csv(args.sections) if args.sections else None
@@ -567,6 +587,18 @@ def build_parser() -> argparse.ArgumentParser:
         default="~/.quant-warehouse/logs/backfill-fmp-all.json",
     )
     backfill_all.set_defaults(func=cmd_backfill_fmp_all)
+
+    backfill_fixes = sub.add_parser(
+        "backfill-fixes",
+        help="Backfill failed equity calendars and ETF composition sections",
+    )
+    backfill_fixes.add_argument("--calendar-start-date", default="2005-01-01")
+    backfill_fixes.add_argument("--workers", type=int, default=8)
+    backfill_fixes.add_argument(
+        "--log",
+        default="~/.quant-warehouse/logs/backfill-fixes.json",
+    )
+    backfill_fixes.set_defaults(func=cmd_backfill_fixes)
 
     backfill_macro_alt = sub.add_parser(
         "backfill-macro-alt",

@@ -3,7 +3,7 @@ from __future__ import annotations
 import pandas as pd
 
 from quant_warehouse.ingest.credentials import configure_openbb_credentials
-from quant_warehouse.ingest.normalize import clip_to_min_historical_date
+from quant_warehouse.ingest.normalize import clip_to_min_historical_date, coerce_object_dates
 from quant_warehouse.warehouse.sections import MIN_HISTORICAL_DATE
 
 CALENDAR_DATE_COLUMNS: dict[str, str] = {
@@ -51,6 +51,7 @@ def normalize_equity_calendar_frame(
             continue
         frame[column] = pd.to_numeric(frame[column], errors="ignore")
 
+    frame = coerce_object_dates(frame)
     frame = frame.set_index(date_col)
     frame.index = pd.DatetimeIndex(frame.index)
     frame.index.name = date_col

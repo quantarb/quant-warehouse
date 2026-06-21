@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime as dt
 import re
 
 import numpy as np
@@ -221,6 +222,53 @@ def normalize_panel_frame(
     out.index.name = index_col
     out.index = pd.DatetimeIndex(out.index)
     return clip_to_min_historical_date(out, min_date=min_date or MIN_HISTORICAL_DATE)
+
+
+def coerce_object_dates(frame: pd.DataFrame) -> pd.DataFrame:
+    """Convert datetime.date values in object columns to timestamps for Arctic writes."""
+    if frame.empty:
+        return frame
+    out = frame.copy()
+    for column in out.columns:
+        if out[column].dtype != object:
+            continue
+        sample = out[column].dropna()
+        if sample.empty:
+            continue
+        value = sample.iloc[0]
+        if isinstance(value, dt.date) and not isinstance(value, dt.datetime):
+            out[column] = pd.to_datetime(out[column], errors="coerce")
+    return out
+
+
+def normalize_etf_composition_frame(df: pd.DataFrame, *, section: str) -> pd.DataFrame:
+    """Normalize ETF holdings/sectors/countries into a dated panel for Arctic storage."""
+    out = normalize_snapshot_frame(df)
+    if out.empty:
+        return out
+
+    as_of_name = "as_of"
+    if section == "etf_holdings" and "updated" in out.columns:
+        out["updated"] = pd.to_datetime(out["updated"], errors="coerce")
+        out = out.dropna(subset=["updated"])
+        out = out.set_index("updated")
+        out.index.name = as_of_name
+    else:
+        as_of = pd.Timestamp.utcnow().normalize()
+        out[as_of_name] = as_of
+        out = out.set_index(as_of_name)
+
+    out.index = pd.DatetimeIndex(out.index)
+    dedupe_cols = [as_of_name, *(
+        key
+        for key in ("cusip", "isin", "name", "sector", "country", "symbol")
+        if key in out.reset_index().columns
+    )]
+    reset = out.reset_index()
+    reset = reset.drop_duplicates(subset=dedupe_cols, keep="last")
+    out = reset.set_index(as_of_name)
+    out.index = pd.DatetimeIndex(out.index)
+    return out.sort_index()
 
 
 def normalize_snapshot_frame(df: pd.DataFrame) -> pd.DataFrame:

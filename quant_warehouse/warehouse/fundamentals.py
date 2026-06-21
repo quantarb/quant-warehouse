@@ -7,6 +7,7 @@ import pandas as pd
 from quant_warehouse.catalog.store import CatalogStore
 from quant_warehouse.config import WarehouseConfig
 from quant_warehouse.ingest.normalize import (
+    normalize_etf_composition_frame,
     normalize_panel_frame,
     normalize_snapshot_frame,
     normalize_vendor_frame,
@@ -22,6 +23,7 @@ from quant_warehouse.warehouse.merge import merge_panel_upsert, merge_upsert
 from quant_warehouse.warehouse.prices import _slice_dates
 from quant_warehouse.warehouse.sections import (
     ALL_FUNDAMENTAL_SECTIONS,
+    ETF_COMPOSITION_SECTIONS,
     ETF_FUNDAMENTAL_SECTIONS,
     EQUITY_FUNDAMENTAL_SECTIONS,
     PANEL_FUNDAMENTAL_SECTIONS,
@@ -75,7 +77,9 @@ class FundamentalsStore:
                     kwargs.setdefault("period", provider_period(provider, section_period))
 
                 raw = fetch_dataframe(section, symbol=symbol, provider=provider, **kwargs)
-                if section in SNAPSHOT_FUNDAMENTAL_SECTIONS:
+                if section in ETF_COMPOSITION_SECTIONS:
+                    frame = normalize_etf_composition_frame(raw, section=section)
+                elif section in SNAPSHOT_FUNDAMENTAL_SECTIONS:
                     frame = normalize_snapshot_frame(raw)
                 elif section in PANEL_FUNDAMENTAL_SECTIONS:
                     frame = normalize_panel_frame(
@@ -96,7 +100,7 @@ class FundamentalsStore:
                 storage_symbol = symbol_provider_key(symbol, provider)
                 existing = self.backend.read(library, storage_symbol)
 
-                if section in PANEL_FUNDAMENTAL_SECTIONS:
+                if section in PANEL_FUNDAMENTAL_SECTIONS or section in ETF_COMPOSITION_SECTIONS:
                     merged = merge_panel_upsert(existing, frame)
                 elif isinstance(frame.index, pd.DatetimeIndex):
                     merged = merge_upsert(existing, frame)
@@ -191,7 +195,9 @@ class FundamentalsStore:
         provider = validate_fundamental_provider(provider)
         symbol = symbol.strip().upper()
 
-        if isinstance(frame.index, pd.DatetimeIndex):
+        if section in ETF_COMPOSITION_SECTIONS:
+            normalized = normalize_etf_composition_frame(frame, section=section)
+        elif isinstance(frame.index, pd.DatetimeIndex):
             normalized = frame.copy()
         elif section in SNAPSHOT_FUNDAMENTAL_SECTIONS:
             normalized = normalize_snapshot_frame(frame)
@@ -205,7 +211,7 @@ class FundamentalsStore:
         merged = normalized
         if merge:
             existing = self.backend.read(library, storage_symbol)
-            if section in PANEL_FUNDAMENTAL_SECTIONS:
+            if section in PANEL_FUNDAMENTAL_SECTIONS or section in ETF_COMPOSITION_SECTIONS:
                 merged = merge_panel_upsert(existing, normalized)
             elif isinstance(normalized.index, pd.DatetimeIndex):
                 merged = merge_upsert(existing, normalized)
