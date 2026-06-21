@@ -43,6 +43,7 @@ def _catalog_symbols(catalog_path: Path, *, section: str, provider: str) -> list
 
 def backfill_missing_fmp_historical(
     *,
+    warehouse: Warehouse | None = None,
     config: WarehouseConfig | None = None,
     equity_sections: Sequence[str] | None = None,
     equity_provider: str = "fmp",
@@ -60,7 +61,7 @@ def backfill_missing_fmp_historical(
     max_workers: int = 8,
     progress_logger: ProgressLogger = None,
 ) -> dict[str, object]:
-    warehouse = Warehouse(config=config)
+    warehouse = warehouse or Warehouse(config=config)
     cfg = warehouse.config
     section_list = list(equity_sections or FMP_HISTORICAL_EQUITY_SECTIONS)
     started_at = datetime.now(timezone.utc).isoformat()

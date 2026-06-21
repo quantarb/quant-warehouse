@@ -79,7 +79,7 @@ def backfill_fmp_all(
 
     equity_sections = list(FMP_ALL_EQUITY_SECTIONS)
     core_summary = backfill_missing_fmp_historical(
-        config=cfg,
+        warehouse=warehouse,
         equity_sections=equity_sections,
         equity_provider=equity_provider,
         etf_provider=etf_provider,
