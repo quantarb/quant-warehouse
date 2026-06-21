@@ -312,6 +312,7 @@ def cmd_backfill_fmp_all(args: argparse.Namespace) -> int:
         staleness_days=int(args.staleness_days),
         skip_recent_hours=float(args.skip_recent_hours),
         request_sleep_seconds=float(args.request_sleep),
+        max_workers=int(args.workers),
         progress_logger=_log,
     )
     write_fmp_all_log(summary, log_path=log_path)
@@ -336,6 +337,7 @@ def cmd_backfill_missing_fmp(args: argparse.Namespace) -> int:
         max_etf_symbols=args.etf_limit,
         staleness_days=int(args.staleness_days),
         skip_recent_hours=float(args.skip_recent_hours),
+        max_workers=int(args.workers),
         progress_logger=_log,
     )
     write_backfill_log(summary, log_path=log_path)
@@ -515,6 +517,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     backfill_missing.add_argument("--staleness-days", type=int, default=90)
     backfill_missing.add_argument("--skip-recent-hours", type=float, default=24.0)
+    backfill_missing.add_argument(
+        "--workers",
+        type=int,
+        default=8,
+        help="Parallel symbol workers for price/fundamental/N-PORT backfill (default: 8)",
+    )
     backfill_missing.add_argument("--limit", type=int, default=None, help="Max equity symbols")
     backfill_missing.add_argument("--etf-limit", type=int, default=None, help="Max ETF symbols")
     backfill_missing.add_argument(
@@ -546,6 +554,12 @@ def build_parser() -> argparse.ArgumentParser:
     backfill_all.add_argument("--staleness-days", type=int, default=90)
     backfill_all.add_argument("--skip-recent-hours", type=float, default=24.0)
     backfill_all.add_argument("--request-sleep", type=float, default=0.05)
+    backfill_all.add_argument(
+        "--workers",
+        type=int,
+        default=8,
+        help="Parallel symbol workers for universe backfill phases (default: 8)",
+    )
     backfill_all.add_argument("--limit", type=int, default=None, help="Max equity symbols")
     backfill_all.add_argument("--etf-limit", type=int, default=None, help="Max ETF/mutual-fund symbols")
     backfill_all.add_argument(

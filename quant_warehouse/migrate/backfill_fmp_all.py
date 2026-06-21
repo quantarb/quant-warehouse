@@ -13,13 +13,11 @@ from quant_warehouse.migrate.backfill_missing_fmp import (
     _summarize_results,
     backfill_missing_fmp_historical,
 )
-from quant_warehouse.refresh.planner import (
-    backfill_fundamental_needs_update,
-    nport_disclosure_needs_update,
-    profile_refresh_needs_update,
-)
+from quant_warehouse.refresh.parallel import run_symbol_workers
+from quant_warehouse.refresh.planner import backfill_fundamental_needs_update
 from quant_warehouse.refresh.universe import (
     refresh_universe_fundamentals,
+    refresh_universe_nport_disclosure,
     refresh_universe_prices,
     refresh_universe_profiles,
 )
@@ -57,6 +55,7 @@ def backfill_fmp_all(
     staleness_days: int = 90,
     skip_recent_hours: float = 24.0,
     request_sleep_seconds: float = 0.05,
+    max_workers: int = 8,
     progress_logger: ProgressLogger = None,
 ) -> dict[str, object]:
     """Comprehensive OpenBB/FMP backfill for equities, ETFs, and mutual funds."""
@@ -75,6 +74,7 @@ def backfill_fmp_all(
         "include_calendars": include_calendars,
         "include_transcripts": include_transcripts,
         "include_etf_universe": include_etf_universe,
+        "max_workers": max(1, int(max_workers)),
     }
 
     equity_sections = list(FMP_ALL_EQUITY_SECTIONS)
@@ -92,6 +92,7 @@ def backfill_fmp_all(
         max_etf_symbols=None,
         staleness_days=staleness_days,
         skip_recent_hours=skip_recent_hours,
+        max_workers=max_workers,
         progress_logger=progress_logger,
     )
     summary["core"] = core_summary
@@ -112,6 +113,7 @@ def backfill_fmp_all(
                 providers=[equity_provider],
                 refresh_days=staleness_days,
                 max_symbols=max_equity_symbols,
+                max_workers=max_workers,
                 progress_logger=progress_logger,
             )
         )
@@ -122,8 +124,7 @@ def backfill_fmp_all(
                 f"Backfill-all: refreshing earnings transcripts for {len(equity_symbols):,} symbols "
                 f"from {transcript_start_year}"
             )
-        transcript_results: list[dict[str, object]] = []
-        for index, symbol in enumerate(equity_symbols, start=1):
+        def _refresh_transcript(symbol: str) -> list[dict[str, object]]:
             needs_refresh, reason = backfill_fundamental_needs_update(
                 warehouse.catalog,
                 symbol,
@@ -133,47 +134,49 @@ def backfill_fmp_all(
                 skip_recent_hours=skip_recent_hours,
             )
             if not needs_refresh:
-                transcript_results.append(
+                return [
                     {
                         "symbol": symbol,
                         "section": TRANSCRIPT_SECTION,
                         "status": "skipped_fresh",
                         "reason": reason,
                     }
+                ]
+            try:
+                stats = warehouse.fundamentals.refresh_transcripts(
+                    symbol,
+                    provider=equity_provider,
+                    start_year=transcript_start_year,
                 )
-            else:
-                try:
-                    stats = warehouse.fundamentals.refresh_transcripts(
-                        symbol,
-                        provider=equity_provider,
-                        start_year=transcript_start_year,
-                    )
-                    rows = int(stats.get("rows") or 0)
-                    transcript_results.append(
-                        {
-                            "symbol": symbol,
-                            "section": TRANSCRIPT_SECTION,
-                            "status": "updated" if rows > 0 else "empty",
-                            "reason": reason,
-                            "rows": rows,
-                            "fetched_periods": int(stats.get("fetched_periods") or 0),
-                        }
-                    )
-                except Exception as exc:
-                    transcript_results.append(
-                        {
-                            "symbol": symbol,
-                            "section": TRANSCRIPT_SECTION,
-                            "status": "error",
-                            "reason": reason,
-                            "error": str(exc),
-                        }
-                    )
-            if callable(progress_logger) and (index == 1 or index % 25 == 0 or index == len(equity_symbols)):
-                progress_logger(
-                    f"Transcript backfill progress: {index:,}/{len(equity_symbols):,} symbols processed"
-                )
-            time.sleep(request_sleep_seconds)
+                rows = int(stats.get("rows") or 0)
+                return [
+                    {
+                        "symbol": symbol,
+                        "section": TRANSCRIPT_SECTION,
+                        "status": "updated" if rows > 0 else "empty",
+                        "reason": reason,
+                        "rows": rows,
+                        "fetched_periods": int(stats.get("fetched_periods") or 0),
+                    }
+                ]
+            except Exception as exc:
+                return [
+                    {
+                        "symbol": symbol,
+                        "section": TRANSCRIPT_SECTION,
+                        "status": "error",
+                        "reason": reason,
+                        "error": str(exc),
+                    }
+                ]
+
+        transcript_results = run_symbol_workers(
+            equity_symbols,
+            _refresh_transcript,
+            max_workers=max_workers,
+            progress_logger=progress_logger,
+            progress_label="transcript backfill",
+        )
         summary["transcripts"] = _summarize_results(transcript_results)
 
     if include_calendars:
@@ -224,6 +227,7 @@ def backfill_fmp_all(
                 backfill_skip=True,
                 price_start_date=MIN_HISTORICAL_DATE,
                 skip_recent_hours=skip_recent_hours,
+                max_workers=max_workers,
                 progress_logger=progress_logger,
             )
         )
@@ -233,38 +237,17 @@ def backfill_fmp_all(
             progress_logger(
                 f"Backfill-all: refreshing FMP ETF profiles for {len(etf_symbol_list):,} symbols"
             )
-        etf_profile_results: list[dict[str, object]] = []
-        for index, symbol in enumerate(etf_symbol_list, start=1):
-            needs_refresh, reason = profile_refresh_needs_update(
-                warehouse.catalog,
-                symbol,
-                etf_provider,
+        summary["etf_profiles"] = _summarize_results(
+            refresh_universe_profiles(
+                warehouse,
+                etf_symbol_list,
+                providers=[etf_provider],
+                etf_symbols=set(etf_symbol_list),
                 refresh_days=staleness_days,
-                is_etf=True,
+                max_workers=max_workers,
+                progress_logger=progress_logger,
             )
-            if not needs_refresh:
-                etf_profile_results.append(
-                    {"symbol": symbol, "status": "skipped_fresh", "reason": reason}
-                )
-            else:
-                try:
-                    stats = warehouse.etf.refresh_profile(symbol, provider=etf_provider)
-                    etf_profile_results.append(
-                        {
-                            "symbol": symbol,
-                            "status": "updated",
-                            "reason": reason,
-                            "fields_populated": int(stats.get("fields_populated") or 0),
-                        }
-                    )
-                except Exception as exc:
-                    etf_profile_results.append(
-                        {"symbol": symbol, "status": "error", "reason": reason, "error": str(exc)}
-                    )
-            if callable(progress_logger) and (index == 1 or index % 50 == 0 or index == len(etf_symbol_list)):
-                progress_logger(f"ETF profile backfill progress: {index:,}/{len(etf_symbol_list):,}")
-            time.sleep(request_sleep_seconds)
-        summary["etf_profiles"] = _summarize_results(etf_profile_results)
+        )
 
     etf_fundamental_sections = [
         section
@@ -287,6 +270,7 @@ def backfill_fmp_all(
                 staleness_days=staleness_days,
                 skip_recent_hours=skip_recent_hours,
                 backfill_skip=True,
+                max_workers=max_workers,
                 progress_logger=progress_logger,
             )
         )
@@ -297,44 +281,16 @@ def backfill_fmp_all(
                 f"Backfill-all: refreshing ETF N-PORT for {len(etf_symbol_list):,} symbols "
                 f"from {nport_start_year}"
             )
-        nport_results: list[dict[str, object]] = []
-        for index, symbol in enumerate(etf_symbol_list, start=1):
-            needs_refresh, reason = nport_disclosure_needs_update(
-                warehouse.catalog,
-                symbol,
-                etf_provider,
-                start_year=nport_start_year,
-                staleness_days=staleness_days,
-                skip_recent_hours=skip_recent_hours,
-            )
-            if not needs_refresh:
-                nport_results.append(
-                    {"symbol": symbol, "status": "skipped_fresh", "reason": reason}
-                )
-            else:
-                try:
-                    stats = warehouse.etf.refresh_nport_disclosure_history(
-                        symbol,
-                        provider=etf_provider,
-                        start_year=nport_start_year,
-                    )
-                    rows = int(stats.get("rows") or 0)
-                    nport_results.append(
-                        {
-                            "symbol": symbol,
-                            "status": "updated" if rows > 0 else "empty",
-                            "reason": reason,
-                            "rows": rows,
-                            "fetched_periods": int(stats.get("fetched_periods") or 0),
-                        }
-                    )
-                except Exception as exc:
-                    nport_results.append(
-                        {"symbol": symbol, "status": "error", "reason": reason, "error": str(exc)}
-                    )
-            if callable(progress_logger) and (index == 1 or index % 25 == 0 or index == len(etf_symbol_list)):
-                progress_logger(f"ETF N-PORT backfill progress: {index:,}/{len(etf_symbol_list):,}")
-            time.sleep(request_sleep_seconds)
+        nport_results = refresh_universe_nport_disclosure(
+            warehouse,
+            etf_symbol_list,
+            provider=etf_provider,
+            start_year=nport_start_year,
+            staleness_days=staleness_days,
+            skip_recent_hours=skip_recent_hours,
+            max_workers=max_workers,
+            progress_logger=progress_logger,
+        )
         summary["etf_nport_expanded"] = _summarize_results(nport_results)
 
     summary["finished_at"] = datetime.now(timezone.utc).isoformat()

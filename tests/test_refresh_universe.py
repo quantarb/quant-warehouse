@@ -12,7 +12,7 @@ class FakeWarehouse:
         self.catalog = catalog
         self.refresh_calls: list[tuple[str, str]] = []
 
-    def refresh_prices(self, symbol, *, providers, end_date, full_refresh=False):
+    def refresh_prices(self, symbol, *, providers, **kwargs):
         provider = providers[0]
         self.refresh_calls.append((symbol, provider))
         max_dates = {
@@ -50,6 +50,12 @@ class FakeCatalog:
 
     def get(self, *, symbol: str, section: str, provider: str) -> SectionState | None:
         return self.states.get((symbol.upper(), section, provider))
+
+    def equity_historical_start(self, symbol: str) -> str:
+        return "1900-01-01"
+
+    def resolve_equity_ipo_date(self, symbol: str):
+        return None
 
 
 def test_refresh_universe_prices_skips_when_any_provider_fresh():

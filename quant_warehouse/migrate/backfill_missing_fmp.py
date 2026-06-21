@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import sqlite3
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Sequence
@@ -10,10 +9,11 @@ from typing import Callable, Sequence
 import pandas as pd
 
 from quant_warehouse.config import WarehouseConfig
-from quant_warehouse.refresh.planner import macro_backfill_needs_update, nport_disclosure_needs_update
+from quant_warehouse.refresh.planner import macro_backfill_needs_update
 from quant_warehouse.refresh.universe import (
     refresh_universe_fundamentals,
     refresh_universe_macro,
+    refresh_universe_nport_disclosure,
     refresh_universe_prices,
 )
 from quant_warehouse.warehouse.api import Warehouse
@@ -57,6 +57,7 @@ def backfill_missing_fmp_historical(
     max_etf_symbols: int | None = None,
     staleness_days: int = 90,
     skip_recent_hours: float = 24.0,
+    max_workers: int = 8,
     progress_logger: ProgressLogger = None,
 ) -> dict[str, object]:
     warehouse = Warehouse(config=config)
@@ -80,6 +81,7 @@ def backfill_missing_fmp_historical(
         "include_prices": include_prices,
         "staleness_days": staleness_days,
         "skip_recent_hours": skip_recent_hours,
+        "max_workers": max(1, int(max_workers)),
     }
 
     should_refresh_macro = force_macro
@@ -131,6 +133,7 @@ def backfill_missing_fmp_historical(
                 backfill_skip=True,
                 price_start_date=MIN_HISTORICAL_DATE,
                 skip_recent_hours=skip_recent_hours,
+                max_workers=max_workers,
                 progress_logger=progress_logger,
             )
         )
@@ -149,6 +152,7 @@ def backfill_missing_fmp_historical(
         staleness_days=staleness_days,
         skip_recent_hours=skip_recent_hours,
         backfill_skip=True,
+        max_workers=max_workers,
         progress_logger=progress_logger,
     )
     summary["equity"] = _summarize_results(equity_results)
@@ -171,6 +175,7 @@ def backfill_missing_fmp_historical(
                 backfill_skip=True,
                 price_start_date=MIN_HISTORICAL_DATE,
                 skip_recent_hours=skip_recent_hours,
+                max_workers=max_workers,
                 progress_logger=progress_logger,
             )
         )
@@ -180,54 +185,16 @@ def backfill_missing_fmp_historical(
             f"Backfill: refreshing ETF N-PORT history for {len(etf_symbols):,} symbols "
             f"from {nport_start_year}"
         )
-    etf_results: list[dict[str, object]] = []
-    for index, symbol in enumerate(etf_symbols, start=1):
-        needs_refresh, reason = nport_disclosure_needs_update(
-            warehouse.catalog,
-            symbol,
-            etf_provider,
-            start_year=nport_start_year,
-            staleness_days=staleness_days,
-            skip_recent_hours=skip_recent_hours,
-        )
-        if not needs_refresh:
-            etf_results.append(
-                {
-                    "symbol": symbol,
-                    "status": "skipped_fresh",
-                    "reason": reason,
-                }
-            )
-            if callable(progress_logger) and (index == 1 or index % 10 == 0 or index == len(etf_symbols)):
-                progress_logger(f"ETF N-PORT backfill progress: {index:,}/{len(etf_symbols):,}")
-            continue
-        try:
-            stats = warehouse.etf.refresh_nport_disclosure_history(
-                symbol,
-                provider=etf_provider,
-                start_year=nport_start_year,
-            )
-            etf_results.append(
-                {
-                    "symbol": symbol,
-                    "status": "updated" if int(stats.get("rows") or 0) > 0 else "empty",
-                    "reason": reason,
-                    "rows": int(stats.get("rows") or 0),
-                    "fetched_periods": int(stats.get("fetched_periods") or 0),
-                }
-            )
-        except Exception as exc:
-            etf_results.append(
-                {
-                    "symbol": symbol,
-                    "status": "error",
-                    "reason": reason,
-                    "error": str(exc),
-                }
-            )
-        if callable(progress_logger) and (index == 1 or index % 10 == 0 or index == len(etf_symbols)):
-            progress_logger(f"ETF N-PORT backfill progress: {index:,}/{len(etf_symbols):,}")
-        time.sleep(0.05)
+    etf_results = refresh_universe_nport_disclosure(
+        warehouse,
+        etf_symbols,
+        provider=etf_provider,
+        start_year=nport_start_year,
+        staleness_days=staleness_days,
+        skip_recent_hours=skip_recent_hours,
+        max_workers=max_workers,
+        progress_logger=progress_logger,
+    )
     summary["etf_nport_disclosure"] = _summarize_results(etf_results)
     summary["finished_at"] = datetime.now(timezone.utc).isoformat()
     return summary

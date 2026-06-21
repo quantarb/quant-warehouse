@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+from contextlib import nullcontext
 from typing import Literal, Protocol
 
 import pandas as pd
@@ -22,7 +24,7 @@ class ArcticBackend:
 
     kind: StorageKind = "arctic"
 
-    def __init__(self, uri: str) -> None:
+    def __init__(self, uri: str, *, storage_lock: threading.RLock | None = None) -> None:
         from quant_warehouse.deps import require_arcticdb
 
         require_arcticdb()
@@ -30,6 +32,7 @@ class ArcticBackend:
 
         self._uri = uri
         self._arctic = Arctic(uri)
+        self._storage_lock = storage_lock
 
     def _library(self, name: str):
         if name not in self._arctic.list_libraries():
@@ -37,24 +40,29 @@ class ArcticBackend:
         return self._arctic.get_library(name)
 
     def read(self, library: str, symbol: str) -> pd.DataFrame | None:
-        lib = self._library(library)
-        if not lib.has_symbol(symbol):
-            return None
-        version = lib.read(symbol)
-        df = version.data
-        if df is None or df.empty:
-            return None
-        if not isinstance(df.index, pd.DatetimeIndex) and df.index.name in ("date", "period_ending"):
-            df.index = pd.to_datetime(df.index, errors="coerce")
-        return df.sort_index()
+        with self._storage_guard():
+            lib = self._library(library)
+            if not lib.has_symbol(symbol):
+                return None
+            version = lib.read(symbol)
+            df = version.data
+            if df is None or df.empty:
+                return None
+            if not isinstance(df.index, pd.DatetimeIndex) and df.index.name in ("date", "period_ending"):
+                df.index = pd.to_datetime(df.index, errors="coerce")
+            return df.sort_index()
 
     def write(self, library: str, symbol: str, df: pd.DataFrame) -> None:
         if df.empty:
             return
         if not isinstance(df.index, pd.DatetimeIndex):
             raise ValueError("DataFrame index must be DatetimeIndex")
-        lib = self._library(library)
-        lib.write(symbol, df.sort_index())
+        with self._storage_guard():
+            lib = self._library(library)
+            lib.write(symbol, df.sort_index())
+
+    def _storage_guard(self):
+        return self._storage_lock or nullcontext()
 
     def has_symbol(self, library: str, symbol: str) -> bool:
         lib = self._library(library)
@@ -68,6 +76,10 @@ class ArcticBackend:
         return True
 
 
-def open_backend(config: WarehouseConfig) -> ArcticBackend:
+def open_backend(
+    config: WarehouseConfig,
+    *,
+    storage_lock: threading.RLock | None = None,
+) -> ArcticBackend:
     config.ensure_dirs()
-    return ArcticBackend(config.arctic_uri)
+    return ArcticBackend(config.arctic_uri, storage_lock=storage_lock)

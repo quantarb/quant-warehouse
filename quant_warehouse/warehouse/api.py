@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from typing import Sequence
 
 import pandas as pd
@@ -29,36 +30,39 @@ class Warehouse:
     ) -> None:
         self.config = config or WarehouseConfig.from_env()
         self.config.ensure_dirs()
-        self.prices = PricesStore(self.config, backend=backend)
-        self.profiles = ProfileStore(self.config, catalog=self.prices.catalog)
+        self.storage_lock = threading.RLock()
+        shared_backend = backend or open_backend(self.config, storage_lock=self.storage_lock)
+        shared_catalog = CatalogStore(self.config.catalog_path, storage_lock=self.storage_lock)
+        self.prices = PricesStore(self.config, backend=shared_backend, catalog=shared_catalog)
+        self.profiles = ProfileStore(self.config, catalog=shared_catalog)
         self.fundamentals = FundamentalsStore(
             self.config,
-            backend=self.prices.backend,
-            catalog=self.prices.catalog,
+            backend=shared_backend,
+            catalog=shared_catalog,
         )
         self.etf = EtfStore(
             self.config,
-            backend=self.prices.backend,
-            catalog=self.prices.catalog,
+            backend=shared_backend,
+            catalog=shared_catalog,
             fundamentals=self.fundamentals,
         )
         self.macro = MacroStore(
             self.config,
-            backend=self.prices.backend,
-            catalog=self.prices.catalog,
+            backend=shared_backend,
+            catalog=shared_catalog,
         )
         self.market_prices = MarketPricesStore(
             self.config,
-            backend=self.prices.backend,
-            catalog=self.prices.catalog,
+            backend=shared_backend,
+            catalog=shared_catalog,
         )
         self.equity_calendar = EquityCalendarStore(
             self.config,
-            backend=self.prices.backend,
-            catalog=self.prices.catalog,
+            backend=shared_backend,
+            catalog=shared_catalog,
         )
-        self.backend = self.prices.backend
-        self.catalog = self.prices.catalog
+        self.backend = shared_backend
+        self.catalog = shared_catalog
 
     def refresh(
         self,

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -42,10 +44,14 @@ class SymbolProfile:
 
 
 class CatalogStore:
-    def __init__(self, db_path: Path) -> None:
+    def __init__(self, db_path: Path, *, storage_lock: threading.RLock | None = None) -> None:
         self.db_path = db_path
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._storage_lock = storage_lock
         self._init_schema()
+
+    def _storage_guard(self):
+        return self._storage_lock or nullcontext()
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
@@ -118,31 +124,32 @@ class CatalogStore:
     ) -> None:
         now = datetime.now(timezone.utc).isoformat()
         columns = sorted({str(c) for c in columns_present if str(c)})
-        with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO section_state (
-                    symbol, section, provider, min_date, max_date,
-                    row_count, columns_json, last_fetched_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(symbol, section, provider) DO UPDATE SET
-                    min_date=excluded.min_date,
-                    max_date=excluded.max_date,
-                    row_count=excluded.row_count,
-                    columns_json=excluded.columns_json,
-                    last_fetched_at=excluded.last_fetched_at
-                """,
-                (
-                    symbol.upper(),
-                    section,
-                    provider,
-                    min_date,
-                    max_date,
-                    int(row_count),
-                    json.dumps(columns),
-                    now,
-                ),
-            )
+        with self._storage_guard():
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO section_state (
+                        symbol, section, provider, min_date, max_date,
+                        row_count, columns_json, last_fetched_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(symbol, section, provider) DO UPDATE SET
+                        min_date=excluded.min_date,
+                        max_date=excluded.max_date,
+                        row_count=excluded.row_count,
+                        columns_json=excluded.columns_json,
+                        last_fetched_at=excluded.last_fetched_at
+                    """,
+                    (
+                        symbol.upper(),
+                        section,
+                        provider,
+                        min_date,
+                        max_date,
+                        int(row_count),
+                        json.dumps(columns),
+                        now,
+                    ),
+                )
 
     def get(self, *, symbol: str, section: str, provider: str) -> SectionState | None:
         with self._connect() as conn:
@@ -224,45 +231,46 @@ class CatalogStore:
         beta = _first_float(record, "beta")
         cik = _first_text(record, "cik")
         ipo_date = listing_date_from_record(record)
-        with self._connect() as conn:
-            conn.execute(
-                f"""
-                INSERT INTO {table} (
-                    symbol, provider, source_provider, fetched_at,
-                    company_name, exchange, country, sector, industry,
-                    market_cap, beta, cik, ipo_date, payload_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(symbol, provider) DO UPDATE SET
-                    source_provider=excluded.source_provider,
-                    fetched_at=excluded.fetched_at,
-                    company_name=excluded.company_name,
-                    exchange=excluded.exchange,
-                    country=excluded.country,
-                    sector=excluded.sector,
-                    industry=excluded.industry,
-                    market_cap=excluded.market_cap,
-                    beta=excluded.beta,
-                    cik=excluded.cik,
-                    ipo_date=excluded.ipo_date,
-                    payload_json=excluded.payload_json
-                """,
-                (
-                    symbol.upper(),
-                    provider.strip().lower(),
-                    source_provider.strip().lower(),
-                    now,
-                    company_name,
-                    exchange,
-                    country,
-                    sector,
-                    industry,
-                    market_cap,
-                    beta,
-                    cik,
-                    ipo_date,
-                    json.dumps(record, default=str),
-                ),
-            )
+        with self._storage_guard():
+            with self._connect() as conn:
+                conn.execute(
+                    f"""
+                    INSERT INTO {table} (
+                        symbol, provider, source_provider, fetched_at,
+                        company_name, exchange, country, sector, industry,
+                        market_cap, beta, cik, ipo_date, payload_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(symbol, provider) DO UPDATE SET
+                        source_provider=excluded.source_provider,
+                        fetched_at=excluded.fetched_at,
+                        company_name=excluded.company_name,
+                        exchange=excluded.exchange,
+                        country=excluded.country,
+                        sector=excluded.sector,
+                        industry=excluded.industry,
+                        market_cap=excluded.market_cap,
+                        beta=excluded.beta,
+                        cik=excluded.cik,
+                        ipo_date=excluded.ipo_date,
+                        payload_json=excluded.payload_json
+                    """,
+                    (
+                        symbol.upper(),
+                        provider.strip().lower(),
+                        source_provider.strip().lower(),
+                        now,
+                        company_name,
+                        exchange,
+                        country,
+                        sector,
+                        industry,
+                        market_cap,
+                        beta,
+                        cik,
+                        ipo_date,
+                        json.dumps(record, default=str),
+                    ),
+                )
         self.upsert(
             symbol=symbol,
             section=section,
