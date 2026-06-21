@@ -241,8 +241,8 @@ def coerce_object_dates(frame: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def normalize_etf_composition_frame(df: pd.DataFrame, *, section: str) -> pd.DataFrame:
-    """Normalize ETF holdings/sectors/countries into a dated panel for Arctic storage."""
+def normalize_dated_snapshot_frame(df: pd.DataFrame, *, section: str) -> pd.DataFrame:
+    """Normalize cross-sectional snapshots into a dated panel for Arctic storage."""
     out = normalize_snapshot_frame(df)
     if out.empty:
         return out
@@ -261,7 +261,16 @@ def normalize_etf_composition_frame(df: pd.DataFrame, *, section: str) -> pd.Dat
     out.index = pd.DatetimeIndex(out.index)
     dedupe_cols = [as_of_name, *(
         key
-        for key in ("cusip", "isin", "name", "sector", "country", "symbol")
+        for key in (
+            "cusip",
+            "isin",
+            "name",
+            "sector",
+            "country",
+            "symbol",
+            "title",
+            "cik",
+        )
         if key in out.reset_index().columns
     )]
     reset = out.reset_index()
@@ -269,6 +278,10 @@ def normalize_etf_composition_frame(df: pd.DataFrame, *, section: str) -> pd.Dat
     out = reset.set_index(as_of_name)
     out.index = pd.DatetimeIndex(out.index)
     return out.sort_index()
+
+
+def normalize_etf_composition_frame(df: pd.DataFrame, *, section: str) -> pd.DataFrame:
+    return normalize_dated_snapshot_frame(df, section=section)
 
 
 def normalize_snapshot_frame(df: pd.DataFrame) -> pd.DataFrame:

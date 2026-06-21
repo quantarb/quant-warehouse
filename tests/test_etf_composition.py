@@ -5,7 +5,11 @@ import datetime as dt
 import pandas as pd
 
 from quant_warehouse.ingest.equity_calendar_fetch import normalize_equity_calendar_frame
-from quant_warehouse.ingest.normalize import coerce_object_dates, normalize_etf_composition_frame
+from quant_warehouse.ingest.normalize import (
+    coerce_object_dates,
+    normalize_dated_snapshot_frame,
+    normalize_etf_composition_frame,
+)
 
 
 def test_normalize_etf_holdings_uses_updated_as_of_index():
@@ -26,6 +30,13 @@ def test_normalize_etf_holdings_uses_updated_as_of_index():
 def test_normalize_etf_sectors_stamps_as_of_index():
     raw = pd.DataFrame({"symbol": ["SPY", "SPY"], "sector": ["Technology", "Healthcare"], "weight": [0.4, 0.2]})
     out = normalize_etf_composition_frame(raw, section="etf_sectors")
+    assert isinstance(out.index, pd.DatetimeIndex)
+    assert len(out) == 2
+
+
+def test_normalize_management_stamps_as_of_index():
+    raw = pd.DataFrame({"title": ["CEO", "CFO"], "name": ["Tim", "Luca"], "pay": [1, 2]})
+    out = normalize_dated_snapshot_frame(raw, section="management")
     assert isinstance(out.index, pd.DatetimeIndex)
     assert len(out) == 2
 

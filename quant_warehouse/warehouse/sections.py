@@ -62,16 +62,24 @@ ETF_FUNDAMENTAL_SECTIONS: tuple[str, ...] = (
     "etf_price_performance",
 )
 
-# ETF composition snapshots stored as dated panels (as-of index for Arctic).
-ETF_COMPOSITION_SECTIONS: frozenset[str] = frozenset(
+# Cross-sectional snapshots stored as dated panels (as-of index for Arctic).
+DATED_SNAPSHOT_SECTIONS: frozenset[str] = frozenset(
     {
         "etf_holdings",
         "etf_sectors",
         "etf_countries",
         "etf_equity_exposure",
         "etf_price_performance",
+        "management",
+        "compare_peers",
+        "estimates_consensus",
+        "ownership_institutional",
+        "ownership_share_statistics",
     }
 )
+
+# Backward-compatible alias.
+ETF_COMPOSITION_SECTIONS = DATED_SNAPSHOT_SECTIONS
 
 # FMP Django historical sections without a distinct OpenBB route name.
 DJANGO_ONLY_FUNDAMENTAL_SECTIONS: tuple[str, ...] = (
@@ -135,16 +143,7 @@ PERIOD_FUNDAMENTAL_SECTIONS: frozenset[str] = frozenset(
 )
 
 # Cross-sectional snapshots — full replace on refresh, not gap-fill merge.
-SNAPSHOT_FUNDAMENTAL_SECTIONS: frozenset[str] = frozenset(
-    {
-        "metrics",
-        "estimates_consensus",
-        "ownership_institutional",
-        "ownership_share_statistics",
-        "management",
-        "compare_peers",
-    }
-)
+SNAPSHOT_FUNDAMENTAL_SECTIONS: frozenset[str] = frozenset()
 
 # Repeated cross-sections keyed by filing/as-of date (multiple rows per date).
 PANEL_FUNDAMENTAL_SECTIONS: frozenset[str] = frozenset(

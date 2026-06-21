@@ -44,6 +44,8 @@ def merge_panel_upsert(existing: pd.DataFrame | None, incoming: pd.DataFrame) ->
             "symbol",
             "country",
             "sector",
+            "title",
+            "cik",
             "event",
         )
         if key in combined.columns
