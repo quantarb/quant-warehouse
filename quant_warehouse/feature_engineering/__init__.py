@@ -34,6 +34,11 @@ from quant_warehouse.feature_engineering.time_features import (
     TimeFeatureConfig,
     build_time_features,
 )
+from quant_warehouse.feature_engineering.broadcast import (
+    asof_join_pit,
+    broadcast_asof_to_target_index,
+)
+from quant_warehouse.feature_engineering.recipe import recipe_hash
 
 __all__ = [
     "BASE_PRICE_COLS",
@@ -44,6 +49,8 @@ __all__ = [
     "RepresentationEmbeddingSpec",
     "TA_CLASSIC_FAMILY_PREFIXES",
     "TimeFeatureConfig",
+    "asof_join_pit",
+    "broadcast_asof_to_target_index",
     "build_price_ta_classic_feature_families",
     "build_price_technical_features",
     "build_event_features",
@@ -56,6 +63,7 @@ __all__ = [
     "compute_features_worldclass",
     "fetch_fundamentals_data",
     "load_or_compute_features_daily",
+    "recipe_hash",
     "section_prefix",
     "warehouse_section_for_legacy_key",
     "warehouse_section_to_indexed_frame",

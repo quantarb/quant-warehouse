@@ -1,6 +1,6 @@
 import pandas as pd
 
-from quant_warehouse.features.broadcast import broadcast_asof_to_target_index
+from quant_warehouse.feature_engineering.broadcast import broadcast_asof_to_target_index
 
 
 def test_broadcast_asof_to_target_index():

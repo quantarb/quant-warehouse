@@ -7,7 +7,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from quant_warehouse.features.broadcast import broadcast_asof_to_target_index
+from quant_warehouse.feature_engineering.broadcast import broadcast_asof_to_target_index
 from quant_warehouse.warehouse.sections import LEGACY_FMP_SECTION_MAP
 
 
