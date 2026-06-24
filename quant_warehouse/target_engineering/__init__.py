@@ -10,6 +10,21 @@ from quant_warehouse.target_engineering.labels import (
     deduplicate_labels,
     generate_optimal_events,
 )
+from quant_warehouse.target_engineering.event_pairs import (
+    EVENT_PAIR_COLUMNS,
+    EVENT_PAIR_LIBRARY,
+    EVENT_PAIR_SECTION,
+    EVENT_PAIR_TAXONOMY,
+    EventPairLoadResult,
+    EventPairStore,
+    build_event_pairs_from_historical_data,
+    fetch_fmp_event_pair_family,
+    fetch_fmp_event_pairs,
+    get_event_side,
+    get_mirror_event_type,
+    normalize_event_pairs,
+)
+from quant_warehouse.target_engineering.optimal_trades import build_optimal_trade_labels
 from quant_warehouse.target_engineering.option_labels import (
     OptionLabelResult,
     OptionLabelSpec,
@@ -18,6 +33,15 @@ from quant_warehouse.target_engineering.option_labels import (
     compute_return_covariance_matrix,
     solve_long_only_mean_variance_weights,
     solve_mean_variance_weights,
+)
+from quant_warehouse.target_engineering.options import (
+    build_option_best_return_labels,
+    build_option_mean_variance_labels,
+    build_option_return_rank_labels,
+)
+from quant_warehouse.target_engineering.returns import (
+    build_cross_sectional_rank_labels,
+    build_forward_return_labels,
 )
 from quant_warehouse.target_engineering.option_dataset import (
     OptionMlDatasetResult,
@@ -59,6 +83,12 @@ from quant_warehouse.target_engineering.strategy_solver import (
 __all__ = [
     "LabelBuildSpec",
     "OracleLabelResult",
+    "EVENT_PAIR_COLUMNS",
+    "EVENT_PAIR_LIBRARY",
+    "EVENT_PAIR_SECTION",
+    "EVENT_PAIR_TAXONOMY",
+    "EventPairLoadResult",
+    "EventPairStore",
     "OptionLabelResult",
     "OptionLabelSpec",
     "OptionMlDatasetResult",
@@ -73,12 +103,21 @@ __all__ = [
     "build_label_panel",
     "build_label_rows_from_completed_trades",
     "build_label_statistics",
+    "build_cross_sectional_rank_labels",
+    "build_event_pairs_from_historical_data",
+    "build_forward_return_labels",
     "build_oracle_labels",
+    "build_optimal_trade_labels",
+    "build_option_best_return_labels",
     "build_option_label_panel",
     "build_option_labels",
+    "build_option_mean_variance_labels",
     "build_option_ml_dataset",
+    "build_option_return_rank_labels",
     "build_trade_results",
     "download_option_snapshots_for_range",
+    "fetch_fmp_event_pair_family",
+    "fetch_fmp_event_pairs",
     "load_cached_snapshots_for_trade_window",
     "save_option_ml_dataset",
     "compute_return_covariance_matrix",
@@ -86,6 +125,9 @@ __all__ = [
     "solve_mean_variance_weights",
     "deduplicate_labels",
     "generate_optimal_events",
+    "get_event_side",
+    "get_mirror_event_type",
+    "normalize_event_pairs",
     "parse_k_list",
     "load_thetadata_option_snapshots",
     "solve_joint_trade_sequence_by_frequency",
