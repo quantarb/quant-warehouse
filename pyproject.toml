@@ -51,8 +51,10 @@ openbb = [
     "openbb-econdb>=1.0",
     "openbb-platform-api>=1.0",
 ]
+thetadata = ["thetadata>=1.0.9", "pyarrow>=14.0"]
+feature-engineering = ["pandas-ta-classic>=0.3.54"]
 dev = ["pytest>=8.0", "ruff>=0.6"]
-all = ["quant-warehouse[openbb,dev]"]
+all = ["quant-warehouse[openbb,thetadata,feature-engineering,dev]"]
 
 [project.scripts]
 quant-warehouse = "quant_warehouse.cli:main"

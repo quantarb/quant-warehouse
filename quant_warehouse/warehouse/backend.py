@@ -64,6 +64,11 @@ class ArcticBackend:
     def _storage_guard(self):
         return self._storage_lock or nullcontext()
 
+    def list_symbols(self, library: str) -> list[str]:
+        with self._storage_guard():
+            lib = self._library(library)
+            return [str(symbol) for symbol in lib.list_symbols()]
+
     def has_symbol(self, library: str, symbol: str) -> bool:
         lib = self._library(library)
         return bool(lib.has_symbol(symbol))

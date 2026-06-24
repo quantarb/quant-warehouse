@@ -81,27 +81,13 @@ DATED_SNAPSHOT_SECTIONS: frozenset[str] = frozenset(
 # Backward-compatible alias.
 ETF_COMPOSITION_SECTIONS = DATED_SNAPSHOT_SECTIONS
 
-# FMP Django historical sections without a distinct OpenBB route name.
-DJANGO_ONLY_FUNDAMENTAL_SECTIONS: tuple[str, ...] = (
+# FMP historical sections without a distinct OpenBB route name.
+EXTENDED_FUNDAMENTAL_SECTIONS: tuple[str, ...] = (
     "earnings",
     "financial_growth",
     "senate_trading",
-    "income_ttm",
-    "balance_ttm",
-    "cash_ttm",
-    "metrics_ttm",
-    "ratios_ttm",
 )
 
-ALL_FUNDAMENTAL_SECTIONS: frozenset[str] = frozenset(
-    (
-        *EQUITY_FUNDAMENTAL_SECTIONS,
-        *ETF_FUNDAMENTAL_SECTIONS,
-        *DJANGO_ONLY_FUNDAMENTAL_SECTIONS,
-    )
-)
-
-# Django fmp_symbolsectionhistorical.section_key → quant-warehouse section.
 DJANGO_HISTORICAL_SECTION_MAP: dict[str, str] = {
     "income_statement": "income",
     "balance_sheet": "balance",
@@ -116,14 +102,18 @@ DJANGO_HISTORICAL_SECTION_MAP: dict[str, str] = {
     "earnings": "earnings",
     "financial_growth": "financial_growth",
     "senate_trading": "senate_trading",
-    "income_statement_ttm": "income_ttm",
-    "balance_sheet_ttm": "balance_ttm",
-    "cash_flow_ttm": "cash_ttm",
-    "key_metrics_ttm": "metrics_ttm",
-    "ratios_ttm": "ratios_ttm",
 }
 
-DJANGO_HISTORICAL_SECTION_KEYS: tuple[str, ...] = tuple(DJANGO_HISTORICAL_SECTION_MAP.keys())
+# No Django-only sections are currently retained.
+DJANGO_ONLY_FUNDAMENTAL_SECTIONS: frozenset[str] = frozenset()
+
+ALL_FUNDAMENTAL_SECTIONS: frozenset[str] = frozenset(
+    (
+        *EQUITY_FUNDAMENTAL_SECTIONS,
+        *ETF_FUNDAMENTAL_SECTIONS,
+        *EXTENDED_FUNDAMENTAL_SECTIONS,
+    )
+)
 
 # Sections that accept OpenBB `period` (annual / quarter / quarterly).
 PERIOD_FUNDAMENTAL_SECTIONS: frozenset[str] = frozenset(

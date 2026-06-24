@@ -18,6 +18,41 @@ GAP_OVERLAP_DAYS = 5
 GAP_FILL_RETRY_LOOKBACK_DAYS = 30
 
 
+def parse_symbol_provider_key(storage_symbol: str) -> tuple[str, str] | None:
+    text = str(storage_symbol).strip()
+    if "__" not in text:
+        return None
+    symbol, provider = text.rsplit("__", 1)
+    symbol = symbol.strip().upper()
+    provider = provider.strip().lower()
+    if not symbol or not provider:
+        return None
+    return symbol, provider
+
+
+def list_arctic_price_underlyings(
+    backend: ArcticBackend,
+    *,
+    provider: str = "fmp",
+    library: str = PRICES_LIBRARY,
+) -> list[str]:
+    """Return underlying symbols stored in Arctic for a price vendor."""
+
+    target_provider = str(provider).strip().lower()
+    symbols: list[str] = []
+    seen: set[str] = set()
+    for storage_symbol in backend.list_symbols(library):
+        parsed = parse_symbol_provider_key(storage_symbol)
+        if parsed is None:
+            continue
+        symbol, stored_provider = parsed
+        if stored_provider != target_provider or symbol in seen:
+            continue
+        seen.add(symbol)
+        symbols.append(symbol)
+    return sorted(symbols)
+
+
 class PricesStore:
     """ArcticDB-backed historical OHLCV store with per-vendor symbols and gap-fill."""
 

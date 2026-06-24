@@ -88,3 +88,15 @@ def configure_openbb_credentials() -> None:
     intrinio_key = str(os.environ.get("INTRINIO_API_KEY") or "").strip()
     if intrinio_key and hasattr(obb.user.credentials, "intrinio_api_key"):
         obb.user.credentials.intrinio_api_key = intrinio_key
+
+
+@lru_cache(maxsize=1)
+def resolve_thetadata_api_key(*, required: bool = False) -> str:
+    load_shared_env()
+    api_key = str(os.environ.get("THETADATA_API_KEY") or "").strip()
+    if required and not api_key:
+        searched = ", ".join(str(path) for path in _dotenv_candidates())
+        raise ValueError(
+            f"Missing THETADATA_API_KEY in environment or .env files. Checked: {searched}"
+        )
+    return api_key

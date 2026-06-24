@@ -12,9 +12,11 @@ from quant_warehouse.migrate.backfill_fixes import (
 )
 from quant_warehouse.migrate.backfill_fmp_all import backfill_fmp_all, write_backfill_log as write_fmp_all_log
 from quant_warehouse.migrate.backfill_missing_fmp import backfill_missing_fmp_historical, write_backfill_log
-from quant_warehouse.migrate.django_historical import migrate_django_historical
-from quant_warehouse.migrate.django_prices import migrate_django_fmp_prices
-from quant_warehouse.migrate.separate_etfs import separate_etfs_from_equity
+from quant_warehouse.migrate.backfill_thetadata_options import (
+    backfill_thetadata_options,
+    log_progress as log_thetadata_options_progress,
+    write_backfill_log as write_thetadata_options_log,
+)
 from quant_warehouse.migrate.separate_fundamentals import separate_legacy_fundamentals
 from quant_warehouse.warehouse.sections import (
     EQUITY_FUNDAMENTAL_SECTIONS,
@@ -26,23 +28,11 @@ from quant_warehouse.warehouse.sections import (
     FMP_HISTORICAL_EQUITY_SECTIONS,
     MIN_HISTORICAL_DATE,
 )
-from quant_warehouse.migrate.universe import (
-    refresh_equity_profiles_from_django_db,
-    refresh_equity_yfinance_prices_from_django_db,
-    refresh_etf_profiles_from_django_db,
-    refresh_etf_yfinance_prices_from_django_db,
-)
 from quant_warehouse.warehouse.api import Warehouse
-
-DEFAULT_DJANGO_DB = Path("~/PycharmProjects/optimal_trader/db.sqlite3")
 
 
 def _parse_csv(value: str) -> list[str]:
     return [part.strip() for part in value.split(",") if part.strip()]
-
-
-def _resolve_db(path: str | None) -> Path:
-    return Path(path or DEFAULT_DJANGO_DB).expanduser().resolve()
 
 
 def _profile_payload(row) -> dict[str, object]:
@@ -158,84 +148,6 @@ def cmd_status(args: argparse.Namespace) -> int:
             indent=2,
         )
     )
-    return 0
-
-
-def cmd_migrate_django_historical(args: argparse.Namespace) -> int:
-    symbols = _parse_csv(args.symbols) if args.symbols else None
-    sections = _parse_csv(args.sections) if args.sections else None
-    stats = migrate_django_historical(
-        _resolve_db(args.db),
-        section_keys=sections,
-        symbols=symbols,
-        limit=args.limit,
-        offset=args.offset,
-        skip_existing=not args.force,
-    )
-    migrated = sum(1 for row in stats if not row.get("skipped") and int(row.get("rows", 0) or 0) > 0)
-    print(json.dumps({"migrated": migrated, "results": stats}, indent=2))
-    return 0
-
-
-def cmd_migrate_django_prices(args: argparse.Namespace) -> int:
-    symbols = _parse_csv(args.symbols) if args.symbols else None
-    stats = migrate_django_fmp_prices(
-        _resolve_db(args.db),
-        symbols=symbols,
-        limit=args.limit,
-        offset=args.offset,
-        skip_existing=not args.force,
-    )
-    print(json.dumps({"migrated": len(stats), "results": stats}, indent=2))
-    return 0
-
-
-def cmd_separate_etfs(args: argparse.Namespace) -> int:
-    symbols = set(_parse_csv(args.symbols)) if args.symbols else None
-    stats = separate_etfs_from_equity(_resolve_db(args.db), symbols=symbols)
-    print(json.dumps({"separated": len(stats), "results": stats}, indent=2))
-    return 0
-
-
-def cmd_refresh_profiles(args: argparse.Namespace) -> int:
-    symbols = _parse_csv(args.symbols) if args.symbols else None
-    stats = refresh_equity_profiles_from_django_db(
-        _resolve_db(args.db),
-        providers=_parse_csv(args.providers),
-        symbols=symbols,
-        limit=args.limit,
-        offset=args.offset,
-        skip_existing=not args.force,
-    )
-    print(json.dumps({"refreshed": len(stats), "results": stats}, indent=2))
-    return 0
-
-
-def cmd_refresh_etf_profiles(args: argparse.Namespace) -> int:
-    symbols = _parse_csv(args.symbols) if args.symbols else None
-    stats = refresh_etf_profiles_from_django_db(
-        _resolve_db(args.db),
-        providers=_parse_csv(args.providers),
-        symbols=symbols,
-        limit=args.limit,
-        offset=args.offset,
-        skip_existing=not args.force,
-    )
-    print(json.dumps({"refreshed": len(stats), "results": stats}, indent=2))
-    return 0
-
-
-def cmd_refresh_yfinance_prices(args: argparse.Namespace) -> int:
-    symbols = _parse_csv(args.symbols) if args.symbols else None
-    stats = refresh_equity_yfinance_prices_from_django_db(
-        _resolve_db(args.db),
-        symbols=symbols,
-        limit=args.limit,
-        offset=args.offset,
-        start_date=args.start_date,
-        skip_existing=not args.force,
-    )
-    print(json.dumps({"refreshed": len(stats), "results": stats}, indent=2))
     return 0
 
 
@@ -371,25 +283,34 @@ def cmd_backfill_fixes(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_backfill_thetadata_options(args: argparse.Namespace) -> int:
+    log_path = Path(args.log).expanduser().resolve()
+    symbols = _parse_csv(args.symbols) if args.symbols else None
+    summary = backfill_thetadata_options(
+        symbols=symbols,
+        source=args.source,
+        start_date=args.start_date,
+        end_date=args.end_date or None,
+        max_dte=int(args.max_dte),
+        strike_range=int(args.strike_range),
+        limit=args.limit,
+        offset=int(args.offset),
+        skip_existing=not args.overwrite,
+        overwrite=bool(args.overwrite),
+        request_sleep=float(args.request_sleep),
+        us_only=not args.include_non_us,
+        progress_logger=log_thetadata_options_progress,
+    )
+    write_thetadata_options_log(summary, log_path=log_path)
+    print(json.dumps(summary, indent=2, default=str))
+    return 0 if int(summary.get("symbols_failed") or 0) == 0 else 1
+
+
 def cmd_separate_fundamentals(args: argparse.Namespace) -> int:
     symbols = _parse_csv(args.symbols) if args.symbols else None
     sections = _parse_csv(args.sections) if args.sections else None
     stats = separate_legacy_fundamentals(symbols=symbols, sections=sections, dry_run=args.dry_run)
     print(json.dumps({"migrated": len(stats), "results": stats}, indent=2))
-    return 0
-
-
-def cmd_refresh_etf_yfinance_prices(args: argparse.Namespace) -> int:
-    symbols = _parse_csv(args.symbols) if args.symbols else None
-    stats = refresh_etf_yfinance_prices_from_django_db(
-        _resolve_db(args.db),
-        symbols=symbols,
-        limit=args.limit,
-        offset=args.offset,
-        start_date=args.start_date,
-        skip_existing=not args.force,
-    )
-    print(json.dumps({"refreshed": len(stats), "results": stats}, indent=2))
     return 0
 
 
@@ -464,61 +385,6 @@ def build_parser() -> argparse.ArgumentParser:
     status = sub.add_parser("status", help="Show catalog state for a symbol")
     status.add_argument("symbol")
     status.set_defaults(func=cmd_status)
-
-    migrate_hist = sub.add_parser(
-        "migrate-django-historical",
-        help="Copy Django fmp_symbolsectionhistorical time series into per-section Arctic libraries",
-    )
-    migrate_hist.add_argument("--db", default=str(DEFAULT_DJANGO_DB))
-    migrate_hist.add_argument("--sections", default="")
-    migrate_hist.add_argument("--symbols", default="")
-    migrate_hist.add_argument("--limit", type=int, default=None)
-    migrate_hist.add_argument("--offset", type=int, default=0)
-    migrate_hist.add_argument("--force", action="store_true")
-    migrate_hist.set_defaults(func=cmd_migrate_django_historical)
-
-    migrate = sub.add_parser("migrate-django-prices", help="Copy Django FMP prices into equity or ETF Arctic libraries")
-    migrate.add_argument("--db", default=str(DEFAULT_DJANGO_DB))
-    migrate.add_argument("--symbols", default="")
-    migrate.add_argument("--limit", type=int, default=None)
-    migrate.add_argument("--offset", type=int, default=0)
-    migrate.add_argument("--force", action="store_true")
-    migrate.set_defaults(func=cmd_migrate_django_prices)
-
-    separate = sub.add_parser(
-        "separate-etfs",
-        help="Move ETF symbols out of equity Arctic/catalog into ETF libraries and tables",
-    )
-    separate.add_argument("--db", default=str(DEFAULT_DJANGO_DB))
-    separate.add_argument("--symbols", default="")
-    separate.set_defaults(func=cmd_separate_etfs)
-
-    profiles = sub.add_parser("refresh-profiles", help="Fetch equity profiles for Django equity universe")
-    profiles.add_argument("--db", default=str(DEFAULT_DJANGO_DB))
-    profiles.add_argument("--providers", default="yfinance")
-    profiles.add_argument("--symbols", default="")
-    profiles.add_argument("--force", action="store_true")
-    profiles.add_argument("--limit", type=int, default=None)
-    profiles.add_argument("--offset", type=int, default=0)
-    profiles.set_defaults(func=cmd_refresh_profiles)
-
-    etf_profiles = sub.add_parser("refresh-etf-profiles", help="Fetch ETF profiles for Django ETF universe")
-    etf_profiles.add_argument("--db", default=str(DEFAULT_DJANGO_DB))
-    etf_profiles.add_argument("--providers", default="yfinance")
-    etf_profiles.add_argument("--symbols", default="")
-    etf_profiles.add_argument("--force", action="store_true")
-    etf_profiles.add_argument("--limit", type=int, default=None)
-    etf_profiles.add_argument("--offset", type=int, default=0)
-    etf_profiles.set_defaults(func=cmd_refresh_etf_profiles)
-
-    yf_prices = sub.add_parser("refresh-yfinance-prices", help="Download equity Yahoo OHLCV for Django equity universe")
-    yf_prices.add_argument("--db", default=str(DEFAULT_DJANGO_DB))
-    yf_prices.add_argument("--symbols", default="")
-    yf_prices.add_argument("--start-date", default="1980-01-01")
-    yf_prices.add_argument("--limit", type=int, default=None)
-    yf_prices.add_argument("--offset", type=int, default=0)
-    yf_prices.add_argument("--force", action="store_true")
-    yf_prices.set_defaults(func=cmd_refresh_yfinance_prices)
 
     backfill_missing = sub.add_parser(
         "backfill-missing-fmp",
@@ -663,17 +529,40 @@ def build_parser() -> argparse.ArgumentParser:
     )
     backfill_macro_alt.set_defaults(func=cmd_backfill_macro_alt)
 
-    etf_yf_prices = sub.add_parser(
-        "refresh-etf-yfinance-prices",
-        help="Download ETF Yahoo OHLCV via OpenBB etf.historical for Django ETF universe",
+    backfill_thetadata = sub.add_parser(
+        "backfill-thetadata-options",
+        help="Batch download daily ThetaData EOD option chains for FMP underlyings in Arctic",
     )
-    etf_yf_prices.add_argument("--db", default=str(DEFAULT_DJANGO_DB))
-    etf_yf_prices.add_argument("--symbols", default="")
-    etf_yf_prices.add_argument("--start-date", default="1980-01-01")
-    etf_yf_prices.add_argument("--limit", type=int, default=None)
-    etf_yf_prices.add_argument("--offset", type=int, default=0)
-    etf_yf_prices.add_argument("--force", action="store_true")
-    etf_yf_prices.set_defaults(func=cmd_refresh_etf_yfinance_prices)
+    backfill_thetadata.add_argument(
+        "--source",
+        default="arctic-fmp",
+        choices=["arctic-fmp", "catalog"],
+        help="Symbol universe: Arctic prices library (FMP) or warehouse catalog metadata",
+    )
+    backfill_thetadata.add_argument("--symbols", default="", help="Optional comma-separated symbol override")
+    backfill_thetadata.add_argument("--start-date", default="2024-01-01")
+    backfill_thetadata.add_argument("--end-date", default="", help="Default: today (UTC)")
+    backfill_thetadata.add_argument("--max-dte", type=int, default=60)
+    backfill_thetadata.add_argument("--strike-range", type=int, default=10)
+    backfill_thetadata.add_argument("--limit", type=int, default=None)
+    backfill_thetadata.add_argument("--offset", type=int, default=0)
+    backfill_thetadata.add_argument("--overwrite", action="store_true", help="Re-download even if daily cache exists")
+    backfill_thetadata.add_argument(
+        "--include-non-us",
+        action="store_true",
+        help="Include international tickers (ThetaData options are US-only; default filters them out)",
+    )
+    backfill_thetadata.add_argument(
+        "--request-sleep",
+        type=float,
+        default=1.0,
+        help="Seconds to sleep between symbols (default: 1.0)",
+    )
+    backfill_thetadata.add_argument(
+        "--log",
+        default="~/.quant-warehouse/logs/backfill-thetadata-options.json",
+    )
+    backfill_thetadata.set_defaults(func=cmd_backfill_thetadata_options)
 
     return parser
 

@@ -61,6 +61,7 @@ SECTION_ROUTES: dict[str, str] = {
     "equity_calendar_dividend": "equity.calendar.dividend",
     "equity_calendar_splits": "equity.calendar.splits",
     "equity_calendar_ipo": "equity.calendar.ipo",
+    "options_eod": "derivatives.options.chains",
 }
 
 EQUITY_FUNDAMENTAL_ROUTE_SECTIONS: tuple[str, ...] = EQUITY_FUNDAMENTAL_SECTIONS
@@ -122,8 +123,9 @@ def fetch_openbb(
     if route is None:
         raise ValueError(f"Unknown section: {section}")
 
+    call_kwargs = dict(kwargs)
     try:
-        result = _call_route(route, symbol=symbol, provider=provider, **kwargs)
+        result = _call_route(route, symbol=symbol, provider=provider, **call_kwargs)
     except Exception as exc:
         if _is_empty_fetch_error(exc):
             return OpenBBFetchResult(
