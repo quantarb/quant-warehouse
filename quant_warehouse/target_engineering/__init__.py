@@ -1,0 +1,101 @@
+"""Target engineering utilities for labels and oracle trade targets."""
+
+from quant_warehouse.target_engineering.labels import (
+    add_action_labels,
+    add_binary_classification_labels,
+    add_rank_regression_labels,
+    build_label_panel,
+    build_oracle_labels,
+    build_trade_results,
+    deduplicate_labels,
+    generate_optimal_events,
+)
+from quant_warehouse.target_engineering.option_labels import (
+    OptionLabelResult,
+    OptionLabelSpec,
+    build_option_label_panel,
+    build_option_labels,
+    compute_return_covariance_matrix,
+    solve_long_only_mean_variance_weights,
+    solve_mean_variance_weights,
+)
+from quant_warehouse.target_engineering.option_dataset import (
+    OptionMlDatasetResult,
+    OptionMlDatasetSpec,
+    build_option_ml_dataset,
+    save_option_ml_dataset,
+)
+from quant_warehouse.target_engineering.thetadata_loader import (
+    ThetaDataDownloadSpec,
+    download_option_snapshots_for_range,
+    load_cached_snapshots_for_trade_window,
+    load_thetadata_option_snapshots,
+    normalize_thetadata_option_chain,
+)
+from quant_warehouse.target_engineering.operations import (
+    apply_trade_deduplication,
+    build_label_rows_from_completed_trades,
+    build_label_statistics,
+    trade_return_pct,
+)
+from quant_warehouse.target_engineering.specs import (
+    LabelBuildSpec,
+    OracleLabelResult,
+    TradeGenerationResult,
+    parse_k_list,
+)
+from quant_warehouse.target_engineering.strategy_solver import (
+    Trade,
+    solve_joint_trade_sequence_by_frequency,
+    solve_joint_trades_by_frequency,
+    solve_longs_by_frequency,
+    solve_optimal_joint_trade_sequence_generic,
+    solve_optimal_joint_trades_generic,
+    solve_optimal_trades_generic,
+    solve_shorts_by_frequency,
+    solve_trades_by_frequency,
+)
+
+__all__ = [
+    "LabelBuildSpec",
+    "OracleLabelResult",
+    "OptionLabelResult",
+    "OptionLabelSpec",
+    "OptionMlDatasetResult",
+    "OptionMlDatasetSpec",
+    "ThetaDataDownloadSpec",
+    "Trade",
+    "TradeGenerationResult",
+    "add_action_labels",
+    "add_binary_classification_labels",
+    "add_rank_regression_labels",
+    "apply_trade_deduplication",
+    "build_label_panel",
+    "build_label_rows_from_completed_trades",
+    "build_label_statistics",
+    "build_oracle_labels",
+    "build_option_label_panel",
+    "build_option_labels",
+    "build_option_ml_dataset",
+    "build_trade_results",
+    "download_option_snapshots_for_range",
+    "load_cached_snapshots_for_trade_window",
+    "save_option_ml_dataset",
+    "compute_return_covariance_matrix",
+    "solve_long_only_mean_variance_weights",
+    "solve_mean_variance_weights",
+    "deduplicate_labels",
+    "generate_optimal_events",
+    "parse_k_list",
+    "load_thetadata_option_snapshots",
+    "solve_joint_trade_sequence_by_frequency",
+    "solve_joint_trades_by_frequency",
+    "solve_longs_by_frequency",
+    "solve_optimal_joint_trade_sequence_generic",
+    "solve_optimal_joint_trades_generic",
+    "solve_optimal_trades_generic",
+    "solve_shorts_by_frequency",
+    "solve_trades_by_frequency",
+    "normalize_thetadata_option_chain",
+    "trade_return_pct",
+]
