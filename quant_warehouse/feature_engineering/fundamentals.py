@@ -8,10 +8,7 @@ import numpy as np
 import pandas as pd
 
 from quant_warehouse.features.broadcast import broadcast_asof_to_target_index
-from quant_warehouse.warehouse.sections import (
-    DJANGO_HISTORICAL_SECTION_MAP,
-    DJANGO_ONLY_FUNDAMENTAL_SECTIONS,
-)
+from quant_warehouse.warehouse.sections import LEGACY_FMP_SECTION_MAP
 
 
 SECTION_PREFIXES: dict[str, str] = {
@@ -47,28 +44,21 @@ def get_warehouse():
     return Warehouse()
 
 
-def warehouse_section_for_django(section_key: str, *, include_django_only: bool = False) -> str | None:
+def warehouse_section_for_legacy_key(section_key: str) -> str | None:
     key = str(section_key).strip()
-    section = DJANGO_HISTORICAL_SECTION_MAP.get(key)
-    if section is None:
-        return None
-    if not include_django_only and section in DJANGO_ONLY_FUNDAMENTAL_SECTIONS:
-        return None
-    return section
+    return LEGACY_FMP_SECTION_MAP.get(key)
 
 
-def warehouse_sections_for_django_keys(
-    django_section_keys: Iterable[str],
-    *,
-    include_django_only: bool = False,
+def warehouse_sections_for_legacy_keys(
+    legacy_section_keys: Iterable[str],
 ) -> tuple[str, ...]:
     mapped: list[str] = []
     seen: set[str] = set()
-    for django_key in django_section_keys:
-        key = str(django_key or "").strip()
+    for legacy_key in legacy_section_keys:
+        key = str(legacy_key or "").strip()
         if not key or key == "prices_div_adj":
             continue
-        warehouse_key = warehouse_section_for_django(key, include_django_only=include_django_only)
+        warehouse_key = warehouse_section_for_legacy_key(key)
         if not warehouse_key or warehouse_key in seen:
             continue
         seen.add(warehouse_key)
@@ -76,37 +66,30 @@ def warehouse_sections_for_django_keys(
     return tuple(mapped)
 
 
-def django_only_sections_for_refresh(django_section_keys: Iterable[str]) -> tuple[str, ...]:
+def unsupported_legacy_sections_for_refresh(legacy_section_keys: Iterable[str]) -> tuple[str, ...]:
     return tuple(
         str(key).strip()
-        for key in django_section_keys
+        for key in legacy_section_keys
         if str(key).strip()
         and str(key).strip() != "prices_div_adj"
-        and (
-            DJANGO_HISTORICAL_SECTION_MAP.get(str(key).strip()) is None
-            or DJANGO_HISTORICAL_SECTION_MAP.get(str(key).strip()) in DJANGO_ONLY_FUNDAMENTAL_SECTIONS
-        )
+        and LEGACY_FMP_SECTION_MAP.get(str(key).strip()) is None
     )
 
 
-def warehouse_sections_for_refresh(django_section_keys: Iterable[str]) -> tuple[str, ...]:
-    return warehouse_sections_for_django_keys(django_section_keys, include_django_only=False)
+def warehouse_sections_for_refresh(legacy_section_keys: Iterable[str]) -> tuple[str, ...]:
+    return warehouse_sections_for_legacy_keys(legacy_section_keys)
 
 
 def load_warehouse_fundamental_frame(
     symbol: str,
-    django_section_key: str,
+    legacy_section_key: str,
     *,
     provider: str = "fmp",
     start_date: str | None = None,
     end_date: str | None = None,
-    include_django_only: bool = False,
     warehouse=None,
 ) -> pd.DataFrame:
-    section = warehouse_section_for_django(
-        django_section_key,
-        include_django_only=include_django_only,
-    )
+    section = warehouse_section_for_legacy_key(legacy_section_key)
     if section is None:
         return pd.DataFrame()
     wh = warehouse or get_warehouse()
@@ -121,7 +104,7 @@ def load_warehouse_fundamental_frame(
 
 def warehouse_section_to_payload_rows(
     symbol: str,
-    django_section_key: str,
+    legacy_section_key: str,
     *,
     prefix: str,
     keep_fields: Iterable[str] | None = None,
@@ -129,16 +112,14 @@ def warehouse_section_to_payload_rows(
     start_date: str | None = None,
     end_date: str | None = None,
     provider: str = "fmp",
-    include_django_only: bool = False,
     warehouse=None,
 ) -> list[dict[str, Any]]:
     frame = load_warehouse_fundamental_frame(
         symbol,
-        django_section_key,
+        legacy_section_key,
         provider=provider,
         start_date=start_date,
         end_date=end_date,
-        include_django_only=include_django_only,
         warehouse=warehouse,
     )
     if frame is None or frame.empty:
@@ -175,7 +156,7 @@ def warehouse_section_to_payload_rows(
 
 def warehouse_section_to_indexed_frame(
     symbol: str,
-    django_section_key: str,
+    legacy_section_key: str,
     *,
     prefix: str,
     keep_fields: Iterable[str] | None = None,
@@ -183,19 +164,17 @@ def warehouse_section_to_indexed_frame(
     start_date: str | None = None,
     end_date: str | None = None,
     provider: str = "fmp",
-    include_django_only: bool = False,
     warehouse=None,
 ) -> pd.DataFrame:
     rows = warehouse_section_to_payload_rows(
         symbol,
-        django_section_key,
+        legacy_section_key,
         prefix=prefix,
         keep_fields=keep_fields,
         filing_lag_days=filing_lag_days,
         start_date=start_date,
         end_date=end_date,
         provider=provider,
-        include_django_only=include_django_only,
         warehouse=warehouse,
     )
     if not rows:

@@ -19,7 +19,7 @@ from quant_warehouse.feature_engineering.fundamentals import (
     broadcast_fundamentals_to_daily,
     fetch_fundamentals_data,
     section_prefix,
-    warehouse_section_for_django,
+    warehouse_section_for_legacy_key,
     warehouse_section_to_indexed_frame,
     warehouse_section_to_payload_rows,
 )
@@ -57,7 +57,7 @@ __all__ = [
     "fetch_fundamentals_data",
     "load_or_compute_features_daily",
     "section_prefix",
-    "warehouse_section_for_django",
+    "warehouse_section_for_legacy_key",
     "warehouse_section_to_indexed_frame",
     "warehouse_section_to_payload_rows",
 ]
