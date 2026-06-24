@@ -88,13 +88,10 @@ EXTENDED_FUNDAMENTAL_SECTIONS: tuple[str, ...] = (
     "senate_trading",
 )
 
-DJANGO_HISTORICAL_SECTION_MAP: dict[str, str] = {
+LEGACY_FMP_SECTION_MAP: dict[str, str] = {
     "income_statement": "income",
     "balance_sheet": "balance",
     "cash_flow": "cash",
-    "income_statement_ttm": "income_ttm",
-    "balance_sheet_ttm": "balance_ttm",
-    "cash_flow_ttm": "cash_ttm",
     "key_metrics": "metrics",
     "ratios": "ratios",
     "income_statement_growth": "income_growth",
@@ -106,15 +103,6 @@ DJANGO_HISTORICAL_SECTION_MAP: dict[str, str] = {
     "financial_growth": "financial_growth",
     "senate_trading": "senate_trading",
 }
-
-# Historical Django sections with no OpenBB route used for warehouse refresh.
-DJANGO_ONLY_FUNDAMENTAL_SECTIONS: frozenset[str] = frozenset(
-    {
-        "income_ttm",
-        "balance_ttm",
-        "cash_ttm",
-    }
-)
 
 ALL_FUNDAMENTAL_SECTIONS: frozenset[str] = frozenset(
     (

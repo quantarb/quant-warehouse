@@ -5,16 +5,9 @@ import pandas as pd
 from quant_warehouse.feature_engineering import fundamentals
 
 
-def test_warehouse_section_mapping_excludes_ttm_by_default():
-    assert fundamentals.warehouse_section_for_django("key_metrics") == "metrics"
-    assert fundamentals.warehouse_section_for_django("income_statement_ttm") is None
-    assert (
-        fundamentals.warehouse_section_for_django(
-            "income_statement_ttm",
-            include_django_only=True,
-        )
-        == "income_ttm"
-    )
+def test_warehouse_section_mapping_excludes_removed_ttm_sections():
+    assert fundamentals.warehouse_section_for_legacy_key("key_metrics") == "metrics"
+    assert fundamentals.warehouse_section_for_legacy_key("income_statement_ttm") is None
 
 
 def test_warehouse_section_to_indexed_frame_prefixes_columns(monkeypatch):
