@@ -65,22 +65,30 @@ def test_split_snapshots_by_date_groups_rows() -> None:
 class _MemoryBackend:
     def __init__(self, initial: pd.DataFrame | None = None) -> None:
         self.frame = initial
-        self.writes: list[tuple[str, str, pd.DataFrame]] = []
+        self.writes: list[tuple[str, str, pd.DataFrame, bool]] = []
 
     def read(self, library: str, symbol: str) -> pd.DataFrame | None:
         assert library == OPTIONS_THETADATA_EOD_LIBRARY
         return None if self.frame is None else self.frame.copy()
 
-    def write(self, library: str, symbol: str, df: pd.DataFrame) -> None:
+    def write(
+        self,
+        library: str,
+        symbol: str,
+        df: pd.DataFrame,
+        *,
+        prune_previous_versions: bool = False,
+    ) -> None:
         assert library == OPTIONS_THETADATA_EOD_LIBRARY
         self.frame = df.copy()
-        self.writes.append((library, symbol, df.copy()))
+        self.writes.append((library, symbol, df.copy(), prune_previous_versions))
 
 
 def test_arctic_option_chain_roundtrip() -> None:
     frame = normalize_thetadata_option_chain(_raw_frame().iloc[[0]])
     backend = _MemoryBackend()
     assert write_option_chain_arctic("AAPL", frame, backend=backend) == "arctic://options_thetadata_eod/AAPL"
+    assert backend.writes[0][3] is True
     loaded = read_option_chain_arctic("AAPL", start_date="2025-01-06", end_date="2025-01-06", backend=backend)
     assert len(loaded) == 1
     assert loaded["contract_symbol"].iloc[0] == "AAPL_put_20250124_230"

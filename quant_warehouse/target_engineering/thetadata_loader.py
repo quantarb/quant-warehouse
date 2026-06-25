@@ -205,7 +205,7 @@ def write_option_chain_arctic(
     existing = backend.read(OPTIONS_THETADATA_EOD_LIBRARY, storage_symbol) if merge else None
     merged = _merge_option_chain_upsert(existing, incoming)
     if not merged.empty:
-        backend.write(OPTIONS_THETADATA_EOD_LIBRARY, storage_symbol, merged)
+        backend.write(OPTIONS_THETADATA_EOD_LIBRARY, storage_symbol, merged, prune_previous_versions=True)
     return _arctic_ref(symbol)
 
 

@@ -16,7 +16,14 @@ class StorageBackend(Protocol):
 
     def read(self, library: str, symbol: str) -> pd.DataFrame | None: ...
 
-    def write(self, library: str, symbol: str, df: pd.DataFrame) -> None: ...
+    def write(
+        self,
+        library: str,
+        symbol: str,
+        df: pd.DataFrame,
+        *,
+        prune_previous_versions: bool = True,
+    ) -> None: ...
 
 
 class ArcticBackend:
@@ -52,14 +59,21 @@ class ArcticBackend:
                 df.index = pd.to_datetime(df.index, errors="coerce")
             return df.sort_index()
 
-    def write(self, library: str, symbol: str, df: pd.DataFrame) -> None:
+    def write(
+        self,
+        library: str,
+        symbol: str,
+        df: pd.DataFrame,
+        *,
+        prune_previous_versions: bool = True,
+    ) -> None:
         if df.empty:
             return
         if not isinstance(df.index, pd.DatetimeIndex):
             raise ValueError("DataFrame index must be DatetimeIndex")
         with self._storage_guard():
             lib = self._library(library)
-            lib.write(symbol, df.sort_index())
+            lib.write(symbol, df.sort_index(), prune_previous_versions=prune_previous_versions)
 
     def _storage_guard(self):
         return self._storage_lock or nullcontext()
