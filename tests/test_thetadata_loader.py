@@ -256,3 +256,4 @@ def test_download_option_snapshots_for_range_fetches_only_missing_business_range
     assert manifest["contracts_total"] == 3
     assert manifest["cached_days"] == 1
     assert manifest["fetched_rows"] == 2
+    assert len(backend.writes) == 1

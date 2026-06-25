@@ -453,8 +453,6 @@ def _download_and_cache_snapshots(
             if ts not in requested or frame.empty:
                 continue
             snapshots[ts] = frame
-            if backend is not None:
-                paths.append(write_option_chain_arctic(symbol, frame, backend=backend, merge=True))
 
     missing_dates = [ts for ts in requested_dates if ts not in snapshots]
     for ts in missing_dates:
@@ -469,8 +467,10 @@ def _download_and_cache_snapshots(
             if day_ts not in requested or frame.empty:
                 continue
             snapshots[day_ts] = frame
-            if backend is not None:
-                paths.append(write_option_chain_arctic(symbol, frame, backend=backend, merge=True))
+
+    if backend is not None and snapshots:
+        combined = pd.concat(snapshots.values(), ignore_index=True, sort=False)
+        paths.append(write_option_chain_arctic(symbol, combined, backend=backend, merge=not overwrite))
 
     return snapshots, fetched_rows, paths
 
