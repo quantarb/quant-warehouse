@@ -36,7 +36,17 @@ def run_symbol_workers(
 
     def _run(symbol: str) -> None:
         nonlocal completed
-        rows = worker(symbol)
+        try:
+            rows = worker(symbol)
+        except Exception as exc:
+            rows = [
+                {
+                    "symbol": symbol,
+                    "status": "error",
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                }
+            ]
         with progress_lock:
             results.extend(rows)
             completed += 1

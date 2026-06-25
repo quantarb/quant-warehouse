@@ -36,3 +36,19 @@ def test_run_symbol_workers_runs_concurrently():
     results = run_symbol_workers(["A", "B", "C", "D"], worker, max_workers=4)
     assert len(results) == 4
     assert max_active > 1
+
+
+def test_run_symbol_workers_records_unhandled_symbol_errors():
+    def worker(symbol: str) -> list[dict[str, object]]:
+        if symbol == "B":
+            raise RuntimeError("catalog unavailable")
+        return [{"symbol": symbol, "status": "updated"}]
+
+    results = run_symbol_workers(["A", "B", "C"], worker, max_workers=2)
+    by_symbol = {str(row["symbol"]): row for row in results}
+
+    assert by_symbol["A"]["status"] == "updated"
+    assert by_symbol["B"]["status"] == "error"
+    assert by_symbol["B"]["error"] == "catalog unavailable"
+    assert by_symbol["B"]["error_type"] == "RuntimeError"
+    assert by_symbol["C"]["status"] == "updated"

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+import time
 from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -54,9 +55,19 @@ class CatalogStore:
         return self._storage_lock or nullcontext()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        return conn
+        last_error: sqlite3.OperationalError | None = None
+        for attempt in range(3):
+            try:
+                self.db_path.parent.mkdir(parents=True, exist_ok=True)
+                conn = sqlite3.connect(self.db_path, timeout=60.0)
+                conn.row_factory = sqlite3.Row
+                return conn
+            except sqlite3.OperationalError as exc:
+                last_error = exc
+                if "unable to open database file" not in str(exc).lower() or attempt == 2:
+                    raise
+                time.sleep(0.2 * (attempt + 1))
+        raise last_error or sqlite3.OperationalError(f"unable to open database file: {self.db_path}")
 
     def _init_schema(self) -> None:
         with self._connect() as conn:
