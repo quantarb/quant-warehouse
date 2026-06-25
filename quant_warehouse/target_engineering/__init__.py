@@ -50,11 +50,16 @@ from quant_warehouse.target_engineering.option_dataset import (
     save_option_ml_dataset,
 )
 from quant_warehouse.target_engineering.thetadata_loader import (
+    OPTIONS_THETADATA_EOD_LIBRARY,
     ThetaDataDownloadSpec,
     download_option_snapshots_for_range,
     load_cached_snapshots_for_trade_window,
     load_thetadata_option_snapshots,
     normalize_thetadata_option_chain,
+    option_chain_range_cached,
+    option_chain_snapshots_cached,
+    read_option_chain_arctic,
+    write_option_chain_arctic,
 )
 from quant_warehouse.target_engineering.operations import (
     apply_trade_deduplication,
@@ -93,6 +98,7 @@ __all__ = [
     "OptionLabelSpec",
     "OptionMlDatasetResult",
     "OptionMlDatasetSpec",
+    "OPTIONS_THETADATA_EOD_LIBRARY",
     "ThetaDataDownloadSpec",
     "Trade",
     "TradeGenerationResult",
@@ -119,6 +125,9 @@ __all__ = [
     "fetch_fmp_event_pair_family",
     "fetch_fmp_event_pairs",
     "load_cached_snapshots_for_trade_window",
+    "option_chain_range_cached",
+    "option_chain_snapshots_cached",
+    "read_option_chain_arctic",
     "save_option_ml_dataset",
     "compute_return_covariance_matrix",
     "solve_long_only_mean_variance_weights",
@@ -140,4 +149,5 @@ __all__ = [
     "solve_trades_by_frequency",
     "normalize_thetadata_option_chain",
     "trade_return_pct",
+    "write_option_chain_arctic",
 ]

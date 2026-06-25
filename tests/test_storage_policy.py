@@ -1,0 +1,52 @@
+from __future__ import annotations
+
+import pandas as pd
+
+from quant_warehouse.target_engineering.thetadata_loader import (
+    OPTIONS_THETADATA_EOD_LIBRARY,
+    download_option_snapshots_for_range,
+)
+
+
+def test_default_thetadata_option_download_uses_arctic_paths(monkeypatch) -> None:
+    def _fake_fetch(symbol, start_date, end_date, **kwargs):
+        return pd.DataFrame(
+            [
+                {
+                    "symbol": symbol,
+                    "expiration": "2025-01-24",
+                    "strike": 230.0,
+                    "right": "PUT",
+                    "created": f"{pd.Timestamp(start_date).date()} 17:00:00-05:00",
+                    "bid": 1.0,
+                    "ask": 1.2,
+                }
+            ]
+        )
+
+    written: list[tuple[str, pd.DataFrame]] = []
+
+    class _Backend:
+        def read(self, library: str, symbol: str) -> pd.DataFrame | None:
+            assert library == OPTIONS_THETADATA_EOD_LIBRARY
+            return None
+
+        def write(self, library: str, symbol: str, df: pd.DataFrame) -> None:
+            assert library == OPTIONS_THETADATA_EOD_LIBRARY
+            written.append((symbol, df))
+
+    monkeypatch.setattr(
+        "quant_warehouse.target_engineering.thetadata_loader.fetch_option_history_eod",
+        _fake_fetch,
+    )
+    monkeypatch.setattr(
+        "quant_warehouse.target_engineering.thetadata_loader.open_backend",
+        lambda *args, **kwargs: _Backend(),
+    )
+
+    manifest = download_option_snapshots_for_range("AAPL", "2025-01-06", "2025-01-06")
+
+    assert manifest["paths"] == [f"arctic://{OPTIONS_THETADATA_EOD_LIBRARY}/AAPL"]
+    assert written
+    assert written[0][0] == "AAPL"
+    assert "snapshot_date" in written[0][1].columns

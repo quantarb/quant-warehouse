@@ -1,19 +1,22 @@
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from datetime import date
-from pathlib import Path
 from typing import Any, Iterator, Literal, Sequence
 
 import pandas as pd
+from pandas.api.types import is_object_dtype, is_string_dtype
 
 from quant_warehouse.config import WarehouseConfig
+from quant_warehouse.ingest.credentials import resolve_thetadata_api_key
 from quant_warehouse.ingest.openbb_fetch import fetch_openbb
+from quant_warehouse.warehouse.backend import ArcticBackend, open_backend
 
 # ThetaData EOD history rejects spans longer than 365 calendar days.
 THETADATA_MAX_EOD_SPAN_DAYS = 364
 THETADATA_BACKFILL_WINDOW_DAYS = 31
+OPTIONS_THETADATA_EOD_LIBRARY = "options_thetadata_eod"
+OPTIONS_THETADATA_PROVIDER = "thetadata"
 
 
 @dataclass(frozen=True)
@@ -34,13 +37,6 @@ class ThetaDataDownloadSpec:
     dataframe_type: str = "pandas"
     require_bid_ask: bool = True
     min_ask: float = 0.01
-
-
-def resolve_thetadata_options_dir(*, config: WarehouseConfig | None = None) -> Path:
-    config = config or WarehouseConfig.from_env()
-    path = config.home / "options" / "thetadata"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
 
 
 def _iter_eod_date_chunks(
@@ -73,21 +69,30 @@ def fetch_option_history_eod(
     download_spec = spec or ThetaDataDownloadSpec()
     frames: list[pd.DataFrame] = []
     for chunk_start, chunk_end in _iter_eod_date_chunks(start_date, end_date):
-        result = fetch_openbb(
-            "options_eod",
-            symbol=str(symbol).upper(),
-            provider="thetadata",
-            start_date=chunk_start,
-            end_date=chunk_end,
-            expiration=download_spec.expiration,
-            max_dte=int(download_spec.max_dte),
-            strike_range=int(download_spec.strike_range),
-            right=download_spec.right,
-            dataframe_type=download_spec.dataframe_type,
-            require_bid_ask=download_spec.require_bid_ask,
-            min_ask=download_spec.min_ask,
-        )
-        frame = result.df.copy()
+        try:
+            result = fetch_openbb(
+                "options_eod",
+                symbol=str(symbol).upper(),
+                provider="thetadata",
+                start_date=chunk_start,
+                end_date=chunk_end,
+                expiration=download_spec.expiration,
+                max_dte=int(download_spec.max_dte),
+                strike_range=int(download_spec.strike_range),
+                right=download_spec.right,
+                dataframe_type=download_spec.dataframe_type,
+                require_bid_ask=download_spec.require_bid_ask,
+                min_ask=download_spec.min_ask,
+            )
+            frame = result.df.copy()
+        except Exception:
+            frame = _fetch_option_history_eod_sdk(
+                symbol,
+                chunk_start,
+                chunk_end,
+                api_key=api_key,
+                spec=download_spec,
+            )
         if not frame.empty:
             frames.append(frame)
 
@@ -99,6 +104,41 @@ def fetch_option_history_eod(
         require_bid_ask=download_spec.require_bid_ask,
         min_ask=download_spec.min_ask,
     )
+
+
+def _fetch_option_history_eod_sdk(
+    symbol: str,
+    start_date: date,
+    end_date: date,
+    *,
+    api_key: str | None,
+    spec: ThetaDataDownloadSpec,
+) -> pd.DataFrame:
+    """Fetch ThetaData EOD option history directly when OpenBB has no provider."""
+
+    try:
+        from thetadata import ThetaClient
+    except ImportError as exc:
+        raise ImportError("Install quant-warehouse[thetadata] to download ThetaData options") from exc
+
+    resolved_api_key = api_key or resolve_thetadata_api_key(required=True)
+    client = ThetaClient(
+        api_key=resolved_api_key,
+        dataframe_type=spec.dataframe_type,
+        dotenv_path=".env",
+    )
+    frame = client.option_history_eod(
+        symbol=str(symbol).upper(),
+        expiration=spec.expiration,
+        start_date=start_date,
+        end_date=end_date,
+        max_dte=int(spec.max_dte),
+        strike_range=int(spec.strike_range),
+        right=spec.right,
+    )
+    if frame is None:
+        return pd.DataFrame()
+    return frame.to_pandas() if hasattr(frame, "to_pandas") else pd.DataFrame(frame)
 
 
 def split_snapshots_by_date(df: pd.DataFrame) -> dict[pd.Timestamp, pd.DataFrame]:
@@ -119,44 +159,99 @@ def split_snapshots_by_date(df: pd.DataFrame) -> dict[pd.Timestamp, pd.DataFrame
     return dict(sorted(snapshots.items(), key=lambda item: item[0]))
 
 
-def snapshot_cache_path(
+def option_chain_storage_symbol(symbol: str) -> str:
+    return str(symbol).strip().upper()
+
+
+def read_option_chain_arctic(
     symbol: str,
-    snapshot_date: date | str | pd.Timestamp,
     *,
-    options_dir: Path | None = None,
-) -> Path:
-    root = options_dir or resolve_thetadata_options_dir()
-    snap = pd.Timestamp(snapshot_date).date().isoformat()
-    return root / str(symbol).upper() / f"{snap}.parquet"
+    start_date: date | str | pd.Timestamp | None = None,
+    end_date: date | str | pd.Timestamp | None = None,
+    backend: ArcticBackend | None = None,
+    config: WarehouseConfig | None = None,
+) -> pd.DataFrame:
+    backend = backend or open_backend(config or WarehouseConfig.from_env())
+    frame = backend.read(OPTIONS_THETADATA_EOD_LIBRARY, option_chain_storage_symbol(symbol))
+    if frame is None or frame.empty:
+        return pd.DataFrame()
+    out = frame.copy()
+    if "snapshot_date" in out.columns:
+        snapshot_dates = _normalize_snapshot_dates(out["snapshot_date"])
+    else:
+        snapshot_dates = _normalize_snapshot_dates(pd.Series(out.index, index=out.index))
+        out["snapshot_date"] = snapshot_dates
+    if start_date is not None:
+        out = out.loc[snapshot_dates >= pd.Timestamp(start_date).normalize()]
+    if end_date is not None:
+        snapshot_dates = _normalize_snapshot_dates(out["snapshot_date"])
+        out = out.loc[snapshot_dates <= pd.Timestamp(end_date).normalize()]
+    return out.sort_index()
 
 
-def write_snapshot_cache(
+def write_option_chain_arctic(
     symbol: str,
-    snapshot_date: date | str | pd.Timestamp,
     frame: pd.DataFrame,
     *,
-    options_dir: Path | None = None,
-) -> Path:
-    path = snapshot_cache_path(symbol, snapshot_date, options_dir=options_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    out = frame.copy()
-    if "snapshot_date" not in out.columns:
-        out["snapshot_date"] = pd.Timestamp(snapshot_date).normalize()
-    out.to_parquet(path, index=False)
-    return path
+    backend: ArcticBackend | None = None,
+    config: WarehouseConfig | None = None,
+    merge: bool = True,
+) -> str:
+    if frame is None or frame.empty:
+        return _arctic_ref(symbol)
+    backend = backend or open_backend(config or WarehouseConfig.from_env())
+    storage_symbol = option_chain_storage_symbol(symbol)
+    incoming = _prepare_option_chain_for_arctic(frame)
+    existing = backend.read(OPTIONS_THETADATA_EOD_LIBRARY, storage_symbol) if merge else None
+    merged = _merge_option_chain_upsert(existing, incoming)
+    if not merged.empty:
+        backend.write(OPTIONS_THETADATA_EOD_LIBRARY, storage_symbol, merged)
+    return _arctic_ref(symbol)
 
 
-def read_snapshot_cache(
+def option_chain_snapshots_cached(
     symbol: str,
-    snapshot_date: date | str | pd.Timestamp,
+    snapshot_dates: Sequence[date | str | pd.Timestamp],
     *,
-    options_dir: Path | None = None,
-) -> pd.DataFrame | None:
-    path = snapshot_cache_path(symbol, snapshot_date, options_dir=options_dir)
-    if not path.exists():
-        return None
-    frame = pd.read_parquet(path)
-    return normalize_thetadata_option_chain(frame, require_bid_ask=True)
+    backend: ArcticBackend | None = None,
+    config: WarehouseConfig | None = None,
+) -> dict[pd.Timestamp, pd.DataFrame]:
+    dates = [pd.Timestamp(value).normalize() for value in snapshot_dates]
+    if not dates:
+        return {}
+    frame = read_option_chain_arctic(
+        symbol,
+        start_date=min(dates),
+        end_date=max(dates),
+        backend=backend,
+        config=config,
+    )
+    if frame.empty:
+        return {}
+    requested = set(dates)
+    snapshots: dict[pd.Timestamp, pd.DataFrame] = {}
+    snapshot_dates = _normalize_snapshot_dates(frame["snapshot_date"])
+    for ts, group in frame.groupby(snapshot_dates, sort=True):
+        normalized = pd.Timestamp(ts).normalize()
+        if normalized in requested:
+            out = group.reset_index(drop=True)
+            snapshots[normalized] = normalize_thetadata_option_chain(out, require_bid_ask=True)
+    return snapshots
+
+
+def option_chain_range_cached(
+    symbol: str,
+    start_date: date | str | pd.Timestamp,
+    end_date: date | str | pd.Timestamp,
+    *,
+    backend: ArcticBackend | None = None,
+    config: WarehouseConfig | None = None,
+) -> bool:
+    dates = [ts.normalize() for ts in pd.date_range(start_date, end_date, freq="B")]
+    if not dates:
+        return False
+    cached = option_chain_snapshots_cached(symbol, dates, backend=backend, config=config)
+    return len(cached) == len(dates)
 
 
 def load_thetadata_option_snapshots(
@@ -168,11 +263,10 @@ def load_thetadata_option_snapshots(
     strike_range: int = 10,
     dataframe_type: str = "pandas",
     use_cache: bool = True,
-    options_dir: Path | None = None,
     download_spec: ThetaDataDownloadSpec | None = None,
     download_missing: bool = True,
 ) -> dict[pd.Timestamp, pd.DataFrame]:
-    """Load EOD option snapshots keyed by date, using parquet cache when available."""
+    """Load EOD option snapshots keyed by date, using ArcticDB as the cache/store."""
 
     spec = download_spec or ThetaDataDownloadSpec(
         max_dte=max_dte,
@@ -180,15 +274,23 @@ def load_thetadata_option_snapshots(
         dataframe_type=dataframe_type,
     )
     normalized_dates = [pd.Timestamp(value).normalize() for value in snapshot_dates]
+    arctic_backend = open_backend(WarehouseConfig.from_env()) if use_cache else None
     snapshots: dict[pd.Timestamp, pd.DataFrame] = {}
     missing: list[pd.Timestamp] = []
 
+    if arctic_backend is not None:
+        snapshots.update(
+            option_chain_snapshots_cached(
+                symbol,
+                normalized_dates,
+                backend=arctic_backend,
+            )
+        )
+
     for ts in normalized_dates:
-        cached = read_snapshot_cache(symbol, ts, options_dir=options_dir) if use_cache else None
-        if cached is not None and not cached.empty:
-            snapshots[ts] = cached
-        else:
-            missing.append(ts)
+        if ts in snapshots:
+            continue
+        missing.append(ts)
 
     if missing and download_missing:
         fetched = fetch_option_history_eod(
@@ -200,8 +302,8 @@ def load_thetadata_option_snapshots(
         )
         for ts, frame in split_snapshots_by_date(fetched).items():
             snapshots[ts] = frame
-            if use_cache and not frame.empty:
-                write_snapshot_cache(symbol, ts, frame, options_dir=options_dir)
+            if use_cache and not frame.empty and arctic_backend is not None:
+                write_option_chain_arctic(symbol, frame, backend=arctic_backend)
 
     return {ts: snapshots[ts] for ts in normalized_dates if ts in snapshots}
 
@@ -213,22 +315,29 @@ def download_option_snapshots_for_range(
     *,
     api_key: str | None = None,
     spec: ThetaDataDownloadSpec | None = None,
-    options_dir: Path | None = None,
     overwrite: bool = False,
 ) -> dict[str, Any]:
-    """Download and cache one parquet file per trading day in [start_date, end_date]."""
+    """Download and cache daily ThetaData EOD option chains in ArcticDB."""
 
     download_spec = spec or ThetaDataDownloadSpec()
-    root = options_dir or resolve_thetadata_options_dir()
+    arctic_backend = open_backend(WarehouseConfig.from_env())
     start = pd.Timestamp(start_date).normalize()
     end = pd.Timestamp(end_date).normalize()
 
     requested_dates = [ts.normalize() for ts in pd.date_range(start, end, freq="B")]
-    cached = {} if overwrite else _read_cached_snapshots(symbol, requested_dates, options_dir=root)
+    cached = (
+        {}
+        if overwrite
+        else _read_cached_snapshots(
+            symbol,
+            requested_dates,
+            backend=arctic_backend,
+        )
+    )
     missing_dates = [ts for ts in requested_dates if ts not in cached]
 
     if not requested_dates or not missing_dates:
-        paths = [str(snapshot_cache_path(symbol, ts, options_dir=root)) for ts in cached]
+        paths = [_arctic_ref(symbol) for _ts in cached]
         return {
             "symbol": str(symbol).upper(),
             "start_date": start.date().isoformat(),
@@ -247,11 +356,11 @@ def download_option_snapshots_for_range(
         missing_dates,
         api_key=api_key,
         spec=download_spec,
-        options_dir=root,
+        backend=arctic_backend,
         overwrite=overwrite,
     )
     snapshots = {**cached, **snapshots}
-    paths = [str(snapshot_cache_path(symbol, ts, options_dir=root)) for ts in snapshots]
+    paths = [_arctic_ref(symbol) for _ts in snapshots]
 
     manifest = {
         "symbol": str(symbol).upper(),
@@ -265,8 +374,6 @@ def download_option_snapshots_for_range(
         "paths": paths,
         "spec": _download_spec_manifest(download_spec),
     }
-    manifest_path = root / str(symbol).upper() / f"manifest_{start.date().isoformat()}_{end.date().isoformat()}.json"
-    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return manifest
 
 
@@ -274,14 +381,13 @@ def _read_cached_snapshots(
     symbol: str,
     requested_dates: Sequence[pd.Timestamp],
     *,
-    options_dir: Path,
+    backend: ArcticBackend | None = None,
 ) -> dict[pd.Timestamp, pd.DataFrame]:
-    snapshots: dict[pd.Timestamp, pd.DataFrame] = {}
-    for ts in requested_dates:
-        cached = read_snapshot_cache(symbol, ts, options_dir=options_dir)
-        if cached is not None and not cached.empty:
-            snapshots[ts.normalize()] = cached
-    return snapshots
+    if backend is not None:
+        arctic = option_chain_snapshots_cached(symbol, requested_dates, backend=backend)
+        if arctic:
+            return arctic
+    return {}
 
 
 def _iter_contiguous_business_date_ranges(
@@ -329,7 +435,7 @@ def _download_and_cache_snapshots(
     *,
     api_key: str | None,
     spec: ThetaDataDownloadSpec,
-    options_dir: Path,
+    backend: ArcticBackend | None,
     overwrite: bool,
 ) -> tuple[dict[pd.Timestamp, pd.DataFrame], int, list[str]]:
     snapshots: dict[pd.Timestamp, pd.DataFrame] = {}
@@ -347,8 +453,8 @@ def _download_and_cache_snapshots(
             if ts not in requested or frame.empty:
                 continue
             snapshots[ts] = frame
-            if overwrite or read_snapshot_cache(symbol, ts, options_dir=options_dir) is None:
-                paths.append(str(write_snapshot_cache(symbol, ts, frame, options_dir=options_dir)))
+            if backend is not None:
+                paths.append(write_option_chain_arctic(symbol, frame, backend=backend, merge=True))
 
     missing_dates = [ts for ts in requested_dates if ts not in snapshots]
     for ts in missing_dates:
@@ -363,8 +469,8 @@ def _download_and_cache_snapshots(
             if day_ts not in requested or frame.empty:
                 continue
             snapshots[day_ts] = frame
-            if overwrite or read_snapshot_cache(symbol, day_ts, options_dir=options_dir) is None:
-                paths.append(str(write_snapshot_cache(symbol, day_ts, frame, options_dir=options_dir)))
+            if backend is not None:
+                paths.append(write_option_chain_arctic(symbol, frame, backend=backend, merge=True))
 
     return snapshots, fetched_rows, paths
 
@@ -374,7 +480,6 @@ def load_cached_snapshots_for_trade_window(
     entry_date: date | str | pd.Timestamp,
     exit_date: date | str | pd.Timestamp,
     *,
-    options_dir: Path | None = None,
     api_key: str | None = None,
     spec: ThetaDataDownloadSpec | None = None,
     download_missing: bool = True,
@@ -391,7 +496,6 @@ def load_cached_snapshots_for_trade_window(
             end,
             api_key=api_key,
             spec=spec,
-            options_dir=options_dir,
         )
     return load_thetadata_option_snapshots(
         symbol,
@@ -399,7 +503,6 @@ def load_cached_snapshots_for_trade_window(
         api_key=api_key,
         download_spec=spec,
         use_cache=True,
-        options_dir=options_dir,
         download_missing=download_missing,
     )
 
@@ -427,8 +530,69 @@ def _add_quote_columns(frame: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _prepare_option_chain_for_arctic(frame: pd.DataFrame) -> pd.DataFrame:
+    normalized = normalize_thetadata_option_chain(frame, require_bid_ask=True)
+    if normalized.empty:
+        return normalized
+    out = normalized.loc[:, ~normalized.columns.duplicated()].copy()
+    out["snapshot_date"] = _normalize_snapshot_dates(out["snapshot_date"])
+    out = out.dropna(subset=["snapshot_date", "contract_symbol"])
+    offsets = out.groupby("snapshot_date").cumcount()
+    index = out["snapshot_date"] + pd.to_timedelta(offsets, unit="ns")
+    out.index = pd.DatetimeIndex(index)
+    out.index.name = "timestamp"
+    return _sanitize_option_chain_for_arctic(out.sort_index())
+
+
+def _merge_option_chain_upsert(
+    existing: pd.DataFrame | None,
+    incoming: pd.DataFrame,
+) -> pd.DataFrame:
+    if incoming is None or incoming.empty:
+        if existing is None or existing.empty:
+            return pd.DataFrame()
+        return existing.copy()
+    if existing is None or existing.empty:
+        return incoming.sort_index()
+    combined = pd.concat([existing, incoming]).reset_index()
+    dedupe_cols = ["snapshot_date", "contract_symbol"]
+    combined = combined.drop_duplicates(subset=dedupe_cols, keep="last")
+    combined["snapshot_date"] = pd.to_datetime(combined["snapshot_date"], errors="coerce")
+    combined = combined.dropna(subset=["snapshot_date"]).drop(columns=["timestamp"], errors="ignore")
+    return _prepare_option_chain_for_arctic(combined)
+
+
+def _sanitize_option_chain_for_arctic(frame: pd.DataFrame) -> pd.DataFrame:
+    out = frame.copy()
+    out = out.dropna(axis=1, how="all")
+    date_columns = {
+        "snapshot_date",
+        "eod_date",
+        "expiration",
+        "last_trade_time",
+        "bid_time",
+        "ask_time",
+        "close_time",
+        "close_bid_time",
+        "close_ask_time",
+    }
+    for column in list(out.columns):
+        if column in date_columns:
+            out[column] = pd.to_datetime(out[column], errors="coerce", utc=True).dt.tz_localize(None)
+        elif is_object_dtype(out[column]) or is_string_dtype(out[column]):
+            out[column] = out[column].where(out[column].notna(), "").astype(str).astype(object)
+    return out
+
+
+def _arctic_ref(symbol: str) -> str:
+    return f"arctic://{OPTIONS_THETADATA_EOD_LIBRARY}/{option_chain_storage_symbol(symbol)}"
+
+
 def _normalize_snapshot_dates(values: pd.Series) -> pd.Series:
-    return pd.to_datetime(values, errors="coerce", utc=True).dt.tz_localize(None).dt.normalize()
+    converted = pd.to_datetime(values, errors="coerce", utc=True)
+    if isinstance(converted, pd.Series):
+        return converted.dt.tz_localize(None).dt.normalize()
+    return pd.Series(converted).dt.tz_localize(None).dt.normalize()
 
 
 def _filter_quoteable_rows(
@@ -471,7 +635,13 @@ def normalize_thetadata_option_chain(
         "high": "high_price",
         "low": "low_price",
     }
+    rename_map = {
+        source: target
+        for source, target in rename_map.items()
+        if source in out.columns and (target not in out.columns or source == target)
+    }
     out = out.rename(columns=rename_map)
+    out = out.loc[:, ~out.columns.duplicated()].copy()
     if "snapshot_date" not in out.columns:
         if "eod_date" in out.columns:
             out["snapshot_date"] = out["eod_date"]

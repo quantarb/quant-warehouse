@@ -4,13 +4,14 @@
 
 Multi-vendor **point-in-time** market data and materialized features for ML and backtesting.
 
-Engine-agnostic: consume panels from VectorBT, Zipline, or your own stack. OpenBB is the vendor adapter; ArcticDB is the primary time-series store.
+Engine-agnostic: consume panels from VectorBT, Zipline, or your own stack. OpenBB is the vendor adapter; ArcticDB is the canonical store for historical time-series data.
 
 ## Layers
 
 ```text
 staging/        optional raw vendor snapshots (audit / replay)
 prices/         dense daily OHLCV per symbol
+options/        daily ThetaData EOD option chains per underlying
 fundamentals/   sparse per symbol__provider (only columns that vendor returns)
 features/       dense daily PIT panels keyed by recipe_hash (ML input)
 catalog/        SQLite metadata — gap-fill state, columns_present, date ranges
@@ -59,10 +60,13 @@ income = wh.read_fundamentals("AAPL", section="income", provider="fmp")
 
 ## Design rules
 
-1. **Silver fundamentals stay sparse** — `period_ending` index, one Arctic symbol per `TICKER__provider`.
-2. **Gold features are daily** — same row count as prices after PIT join + derived columns.
-3. **Only store columns a vendor returns** — no empty cross-vendor placeholders.
-4. **Gap-fill** — merge on date/period per symbol; catalog tracks ranges and `last_fetched_at`.
+1. **ArcticDB is canonical for historical series** — prices, ETF prices, macro series, fundamentals, event pairs, features, calendars, and ThetaData option chains are stored in ArcticDB libraries.
+2. **SQLite is metadata only** — the catalog tracks gap-fill state, columns present, date ranges, and profile metadata.
+3. **Parquet/CSV are export artifacts only** — reports and derived ML datasets may be written to files, but historical series loaders must read/write ArcticDB.
+4. **Silver fundamentals stay sparse** — `period_ending` index, one Arctic symbol per `TICKER__provider`.
+5. **Gold features are daily** — same row count as prices after PIT join + derived columns.
+6. **Only store columns a vendor returns** — no empty cross-vendor placeholders.
+7. **Gap-fill** — merge on date/period per symbol; catalog tracks ranges and `last_fetched_at`.
 
 ## License
 

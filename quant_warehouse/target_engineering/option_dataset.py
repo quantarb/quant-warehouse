@@ -9,7 +9,6 @@ import pandas as pd
 from quant_warehouse.target_engineering.option_labels import (
     OptionLabelSpec,
     build_option_label_panel,
-    build_option_labels,
 )
 from quant_warehouse.target_engineering.thetadata_loader import (
     ThetaDataDownloadSpec,
@@ -26,7 +25,6 @@ class OptionMlDatasetSpec:
     hybrid_spec: OptionLabelSpec = field(default_factory=OptionLabelSpec.diversified_hybrid)
     thetadata: ThetaDataDownloadSpec = field(default_factory=ThetaDataDownloadSpec)
     download_missing: bool = True
-    options_dir: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -65,7 +63,6 @@ def build_option_ml_dataset(
             symbol,
             entry_dt,
             exit_dt,
-            options_dir=dataset_spec.options_dir,
             spec=dataset_spec.thetadata,
             download_missing=dataset_spec.download_missing,
         )

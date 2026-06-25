@@ -13,8 +13,7 @@ from quant_warehouse.config import WarehouseConfig
 from quant_warehouse.target_engineering.thetadata_loader import (
     ThetaDataDownloadSpec,
     download_option_snapshots_for_range,
-    resolve_thetadata_options_dir,
-    snapshot_cache_path,
+    option_chain_range_cached,
 )
 from quant_warehouse.warehouse.api import Warehouse
 from quant_warehouse.warehouse.prices import list_arctic_price_underlyings
@@ -94,18 +93,8 @@ def _options_range_cached(
     symbol: str,
     start_date: pd.Timestamp,
     end_date: pd.Timestamp,
-    *,
-    options_dir: Path,
 ) -> bool:
-    total_days = len(_business_days(start_date, end_date))
-    if total_days == 0:
-        return False
-    cached_days = sum(
-        1
-        for ts in _business_days(start_date, end_date)
-        if snapshot_cache_path(symbol, ts, options_dir=options_dir).exists()
-    )
-    return cached_days == total_days
+    return option_chain_range_cached(symbol, start_date, end_date)
 
 
 def _upsert_options_catalog_state(
@@ -149,8 +138,6 @@ def backfill_thetadata_options(
     """Download daily ThetaData EOD option chains for FMP underlyings in Arctic."""
 
     warehouse = warehouse or Warehouse(config=config)
-    cfg = warehouse.config
-    options_dir = resolve_thetadata_options_dir(config=cfg)
     start = pd.Timestamp(start_date).normalize()
     end = pd.Timestamp(end_date or datetime.now(timezone.utc).date()).normalize()
     if end < start:
@@ -172,7 +159,7 @@ def backfill_thetadata_options(
     for index, symbol in enumerate(target_symbols, start=1):
         row: dict[str, object] = {"symbol": symbol}
         try:
-            if skip_existing and not overwrite and _options_range_cached(symbol, start, end, options_dir=options_dir):
+            if skip_existing and not overwrite and _options_range_cached(symbol, start, end):
                 row.update({"skipped": True, "reason": "cached_range"})
                 results.append(row)
                 if callable(progress_logger):
@@ -184,7 +171,6 @@ def backfill_thetadata_options(
                 start,
                 end,
                 spec=download_spec,
-                options_dir=options_dir,
                 overwrite=overwrite,
             )
             _upsert_options_catalog_state(
@@ -231,7 +217,7 @@ def backfill_thetadata_options(
             "strike_range": download_spec.strike_range,
             "require_bid_ask": download_spec.require_bid_ask,
         },
-        "options_dir": str(options_dir),
+        "storage_backend": "arctic",
         "results": results,
     }
 

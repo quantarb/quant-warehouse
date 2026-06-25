@@ -11,7 +11,6 @@ from quant_warehouse.migrate.backfill_thetadata_options import (
     list_catalog_price_symbols,
     resolve_backfill_symbols,
 )
-from quant_warehouse.target_engineering.thetadata_loader import write_snapshot_cache, normalize_thetadata_option_chain
 from quant_warehouse.warehouse.api import Warehouse
 from quant_warehouse.warehouse.prices import list_arctic_price_underlyings, parse_symbol_provider_key
 
@@ -86,32 +85,21 @@ def test_resolve_backfill_symbols_filters_non_us_by_default() -> None:
     assert resolved == ["AAPL"]
 
 
-def test_options_range_cached_checks_business_days(tmp_path: Path) -> None:
-    frame = normalize_thetadata_option_chain(
-        pd.DataFrame(
-            [
-                {
-                    "symbol": "AAPL",
-                    "expiration": "2025-01-24",
-                    "strike": 230.0,
-                    "right": "PUT",
-                    "created": "2025-01-06 17:00:00-05:00",
-                    "bid": 1.0,
-                    "ask": 1.2,
-                }
-            ]
-        )
+def test_options_range_cached_delegates_to_arctic_range_cache(monkeypatch) -> None:
+    calls: list[tuple[str, pd.Timestamp, pd.Timestamp]] = []
+
+    def _fake_range_cached(symbol, start_date, end_date):
+        calls.append((symbol, start_date, end_date))
+        return pd.Timestamp(end_date).normalize() == pd.Timestamp("2025-01-06")
+
+    monkeypatch.setattr(
+        "quant_warehouse.migrate.backfill_thetadata_options.option_chain_range_cached",
+        _fake_range_cached,
     )
-    write_snapshot_cache("AAPL", "2025-01-06", frame, options_dir=tmp_path)
-    assert _options_range_cached(
-        "AAPL",
-        pd.Timestamp("2025-01-06"),
-        pd.Timestamp("2025-01-06"),
-        options_dir=tmp_path,
-    )
-    assert not _options_range_cached(
-        "AAPL",
-        pd.Timestamp("2025-01-06"),
-        pd.Timestamp("2025-01-07"),
-        options_dir=tmp_path,
-    )
+
+    assert _options_range_cached("AAPL", pd.Timestamp("2025-01-06"), pd.Timestamp("2025-01-06"))
+    assert not _options_range_cached("AAPL", pd.Timestamp("2025-01-06"), pd.Timestamp("2025-01-07"))
+    assert calls == [
+        ("AAPL", pd.Timestamp("2025-01-06"), pd.Timestamp("2025-01-06")),
+        ("AAPL", pd.Timestamp("2025-01-06"), pd.Timestamp("2025-01-07")),
+    ]

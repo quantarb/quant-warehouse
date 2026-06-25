@@ -1,17 +1,16 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 import pandas as pd
 
 from quant_warehouse.target_engineering.thetadata_loader import (
+    OPTIONS_THETADATA_EOD_LIBRARY,
     _iter_eod_date_chunks,
     download_option_snapshots_for_range,
     fetch_option_history_eod,
+    write_option_chain_arctic,
+    read_option_chain_arctic,
     normalize_thetadata_option_chain,
     split_snapshots_by_date,
-    write_snapshot_cache,
-    read_snapshot_cache,
     load_thetadata_option_snapshots,
 )
 
@@ -63,11 +62,26 @@ def test_split_snapshots_by_date_groups_rows() -> None:
     assert len(snapshots) == 2
 
 
-def test_snapshot_cache_roundtrip(tmp_path: Path) -> None:
+class _MemoryBackend:
+    def __init__(self, initial: pd.DataFrame | None = None) -> None:
+        self.frame = initial
+        self.writes: list[tuple[str, str, pd.DataFrame]] = []
+
+    def read(self, library: str, symbol: str) -> pd.DataFrame | None:
+        assert library == OPTIONS_THETADATA_EOD_LIBRARY
+        return None if self.frame is None else self.frame.copy()
+
+    def write(self, library: str, symbol: str, df: pd.DataFrame) -> None:
+        assert library == OPTIONS_THETADATA_EOD_LIBRARY
+        self.frame = df.copy()
+        self.writes.append((library, symbol, df.copy()))
+
+
+def test_arctic_option_chain_roundtrip() -> None:
     frame = normalize_thetadata_option_chain(_raw_frame().iloc[[0]])
-    write_snapshot_cache("AAPL", "2025-01-06", frame, options_dir=tmp_path)
-    loaded = read_snapshot_cache("AAPL", "2025-01-06", options_dir=tmp_path)
-    assert loaded is not None
+    backend = _MemoryBackend()
+    assert write_option_chain_arctic("AAPL", frame, backend=backend) == "arctic://options_thetadata_eod/AAPL"
+    loaded = read_option_chain_arctic("AAPL", start_date="2025-01-06", end_date="2025-01-06", backend=backend)
     assert len(loaded) == 1
     assert loaded["contract_symbol"].iloc[0] == "AAPL_put_20250124_230"
 
@@ -119,9 +133,9 @@ def test_fetch_option_history_eod_chunks_requests(monkeypatch) -> None:
         assert (end - start).days <= 364
 
 
-def test_load_thetadata_option_snapshots_uses_cache_without_fetch(tmp_path: Path, monkeypatch) -> None:
+def test_load_thetadata_option_snapshots_uses_cache_without_fetch(monkeypatch) -> None:
     frame = normalize_thetadata_option_chain(_raw_frame().iloc[[0]])
-    write_snapshot_cache("AAPL", "2025-01-06", frame, options_dir=tmp_path)
+    backend = _MemoryBackend(frame)
 
     def _fail_fetch(*args, **kwargs):
         raise AssertionError("fetch should not be called when cache is warm")
@@ -130,22 +144,24 @@ def test_load_thetadata_option_snapshots_uses_cache_without_fetch(tmp_path: Path
         "quant_warehouse.target_engineering.thetadata_loader.fetch_option_history_eod",
         _fail_fetch,
     )
+    monkeypatch.setattr(
+        "quant_warehouse.target_engineering.thetadata_loader.open_backend",
+        lambda *args, **kwargs: backend,
+    )
     snapshots = load_thetadata_option_snapshots(
         "AAPL",
         ["2025-01-06"],
         api_key="test-key",
         use_cache=True,
-        options_dir=tmp_path,
     )
     assert len(snapshots) == 1
 
 
 def test_download_option_snapshots_for_range_returns_cached_manifest(
-    tmp_path: Path,
     monkeypatch,
 ) -> None:
     frame = normalize_thetadata_option_chain(_raw_frame().iloc[[0]])
-    write_snapshot_cache("AAPL", "2025-01-06", frame, options_dir=tmp_path)
+    backend = _MemoryBackend(frame)
 
     def _fail_fetch(*args, **kwargs):
         raise AssertionError("fetch should not be called when every business day is cached")
@@ -154,20 +170,23 @@ def test_download_option_snapshots_for_range_returns_cached_manifest(
         "quant_warehouse.target_engineering.thetadata_loader.fetch_option_history_eod",
         _fail_fetch,
     )
+    monkeypatch.setattr(
+        "quant_warehouse.target_engineering.thetadata_loader.open_backend",
+        lambda *args, **kwargs: backend,
+    )
     manifest = download_option_snapshots_for_range(
         "AAPL",
         "2025-01-06",
         "2025-01-06",
-        options_dir=tmp_path,
     )
     assert manifest["cached_only"] is True
     assert manifest["snapshot_days"] == 1
     assert manifest["contracts_total"] == 1
     assert manifest["cached_days"] == 1
+    assert manifest["paths"] == ["arctic://options_thetadata_eod/AAPL"]
 
 
 def test_download_option_snapshots_for_range_fetches_only_missing_business_ranges(
-    tmp_path: Path,
     monkeypatch,
 ) -> None:
     cached = normalize_thetadata_option_chain(
@@ -185,7 +204,7 @@ def test_download_option_snapshots_for_range_fetches_only_missing_business_range
             ]
         )
     )
-    write_snapshot_cache("AAPL", "2025-01-07", cached, options_dir=tmp_path)
+    backend = _MemoryBackend(cached)
     calls: list[tuple[pd.Timestamp, pd.Timestamp]] = []
 
     def _fake_fetch(symbol, start_date, end_date, **kwargs):
@@ -212,11 +231,14 @@ def test_download_option_snapshots_for_range_fetches_only_missing_business_range
         "quant_warehouse.target_engineering.thetadata_loader.fetch_option_history_eod",
         _fake_fetch,
     )
+    monkeypatch.setattr(
+        "quant_warehouse.target_engineering.thetadata_loader.open_backend",
+        lambda *args, **kwargs: backend,
+    )
     manifest = download_option_snapshots_for_range(
         "AAPL",
         "2025-01-06",
         "2025-01-08",
-        options_dir=tmp_path,
     )
     assert calls == [
         (pd.Timestamp("2025-01-06"), pd.Timestamp("2025-01-06")),
