@@ -17,3 +17,9 @@
 
 - Fix provider pagination, endpoint coverage, schema normalization, and vendor-specific behavior in the OpenBB fork.
 - Keep `quant-warehouse` focused on storage, point-in-time normalization, feature engineering, target engineering, and route orchestration through OpenBB.
+
+## Warehouse Responsibility
+
+- Treat `quant-warehouse` as the opinionated persistence layer over the OpenBB fork SDK.
+- Use it to request vendor data through OpenBB, normalize schemas, compare requested refreshes against what is already stored, and write point-in-time warehouse datasets.
+- Do not put ML model training, backtesting engines, broker integrations, or order submission logic in this repo.
