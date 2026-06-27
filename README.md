@@ -2,9 +2,9 @@
 
 [![Repository](https://img.shields.io/badge/github-quantarb%2Fquant--warehouse-blue)](https://github.com/quantarb/quant-warehouse)
 
-Multi-vendor **point-in-time** market data and materialized features for ML and backtesting.
+Multi-vendor **point-in-time** market data, materialized feature engineering, and target engineering for ML research and backtesting systems.
 
-Engine-agnostic: consume panels from VectorBT, Zipline, or your own stack. OpenBB is the vendor adapter; ArcticDB is the canonical store for historical time-series data.
+Framework-agnostic data provider: downstream systems such as `quant-orchestrator`, Zipline, VectorBT, or custom research code consume prepared warehouse datasets. This repo does not run model training or backtests. OpenBB is the vendor adapter; ArcticDB is the canonical store for historical time-series data.
 
 ## Layers
 
@@ -14,6 +14,7 @@ prices/         dense daily OHLCV per symbol
 options/        daily ThetaData EOD option chains per underlying
 fundamentals/   sparse per symbol__provider (only columns that vendor returns)
 features/       dense daily PIT panels keyed by recipe_hash (ML input)
+targets/        point-in-time labels from target_engineering recipes
 catalog/        SQLite metadata — gap-fill state, columns_present, date ranges
 ```
 
