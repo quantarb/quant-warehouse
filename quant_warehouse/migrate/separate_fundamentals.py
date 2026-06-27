@@ -6,7 +6,6 @@ from typing import Sequence
 import pandas as pd
 
 from quant_warehouse.catalog.store import CatalogStore
-from quant_warehouse.config import WarehouseConfig
 from quant_warehouse.ingest.normalize import symbol_provider_key
 from quant_warehouse.warehouse.api import Warehouse
 from quant_warehouse.warehouse.sections import (

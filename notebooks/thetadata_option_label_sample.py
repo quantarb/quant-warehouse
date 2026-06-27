@@ -5,8 +5,8 @@ import os
 from pathlib import Path
 
 import pandas as pd
-import yfinance as yf
 
+from quant_warehouse import Warehouse
 from quant_warehouse.target_engineering import LabelBuildSpec, build_trade_results
 from quant_warehouse.target_engineering.option_labels import build_option_labels
 from quant_warehouse.target_engineering.thetadata_loader import (
@@ -16,21 +16,10 @@ from quant_warehouse.target_engineering.thetadata_loader import (
 
 
 def _load_price_frame(symbol: str, start: str, end: str) -> pd.DataFrame:
-    df = yf.Ticker(symbol).history(start=start, end=end, auto_adjust=False)
+    df = Warehouse().read_prices(symbol, provider="fmp", start=start, end=end)
     if df.empty:
-        raise RuntimeError(f"No price history returned for {symbol}")
-    frame = df.reset_index().rename(
-        columns={
-            "Date": "date",
-            "Datetime": "date",
-            "Open": "open",
-            "High": "high",
-            "Low": "low",
-            "Close": "close",
-            "Adj Close": "adj_close",
-            "Volume": "volume",
-        }
-    )
+        raise RuntimeError(f"No warehouse price history returned for {symbol}")
+    frame = df.reset_index().rename(columns={"index": "date"})
     frame["date"] = pd.to_datetime(frame["date"]).dt.tz_localize(None)
     return frame.set_index("date").sort_index()
 
@@ -63,7 +52,7 @@ def main() -> None:
     labels = build_option_labels([trade], normalized)
     label_df = pd.DataFrame(labels.option_rows)
 
-    out_dir = Path("research/options_eda_output")
+    out_dir = Path("notebooks/outputs")
     out_dir.mkdir(parents=True, exist_ok=True)
     label_path = out_dir / f"thetadata_{symbol.lower()}_{entry.date()}_{exit.date()}_option_labels.csv"
     summary_path = out_dir / f"thetadata_{symbol.lower()}_{entry.date()}_{exit.date()}_option_summary.json"

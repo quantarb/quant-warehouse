@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import pandas as pd
-import pytest
 
 from quant_warehouse.ingest.openbb_fetch import _is_empty_fetch_error, fetch_openbb
 

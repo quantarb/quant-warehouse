@@ -9,4 +9,6 @@ dist/
 build/
 .quant-warehouse/
 .idea/
-research/options_eda_output/
+research/
+notebooks/outputs/
+notebooks/.ipynb_checkpoints/

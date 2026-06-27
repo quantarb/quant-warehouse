@@ -13,9 +13,6 @@ from quant_warehouse.warehouse.backend import ArcticBackend, StorageBackend, ope
 from quant_warehouse.warehouse.merge import merge_upsert
 from quant_warehouse.warehouse.prices import _slice_dates
 from quant_warehouse.warehouse.sections import (
-    CRYPTO_PRICES_SECTION,
-    CURRENCY_PRICES_SECTION,
-    INDEX_PRICES_SECTION,
     MARKET_PRICE_SECTIONS,
     MIN_HISTORICAL_DATE,
 )

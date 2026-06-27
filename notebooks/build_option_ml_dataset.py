@@ -5,8 +5,8 @@ import json
 from pathlib import Path
 
 import pandas as pd
-import yfinance as yf
 
+from quant_warehouse import Warehouse
 from quant_warehouse.target_engineering import LabelBuildSpec, build_trade_results
 from quant_warehouse.target_engineering.option_dataset import (
     OptionMlDatasetSpec,
@@ -17,21 +17,10 @@ from quant_warehouse.target_engineering.thetadata_loader import ThetaDataDownloa
 
 
 def _load_price_frame(symbol: str, start: str, end: str) -> pd.DataFrame:
-    df = yf.Ticker(symbol).history(start=start, end=end, auto_adjust=False)
+    df = Warehouse().read_prices(symbol, provider="fmp", start=start, end=end)
     if df.empty:
-        raise RuntimeError(f"No price history returned for {symbol}")
-    frame = df.reset_index().rename(
-        columns={
-            "Date": "date",
-            "Datetime": "date",
-            "Open": "open",
-            "High": "high",
-            "Low": "low",
-            "Close": "close",
-            "Adj Close": "adj_close",
-            "Volume": "volume",
-        }
-    )
+        raise RuntimeError(f"No warehouse price history returned for {symbol}")
+    frame = df.reset_index().rename(columns={"index": "date"})
     frame["date"] = pd.to_datetime(frame["date"]).dt.tz_localize(None)
     return frame.set_index("date").sort_index()
 
@@ -46,7 +35,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--side", default=None, help="Optional trade side filter: long or short")
     parser.add_argument("--max-dte", type=int, default=45)
     parser.add_argument("--strike-range", type=int, default=10)
-    parser.add_argument("--output", default="research/options_eda_output/option_ml_dataset.parquet")
+    parser.add_argument("--output", default="notebooks/outputs/option_ml_dataset.parquet")
     parser.add_argument("--format", choices=("parquet", "csv"), default="parquet")
     return parser.parse_args()
 

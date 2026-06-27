@@ -2,8 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 
-from quant_warehouse.catalog.store import CatalogStore, SectionState
-from quant_warehouse.refresh.planner import expected_latest_price_date
+from quant_warehouse.catalog.store import SectionState
 from quant_warehouse.refresh.universe import refresh_universe_prices
 
 

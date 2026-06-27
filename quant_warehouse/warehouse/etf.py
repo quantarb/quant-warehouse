@@ -18,7 +18,6 @@ from quant_warehouse.warehouse.sections import (
     ETF_FUNDAMENTAL_SECTIONS,
     ETF_PRICES_LIBRARY,
     ETF_PRICES_SECTION,
-    ETF_PROFILE_SECTION,
 )
 
 GAP_OVERLAP_DAYS = 5

@@ -4,7 +4,7 @@ import json
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Sequence
+from typing import Callable
 
 from quant_warehouse.config import WarehouseConfig
 from quant_warehouse.ingest.etf_universe import fetch_etf_universe
@@ -25,7 +25,6 @@ from quant_warehouse.warehouse.api import Warehouse
 from quant_warehouse.warehouse.sections import (
     EQUITY_CALENDAR_SECTIONS,
     FMP_ALL_EQUITY_SECTIONS,
-    FMP_EXTENDED_EQUITY_SECTIONS,
     FMP_HISTORICAL_ETF_SECTIONS,
     MIN_HISTORICAL_DATE,
 )

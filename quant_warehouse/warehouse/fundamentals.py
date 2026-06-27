@@ -24,10 +24,8 @@ from quant_warehouse.warehouse.prices import _slice_dates
 from quant_warehouse.warehouse.sections import (
     ALL_FUNDAMENTAL_SECTIONS,
     DATED_SNAPSHOT_SECTIONS,
-    ETF_FUNDAMENTAL_SECTIONS,
     EQUITY_FUNDAMENTAL_SECTIONS,
     PANEL_FUNDAMENTAL_SECTIONS,
-    PERIOD_FUNDAMENTAL_SECTIONS,
     SNAPSHOT_FUNDAMENTAL_SECTIONS,
     fundamental_library,
     fundamental_period_for_section,

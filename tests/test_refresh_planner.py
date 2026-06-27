@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 
 import pandas as pd
 
-from quant_warehouse.catalog.store import CatalogStore, SectionState
+from quant_warehouse.catalog.store import SectionState
 from quant_warehouse.refresh.planner import (
     backfill_fundamental_needs_update,
     expected_latest_price_date,

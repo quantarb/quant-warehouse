@@ -360,13 +360,10 @@ class MacroStore:
         provider = str(provider or "fmp").strip().lower()
         lowered = series_code.lower()
         if lowered.startswith("macro__ust_"):
-            section = MACRO_TREASURY_SECTION
             library = MACRO_TREASURY_LIBRARY
         elif lowered.startswith("macro__yc_"):
-            section = MACRO_YIELD_CURVE_SECTION
             library = MACRO_YIELD_CURVE_LIBRARY
         else:
-            section = MACRO_ECONOMIC_SECTION
             library = MACRO_ECONOMIC_LIBRARY
         storage_symbol = symbol_provider_key(series_code, provider)
         frame = self.backend.read(library, storage_symbol)
