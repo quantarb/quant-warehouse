@@ -4,14 +4,11 @@ import os
 from functools import lru_cache
 from pathlib import Path
 
-_DEFAULT_OPTIMAL_TRADER_HOME = Path("~/PycharmProjects/optimal_trader")
 _QUANT_WAREHOUSE_HOME = Path(__file__).resolve().parents[2]
 
 
 def _dotenv_candidates() -> tuple[Path, ...]:
     candidates: list[Path] = []
-    ot_home = Path(os.environ.get("OPTIMAL_TRADER_HOME", str(_DEFAULT_OPTIMAL_TRADER_HOME))).expanduser()
-    candidates.append(ot_home / ".env")
     qw_home = Path(os.environ.get("QW_HOME", str(_QUANT_WAREHOUSE_HOME))).expanduser()
     candidates.append(qw_home / ".env")
     candidates.append(_QUANT_WAREHOUSE_HOME / ".env")
@@ -53,7 +50,7 @@ def _load_dotenv_file(path: Path) -> None:
 
 
 def load_shared_env() -> None:
-    """Load credentials from optimal_trader and quant-warehouse .env files (best effort)."""
+    """Load credentials from quant-warehouse .env files (best effort)."""
     for path in _dotenv_candidates():
         _load_dotenv_file(path)
 

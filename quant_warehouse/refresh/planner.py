@@ -175,7 +175,7 @@ def historical_fetch_plan(
     skip_recent_hours: float = 24.0,
     is_etf: bool = False,
 ) -> HistoricalFetchPlan:
-    """Port of optimal_trader tail/head/full/skip planning using catalog min/max dates."""
+    """Plan tail/head/full/skip refreshes using catalog min/max dates."""
     symbol = symbol.strip().upper()
     section = str(section).strip()
     target_end = target_end_date or expected_latest_price_date()
