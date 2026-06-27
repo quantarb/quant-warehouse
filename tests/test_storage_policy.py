@@ -31,7 +31,7 @@ def test_default_thetadata_option_download_uses_arctic_paths(monkeypatch) -> Non
             assert library == OPTIONS_THETADATA_EOD_LIBRARY
             return None
 
-        def write(self, library: str, symbol: str, df: pd.DataFrame) -> None:
+        def write(self, library: str, symbol: str, df: pd.DataFrame, **kwargs) -> None:
             assert library == OPTIONS_THETADATA_EOD_LIBRARY
             written.append((symbol, df))
 

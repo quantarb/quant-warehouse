@@ -1,22 +1,20 @@
 from __future__ import annotations
 
-import json
 from typing import Any, Iterable, Sequence
-from urllib.parse import urlencode
-from urllib.request import urlopen
 
 import pandas as pd
 
-from quant_warehouse.ingest.credentials import resolve_fmp_api_key
 from quant_warehouse.target_engineering.event_pairs.event_pair_normalizer import (
     normalize_event_pairs,
 )
 from quant_warehouse.target_engineering.event_pairs.event_pair_schema import EVENT_PAIR_COLUMNS
 from quant_warehouse.target_engineering.event_pairs.event_pair_taxonomy import EVENT_PAIR_TAXONOMY
 
-_FMP_API_V4_BASE = "https://financialmodelingprep.com/api/v4"
-_FMP_STABLE_BASE = "https://financialmodelingprep.com/stable"
 _SUPPORTED_FAMILIES = tuple(EVENT_PAIR_TAXONOMY)
+_DIRECT_FETCH_ERROR = (
+    "Direct FMP event-pair fetches are disabled. Refresh the corresponding "
+    "OpenBB-backed warehouse source sections and build event pairs from warehouse data."
+)
 
 
 def fetch_fmp_event_pairs(
@@ -28,30 +26,9 @@ def fetch_fmp_event_pairs(
     page: int = 0,
     limit: int = 100,
 ) -> pd.DataFrame:
-    """Fetch real FMP mirrored event-pair data for one symbol.
+    """Compatibility shim for the removed direct FMP event-pair fetcher."""
 
-    Supports every family in EVENT_PAIR_TAXONOMY. Families with no literal FMP
-    event-side field are derived from vendor-provided deltas or comparable values.
-    """
-
-    frames = [
-        fetch_fmp_event_pair_family(
-            symbol,
-            event_family=family,
-            start_date=start_date,
-            end_date=end_date,
-            page=page,
-            limit=limit,
-        )
-        for family in event_families
-    ]
-    frames = [frame for frame in frames if not frame.empty]
-    if not frames:
-        return pd.DataFrame(columns=EVENT_PAIR_COLUMNS)
-    return pd.concat(frames, ignore_index=True).sort_values(
-        ["symbol", "event_date", "event_family", "event_type"],
-        ignore_index=True,
-    )
+    raise RuntimeError(_DIRECT_FETCH_ERROR)
 
 
 def fetch_fmp_event_pair_family(
@@ -63,47 +40,7 @@ def fetch_fmp_event_pair_family(
     page: int = 0,
     limit: int = 100,
 ) -> pd.DataFrame:
-    family = str(event_family or "").strip().lower()
-    symbol = str(symbol or "").strip().upper()
-    if not symbol:
-        raise ValueError("symbol is required")
-    if family == "insider":
-        return _fetch_insider_event_pairs(
-            symbol,
-            start_date=start_date,
-            end_date=end_date,
-            page=page,
-            limit=limit,
-        )
-    if family == "congress":
-        return _fetch_congress_event_pairs(
-            symbol,
-            start_date=start_date,
-            end_date=end_date,
-            page=page,
-            limit=limit,
-        )
-    if family == "analyst_rating":
-        return _fetch_analyst_rating_event_pairs(symbol, start_date=start_date, end_date=end_date)
-    if family == "price_target":
-        return _fetch_price_target_event_pairs(symbol, start_date=start_date, end_date=end_date)
-    if family == "institutional":
-        return _fetch_institutional_event_pairs(symbol, start_date=start_date, end_date=end_date)
-    if family == "capital_action":
-        return _fetch_capital_action_event_pairs(
-            symbol,
-            start_date=start_date,
-            end_date=end_date,
-            page=page,
-            limit=limit,
-        )
-    if family == "dividend":
-        return _fetch_dividend_event_pairs(symbol, start_date=start_date, end_date=end_date)
-    if family == "split":
-        return _fetch_split_event_pairs(symbol, start_date=start_date, end_date=end_date)
-    if family == "earnings":
-        return _fetch_earnings_event_pairs(symbol, start_date=start_date, end_date=end_date)
-    raise ValueError(f"Unsupported FMP event_pair family: {event_family}")
+    raise RuntimeError(_DIRECT_FETCH_ERROR)
 
 
 def _fetch_insider_event_pairs(
@@ -497,14 +434,7 @@ def _fetch_earnings_event_pairs(
 
 
 def _fmp_get_json(endpoint: str, *, params: dict[str, Any]) -> Any:
-    api_key = resolve_fmp_api_key(required=True)
-    query = urlencode({**params, "apikey": api_key})
-    if endpoint.startswith("legacy/"):
-        url = f"{_FMP_API_V4_BASE}/{endpoint.removeprefix('legacy/').lstrip('/')}?{query}"
-    else:
-        url = f"{_FMP_STABLE_BASE}/{endpoint.lstrip('/')}?{query}"
-    with urlopen(url, timeout=60.0) as response:
-        return json.loads(response.read().decode("utf-8"))
+    raise RuntimeError(_DIRECT_FETCH_ERROR)
 
 
 def _fmp_records(endpoint: str, *, params: dict[str, Any]) -> list[dict[str, Any]]:
@@ -565,13 +495,14 @@ def _filter_dates(
             "reported_date",
             "acceptedDate",
             "accepted_date",
+            "as_of",
             "period_ending",
         ),
     )
     if date_values.isna().all():
         return pd.DataFrame(columns=frame.columns)
     out = frame.copy()
-    event_dates = pd.to_datetime(date_values, errors="coerce")
+    event_dates = pd.to_datetime(date_values, errors="coerce", utc=True).dt.tz_convert(None).dt.normalize()
     out = out.loc[event_dates.notna()].copy()
     event_dates = event_dates.loc[out.index]
     if start_date is not None:
@@ -584,7 +515,13 @@ def _filter_dates(
 
 def _insider_event_type(row: pd.Series) -> str | None:
     transaction = _row_text(row, "transactionType", "transaction_type", "type")
-    acquired_disposed = _row_text(row, "acquisitionOrDisposition", "acquiredDisposedCode")
+    acquired_disposed = _row_text(
+        row,
+        "acquisitionOrDisposition",
+        "acquisition_or_disposition",
+        "acquiredDisposedCode",
+        "acquired_disposed_code",
+    )
     text = f"{transaction} {acquired_disposed}".lower()
     if _is_buy_text(text):
         return "insider_buy"
@@ -674,12 +611,12 @@ def _rating_score(text: str) -> int | None:
 
 def _is_buy_text(text: str) -> bool:
     tokens = str(text or "").strip().lower()
-    return any(token in tokens for token in ("purchase", "buy", "acquisition", "acquired", " p "))
+    return any(token in tokens for token in ("purchase", "buy", "acquisition", "acquired", " p ", " a "))
 
 
 def _is_sell_text(text: str) -> bool:
     tokens = str(text or "").strip().lower()
-    return any(token in tokens for token in ("sale", "sell", "disposition", "disposed", " s "))
+    return any(token in tokens for token in ("sale", "sell", "disposition", "disposed", " s ", " d "))
 
 
 def _row_text(row: pd.Series, *columns: str) -> str:
@@ -691,7 +628,7 @@ def _row_text(row: pd.Series, *columns: str) -> str:
 
 def _first_present_column(frame: pd.DataFrame, columns: Sequence[str]) -> pd.Series:
     for column in columns:
-        if column in frame.columns:
+        if column in frame.columns and frame[column].notna().any():
             return frame[column]
     return pd.Series([None] * len(frame), index=frame.index)
 

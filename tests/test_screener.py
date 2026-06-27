@@ -50,13 +50,13 @@ def test_screener_record_to_profile_payload_normalizes_fields():
     assert payload["ipoDate"] == "1980-12-12"
 
 
-@patch("quant_warehouse.ingest.screener_fetch._fetch_fmp_screener_direct")
-def test_fetch_equity_screener_falls_back_to_direct_fmp(mock_direct):
-    mock_direct.return_value = pd.DataFrame(
+@patch("quant_warehouse.ingest.screener_fetch._fetch_openbb_screener")
+def test_fetch_equity_screener_uses_openbb_only(mock_openbb):
+    mock_openbb.return_value = pd.DataFrame(
         [{"symbol": "MSFT", "name": "Microsoft", "market_cap": 2_000_000_000_000, "exchange": "NASDAQ"}]
     )
     frame, source = fetch_equity_screener(ScreenerQuery(provider="fmp", mktcap_min=10_000_000_000, limit=5))
-    assert source == "fmp"
+    assert source == "openbb:fmp"
     assert list(frame["symbol"]) == ["MSFT"]
 
 

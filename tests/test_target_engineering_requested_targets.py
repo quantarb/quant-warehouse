@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pandas as pd
+import pytest
 
 from quant_warehouse.target_engineering import (
     build_cross_sectional_rank_labels,
@@ -203,83 +204,14 @@ def test_normalize_event_pairs_exact_dates() -> None:
     assert "horizon" not in normalized.columns
 
 
-def test_fetch_fmp_insider_event_pairs_uses_real_payload_shape(monkeypatch) -> None:
-    payloads = {
-        "insider-trading/search": [
-            {
-                "symbol": "aapl",
-                "transactionDate": "2024-01-03",
-                "transactionType": "P-Purchase",
-                "reportingName": "Jane CEO",
-                "typeOfOwner": "officer",
-                "securitiesTransacted": 100,
-            },
-            {
-                "symbol": "AAPL",
-                "transactionDate": "2024-01-04",
-                "transactionType": "S-Sale",
-                "reportingName": "John CFO",
-                "typeOfOwner": "officer",
-                "securitiesTransacted": 50,
-            },
-        ]
-    }
-
-    def fake_get_json(endpoint, *, params):
-        assert params["symbol"] == "AAPL"
-        return payloads[endpoint]
-
-    monkeypatch.setattr(
-        "quant_warehouse.target_engineering.event_pairs.fmp_fetch._fmp_get_json",
-        fake_get_json,
-    )
-
-    events = fetch_fmp_event_pair_family("AAPL", event_family="insider")
-
-    assert list(events["event_type"]) == ["insider_buy", "insider_sell"]
-    assert list(events["event_side"]) == [1, -1]
-    assert list(events["actor_name"]) == ["Jane CEO", "John CFO"]
-    assert events.loc[0, "source"] == "fmp:insider-trading/search"
-    assert events.loc[0, "raw_json"]["transactionType"] == "P-Purchase"
+def test_fetch_fmp_insider_event_pairs_uses_real_payload_shape() -> None:
+    with pytest.raises(RuntimeError, match="Direct FMP event-pair fetches are disabled"):
+        fetch_fmp_event_pair_family("AAPL", event_family="insider")
 
 
-def test_fetch_fmp_congress_event_pairs_combines_house_and_senate(monkeypatch) -> None:
-    payloads = {
-        "senate-trades": [
-            {
-                "symbol": "AAPL",
-                "transactionDate": "2024-02-01",
-                "transactionType": "Purchase",
-                "senator": "Senator One",
-                "amount": "$1,001 - $15,000",
-            }
-        ],
-        "house-trades": [
-            {
-                "symbol": "AAPL",
-                "transactionDate": "2024-02-02",
-                "transactionType": "Sale (Full)",
-                "representative": "Rep Two",
-                "amount": "$15,001 - $50,000",
-            }
-        ],
-    }
-
-    def fake_get_json(endpoint, *, params):
-        assert params["symbol"] == "AAPL"
-        return payloads[endpoint]
-
-    monkeypatch.setattr(
-        "quant_warehouse.target_engineering.event_pairs.fmp_fetch._fmp_get_json",
-        fake_get_json,
-    )
-
-    events = fetch_fmp_event_pairs("AAPL", event_families=("congress",))
-
-    assert list(events["event_type"]) == ["congress_buy", "congress_sell"]
-    assert list(events["event_side"]) == [1, -1]
-    assert list(events["actor_type"]) == ["senate", "house"]
-    assert list(events["mirror_event_type"]) == ["congress_sell", "congress_buy"]
+def test_fetch_fmp_congress_event_pairs_combines_house_and_senate() -> None:
+    with pytest.raises(RuntimeError, match="Direct FMP event-pair fetches are disabled"):
+        fetch_fmp_event_pairs("AAPL", event_families=("congress",))
 
 
 def test_build_event_pairs_from_existing_historical_sections() -> None:
@@ -334,14 +266,6 @@ def test_event_pair_store_uses_cached_labels_without_refetch(monkeypatch) -> Non
         }
     )
     store.ingest("AAPL", cached)
-
-    def fail_fetch(*args, **kwargs):
-        raise AssertionError("FMP should not be called when cached event pairs cover the request")
-
-    monkeypatch.setattr(
-        "quant_warehouse.target_engineering.event_pairs.store.fetch_fmp_event_pair_family",
-        fail_fetch,
-    )
 
     result = store.load_or_refresh("AAPL", event_families=("insider",))
 

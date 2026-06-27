@@ -81,6 +81,10 @@ def clip_to_min_historical_date(
         return frame
     floor = pd.Timestamp(min_date)
     if isinstance(frame.index, pd.DatetimeIndex):
+        if frame.index.tz is not None and floor.tzinfo is None:
+            floor = floor.tz_localize(frame.index.tz)
+        elif frame.index.tz is None and floor.tzinfo is not None:
+            floor = floor.tz_convert(None)
         clipped = frame[frame.index >= floor]
         clipped.index = pd.DatetimeIndex(clipped.index)
         return clipped.sort_index()
@@ -199,28 +203,28 @@ def normalize_panel_frame(
     out = out[keep]
 
     for col in out.columns:
-        if col == index_col or col in PANEL_DIMENSION_COLUMNS:
+        if col == index_col or col in PANEL_DIMENSION_COLUMNS or not pd.api.types.is_numeric_dtype(out[col]):
             continue
         out[col] = pd.to_numeric(out[col], errors="coerce")
 
     out = out.replace([np.inf, -np.inf], np.nan)
-    dedupe_cols = [index_col, *(
-        key for key in (
-            "business_line",
-            "region",
-            "cusip",
-            "isin",
-            "lei",
-            "name",
-            "title",
-            "symbol",
-        )
-        if key in out.columns
-    )]
+    dedupe_keys = [
+        key
+        for key in out.columns
+        if key in PANEL_DIMENSION_COLUMNS
+        or pd.api.types.is_object_dtype(out[key])
+        or pd.api.types.is_string_dtype(out[key])
+        or pd.api.types.is_datetime64_any_dtype(out[key])
+    ]
+    dedupe_cols = [index_col, *dedupe_keys]
     out = out.drop_duplicates(subset=dedupe_cols, keep="last")
     out = out.set_index(index_col)
     out.index.name = index_col
     out.index = pd.DatetimeIndex(out.index)
+    if out.index.tz is not None:
+        out.index = out.index.tz_convert(None)
+    out = coerce_object_dates(out)
+    out = _coerce_object_strings(out)
     return clip_to_min_historical_date(out, min_date=min_date or MIN_HISTORICAL_DATE)
 
 
@@ -238,6 +242,18 @@ def coerce_object_dates(frame: pd.DataFrame) -> pd.DataFrame:
         value = sample.iloc[0]
         if isinstance(value, dt.date) and not isinstance(value, dt.datetime):
             out[column] = pd.to_datetime(out[column], errors="coerce")
+    return out
+
+
+def _coerce_object_strings(frame: pd.DataFrame) -> pd.DataFrame:
+    """Convert remaining object columns to nullable strings for Arctic writes."""
+    if frame.empty:
+        return frame
+    out = frame.copy()
+    for column in out.columns:
+        if out[column].dtype != object:
+            continue
+        out[column] = out[column].map(lambda value: None if pd.isna(value) else str(value))
     return out
 
 

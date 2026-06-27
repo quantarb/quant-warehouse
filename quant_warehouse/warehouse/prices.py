@@ -229,8 +229,19 @@ def _slice_dates(
     end: str | None,
 ) -> pd.DataFrame:
     out = df.copy()
+    index_tz = getattr(out.index, "tz", None)
     if start is not None:
-        out = out.loc[out.index >= pd.Timestamp(start)]
+        start_ts = pd.Timestamp(start)
+        if index_tz is not None and start_ts.tzinfo is None:
+            start_ts = start_ts.tz_localize(index_tz)
+        elif index_tz is None and start_ts.tzinfo is not None:
+            start_ts = start_ts.tz_convert(None)
+        out = out.loc[out.index >= start_ts]
     if end is not None:
-        out = out.loc[out.index <= pd.Timestamp(end)]
+        end_ts = pd.Timestamp(end)
+        if index_tz is not None and end_ts.tzinfo is None:
+            end_ts = end_ts.tz_localize(index_tz)
+        elif index_tz is None and end_ts.tzinfo is not None:
+            end_ts = end_ts.tz_convert(None)
+        out = out.loc[out.index <= end_ts]
     return out

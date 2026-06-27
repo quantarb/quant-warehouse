@@ -1,26 +1,13 @@
 from __future__ import annotations
 
-import json
 import re
 from typing import Any
-from urllib.parse import urlencode
-from urllib.request import urlopen
 
 import pandas as pd
 
-from quant_warehouse.ingest.credentials import configure_openbb_credentials, resolve_fmp_api_key
+from quant_warehouse.ingest.credentials import configure_openbb_credentials
 from quant_warehouse.ingest.normalize import clip_to_min_historical_date
 from quant_warehouse.warehouse.sections import MIN_HISTORICAL_DATE
-
-_FMP_STABLE_BASE = "https://financialmodelingprep.com/stable"
-
-
-def _fmp_get_json(endpoint: str, *, params: dict[str, Any]) -> Any:
-    api_key = resolve_fmp_api_key(required=True)
-    query = urlencode({**params, "apikey": api_key})
-    url = f"{_FMP_STABLE_BASE}/{endpoint.lstrip('/')}?{query}"
-    with urlopen(url, timeout=30.0) as response:
-        return json.loads(response.read().decode("utf-8"))
 
 
 def _records_to_frame(records: Any, *, value_column: str = "value") -> pd.DataFrame:
@@ -55,13 +42,16 @@ def fetch_economic_indicator_series(
     provider_name = str(provider or "fmp").strip().lower()
     if provider_name != "fmp":
         raise ValueError(f"Unsupported macro economic provider: {provider_name}")
-    params: dict[str, Any] = {"name": str(name).strip()}
+    configure_openbb_credentials()
+    from openbb import obb
+
+    kwargs: dict[str, Any] = {"symbol": str(name).strip(), "provider": "fmp"}
     if start_date:
-        params["from"] = str(start_date)[:10]
+        kwargs["start_date"] = str(start_date)[:10]
     if end_date:
-        params["to"] = str(end_date)[:10]
-    payload = _fmp_get_json("economic-indicators", params=params)
-    return _records_to_frame(payload)
+        kwargs["end_date"] = str(end_date)[:10]
+    result = obb.economy.indicators(**kwargs)
+    return _records_to_frame(result.to_df())
 
 
 def _normalize_treasury_column_name(column: str) -> str:
@@ -109,27 +99,18 @@ def fetch_treasury_rates_wide(
     end_date: str | None = None,
 ) -> pd.DataFrame:
     provider_name = str(provider or "fmp").strip().lower()
-    if provider_name == "fmp":
-        try:
-            configure_openbb_credentials()
-            from openbb import obb
+    if provider_name != "fmp":
+        raise ValueError(f"Unsupported macro treasury provider: {provider_name}")
+    configure_openbb_credentials()
+    from openbb import obb
 
-            kwargs: dict[str, Any] = {"provider": "fmp"}
-            if start_date:
-                kwargs["start_date"] = str(start_date)[:10]
-            if end_date:
-                kwargs["end_date"] = str(end_date)[:10]
-            result = obb.fixedincome.government.treasury_rates(**kwargs)
-            return _treasury_wide_frame(result.to_df())
-        except Exception:
-            params: dict[str, Any] = {}
-            if start_date:
-                params["from"] = str(start_date)[:10]
-            if end_date:
-                params["to"] = str(end_date)[:10]
-            payload = _fmp_get_json("treasury-rates", params=params)
-            return _treasury_wide_frame(pd.DataFrame(payload))
-    raise ValueError(f"Unsupported macro treasury provider: {provider_name}")
+    kwargs: dict[str, Any] = {"provider": "fmp"}
+    if start_date:
+        kwargs["start_date"] = str(start_date)[:10]
+    if end_date:
+        kwargs["end_date"] = str(end_date)[:10]
+    result = obb.fixedincome.government.treasury_rates(**kwargs)
+    return _treasury_wide_frame(result.to_df())
 
 
 def treasury_series_code(column: str) -> str:

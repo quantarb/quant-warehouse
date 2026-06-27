@@ -1,16 +1,11 @@
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urlencode
-from urllib.request import urlopen
 
 import pandas as pd
 
-from quant_warehouse.ingest.credentials import configure_openbb_credentials, resolve_fmp_api_key
-
-_FMP_STABLE_BASE = "https://financialmodelingprep.com/stable"
+from quant_warehouse.ingest.credentials import configure_openbb_credentials
 
 US_EXCHANGE_ALIASES: dict[str, frozenset[str]] = {
     "NASDAQ": frozenset({"NASDAQ", "NMS", "NGM", "NCM", "NAS", "XNAS"}),
@@ -32,14 +27,6 @@ class ScreenerQuery:
     is_fund: bool | None = None
     is_active: bool | None = None
     limit: int = 10_000
-
-
-def _fmp_get_json(endpoint: str, *, params: dict[str, Any]) -> Any:
-    api_key = resolve_fmp_api_key(required=True)
-    query = urlencode({**params, "apikey": api_key})
-    url = f"{_FMP_STABLE_BASE}/{endpoint.lstrip('/')}?{query}"
-    with urlopen(url, timeout=60.0) as response:
-        return json.loads(response.read().decode("utf-8"))
 
 
 def _normalize_country(country: str | None) -> str | None:
@@ -114,50 +101,6 @@ def _normalize_screener_frame(frame: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def _fetch_fmp_screener_direct(query: ScreenerQuery) -> pd.DataFrame:
-    exchange_list = tuple(str(value).strip().upper() for value in query.exchanges if str(value).strip())
-    exchange_runs = exchange_list or (None,)
-    frames: list[pd.DataFrame] = []
-
-    for exchange_name in exchange_runs:
-        params: dict[str, Any] = {"limit": int(query.limit)}
-        if query.mktcap_min is not None:
-            params["marketCapMoreThan"] = int(query.mktcap_min)
-        if query.mktcap_max is not None:
-            params["marketCapLowerThan"] = int(query.mktcap_max)
-        if query.country:
-            params["country"] = _normalize_country(query.country)
-        if query.sector:
-            params["sector"] = str(query.sector).strip()
-        if query.industry:
-            params["industry"] = str(query.industry).strip()
-        if query.is_etf is not None:
-            params["isEtf"] = bool(query.is_etf)
-        if query.is_fund is not None:
-            params["isFund"] = bool(query.is_fund)
-        if query.is_active is not None:
-            params["isActivelyTrading"] = bool(query.is_active)
-        if exchange_name:
-            params["exchange"] = exchange_name
-
-        payload = _fmp_get_json("company-screener", params=params)
-        frame = _normalize_screener_frame(_records_to_frame(payload))
-        if not frame.empty:
-            frames.append(frame)
-
-    if not frames:
-        return pd.DataFrame()
-    merged = pd.concat(frames, ignore_index=True)
-    if "symbol" in merged.columns:
-        merged = merged.drop_duplicates(subset=["symbol"], keep="first")
-    if exchange_list:
-        mask = merged["exchange"].map(lambda value: exchange_matches_filters(value, exchange_list))
-        merged = merged.loc[mask.fillna(False)].copy()
-    if int(query.limit) > 0:
-        merged = merged.head(int(query.limit))
-    return merged
-
-
 def _fetch_openbb_screener(query: ScreenerQuery) -> pd.DataFrame:
     try:
         from openbb import obb
@@ -203,19 +146,10 @@ def fetch_equity_screener(query: ScreenerQuery) -> tuple[pd.DataFrame, str]:
     """
     Fetch a cross-sectional equity universe.
 
-    OpenBB is attempted first for the requested provider. FMP requests fall back to
-    the stable REST screener when OpenBB validation fails on provider payloads.
+    OpenBB is the only data adapter. Provider issues should be fixed in the
+    OpenBB fork instead of bypassing it here.
     """
     provider = str(query.provider or "fmp").strip().lower()
-    if provider == "fmp":
-        try:
-            frame = _fetch_openbb_screener(query)
-            if not frame.empty:
-                return frame, "openbb:fmp"
-        except Exception:
-            pass
-        return _fetch_fmp_screener_direct(query), "fmp"
-
     frame = _fetch_openbb_screener(query)
     return frame, f"openbb:{provider}"
 

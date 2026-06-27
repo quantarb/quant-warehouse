@@ -8,7 +8,6 @@ import pandas as pd
 from pandas.api.types import is_object_dtype, is_string_dtype
 
 from quant_warehouse.config import WarehouseConfig
-from quant_warehouse.ingest.credentials import resolve_thetadata_api_key
 from quant_warehouse.ingest.openbb_fetch import fetch_openbb
 from quant_warehouse.warehouse.backend import ArcticBackend, open_backend
 
@@ -69,30 +68,21 @@ def fetch_option_history_eod(
     download_spec = spec or ThetaDataDownloadSpec()
     frames: list[pd.DataFrame] = []
     for chunk_start, chunk_end in _iter_eod_date_chunks(start_date, end_date):
-        try:
-            result = fetch_openbb(
-                "options_eod",
-                symbol=str(symbol).upper(),
-                provider="thetadata",
-                start_date=chunk_start,
-                end_date=chunk_end,
-                expiration=download_spec.expiration,
-                max_dte=int(download_spec.max_dte),
-                strike_range=int(download_spec.strike_range),
-                right=download_spec.right,
-                dataframe_type=download_spec.dataframe_type,
-                require_bid_ask=download_spec.require_bid_ask,
-                min_ask=download_spec.min_ask,
-            )
-            frame = result.df.copy()
-        except Exception:
-            frame = _fetch_option_history_eod_sdk(
-                symbol,
-                chunk_start,
-                chunk_end,
-                api_key=api_key,
-                spec=download_spec,
-            )
+        result = fetch_openbb(
+            "options_eod",
+            symbol=str(symbol).upper(),
+            provider="thetadata",
+            start_date=chunk_start,
+            end_date=chunk_end,
+            expiration=download_spec.expiration,
+            max_dte=int(download_spec.max_dte),
+            strike_range=int(download_spec.strike_range),
+            right=download_spec.right,
+            dataframe_type=download_spec.dataframe_type,
+            require_bid_ask=download_spec.require_bid_ask,
+            min_ask=download_spec.min_ask,
+        )
+        frame = result.df.copy()
         if not frame.empty:
             frames.append(frame)
 
@@ -104,41 +94,6 @@ def fetch_option_history_eod(
         require_bid_ask=download_spec.require_bid_ask,
         min_ask=download_spec.min_ask,
     )
-
-
-def _fetch_option_history_eod_sdk(
-    symbol: str,
-    start_date: date,
-    end_date: date,
-    *,
-    api_key: str | None,
-    spec: ThetaDataDownloadSpec,
-) -> pd.DataFrame:
-    """Fetch ThetaData EOD option history directly when OpenBB has no provider."""
-
-    try:
-        from thetadata import ThetaClient
-    except ImportError as exc:
-        raise ImportError("Install quant-warehouse[thetadata] to download ThetaData options") from exc
-
-    resolved_api_key = api_key or resolve_thetadata_api_key(required=True)
-    client = ThetaClient(
-        api_key=resolved_api_key,
-        dataframe_type=spec.dataframe_type,
-        dotenv_path=".env",
-    )
-    frame = client.option_history_eod(
-        symbol=str(symbol).upper(),
-        expiration=spec.expiration,
-        start_date=start_date,
-        end_date=end_date,
-        max_dte=int(spec.max_dte),
-        strike_range=int(spec.strike_range),
-        right=spec.right,
-    )
-    if frame is None:
-        return pd.DataFrame()
-    return frame.to_pandas() if hasattr(frame, "to_pandas") else pd.DataFrame(frame)
 
 
 def split_snapshots_by_date(df: pd.DataFrame) -> dict[pd.Timestamp, pd.DataFrame]:

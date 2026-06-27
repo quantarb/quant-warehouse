@@ -20,36 +20,38 @@ dependencies = [
 
 [project.optional-dependencies]
 openbb = [
-    "openbb>=4.7",
-    "openbb-fmp>=1.0",
-    "openbb-yfinance>=1.0",
-    "openbb-sec>=1.0",
-    "openbb-tiingo>=1.0",
-    "openbb-intrinio>=1.0",
-    "openbb-equity>=1.0",
-    "openbb-etf>=1.0",
-    "openbb-crypto>=1.0",
-    "openbb-currency>=1.0",
-    "openbb-derivatives>=1.0",
-    "openbb-economy>=1.0",
-    "openbb-index>=1.0",
-    "openbb-news>=1.0",
-    "openbb-regulators>=1.0",
-    "openbb-fred>=1.0",
-    "openbb-bls>=1.0",
-    "openbb-oecd>=1.0",
-    "openbb-tradingeconomics>=1.0",
-    "openbb-government-us>=1.0",
-    "openbb-federal-reserve>=1.0",
-    "openbb-fixedincome>=1.0",
-    "openbb-commodity>=1.0",
-    "openbb-benzinga>=1.0",
-    "openbb-congress-gov>=1.0",
-    "openbb-cftc>=1.0",
-    "openbb-imf>=1.0",
-    "openbb-us-eia>=1.0",
-    "openbb-econdb>=1.0",
-    "openbb-platform-api>=1.0",
+    "openbb @ git+https://github.com/quantarb/OpenBB.git@develop#subdirectory=openbb_platform",
+    "openbb-core @ git+https://github.com/quantarb/OpenBB.git@develop#subdirectory=openbb_platform/core",
+    "openbb-fmp @ git+https://github.com/quantarb/OpenBB.git@develop#subdirectory=openbb_platform/providers/fmp",
+    "openbb-yfinance @ git+https://github.com/quantarb/OpenBB.git@develop#subdirectory=openbb_platform/providers/yfinance",
+    "openbb-sec @ git+https://github.com/quantarb/OpenBB.git@develop#subdirectory=openbb_platform/providers/sec",
+    "openbb-tiingo @ git+https://github.com/quantarb/OpenBB.git@develop#subdirectory=openbb_platform/providers/tiingo",
+    "openbb-intrinio @ git+https://github.com/quantarb/OpenBB.git@develop#subdirectory=openbb_platform/providers/intrinio",
+    "openbb-equity @ git+https://github.com/quantarb/OpenBB.git@develop#subdirectory=openbb_platform/extensions/equity",
+    "openbb-etf @ git+https://github.com/quantarb/OpenBB.git@develop#subdirectory=openbb_platform/extensions/etf",
+    "openbb-crypto @ git+https://github.com/quantarb/OpenBB.git@develop#subdirectory=openbb_platform/extensions/crypto",
+    "openbb-currency @ git+https://github.com/quantarb/OpenBB.git@develop#subdirectory=openbb_platform/extensions/currency",
+    "openbb-derivatives @ git+https://github.com/quantarb/OpenBB.git@develop#subdirectory=openbb_platform/extensions/derivatives",
+    "openbb-economy @ git+https://github.com/quantarb/OpenBB.git@develop#subdirectory=openbb_platform/extensions/economy",
+    "openbb-index @ git+https://github.com/quantarb/OpenBB.git@develop#subdirectory=openbb_platform/extensions/index",
+    "openbb-news @ git+https://github.com/quantarb/OpenBB.git@develop#subdirectory=openbb_platform/extensions/news",
+    "openbb-regulators @ git+https://github.com/quantarb/OpenBB.git@develop#subdirectory=openbb_platform/extensions/regulators",
+    "openbb-fred @ git+https://github.com/quantarb/OpenBB.git@develop#subdirectory=openbb_platform/providers/fred",
+    "openbb-bls @ git+https://github.com/quantarb/OpenBB.git@develop#subdirectory=openbb_platform/providers/bls",
+    "openbb-oecd @ git+https://github.com/quantarb/OpenBB.git@develop#subdirectory=openbb_platform/providers/oecd",
+    "openbb-tradingeconomics @ git+https://github.com/quantarb/OpenBB.git@develop#subdirectory=openbb_platform/providers/tradingeconomics",
+    "openbb-government-us @ git+https://github.com/quantarb/OpenBB.git@develop#subdirectory=openbb_platform/providers/government_us",
+    "openbb-federal-reserve @ git+https://github.com/quantarb/OpenBB.git@develop#subdirectory=openbb_platform/providers/federal_reserve",
+    "openbb-fixedincome @ git+https://github.com/quantarb/OpenBB.git@develop#subdirectory=openbb_platform/extensions/fixedincome",
+    "openbb-commodity @ git+https://github.com/quantarb/OpenBB.git@develop#subdirectory=openbb_platform/extensions/commodity",
+    "openbb-benzinga @ git+https://github.com/quantarb/OpenBB.git@develop#subdirectory=openbb_platform/providers/benzinga",
+    "openbb-congress-gov @ git+https://github.com/quantarb/OpenBB.git@develop#subdirectory=openbb_platform/providers/congress_gov",
+    "openbb-cftc @ git+https://github.com/quantarb/OpenBB.git@develop#subdirectory=openbb_platform/providers/cftc",
+    "openbb-imf @ git+https://github.com/quantarb/OpenBB.git@develop#subdirectory=openbb_platform/providers/imf",
+    "openbb-us-eia @ git+https://github.com/quantarb/OpenBB.git@develop#subdirectory=openbb_platform/providers/eia",
+    "openbb-econdb @ git+https://github.com/quantarb/OpenBB.git@develop#subdirectory=openbb_platform/providers/econdb",
+    "openbb-platform-api @ git+https://github.com/quantarb/OpenBB.git@develop#subdirectory=openbb_platform/extensions/platform_api",
+    "openbb-thetadata @ git+https://github.com/quantarb/OpenBB.git@develop#subdirectory=openbb_platform/providers/thetadata",
 ]
 thetadata = ["thetadata>=1.0.9", "pyarrow>=14.0"]
 feature-engineering = ["pandas-ta-classic>=0.3.54"]
@@ -61,6 +63,9 @@ quant-warehouse = "quant_warehouse.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["quant_warehouse"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.ruff]
 line-length = 100
