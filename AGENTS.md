@@ -26,9 +26,9 @@
 
 ## Compatibility Policy
 
-- This repo is new and rapidly changing. Do not add backward-compatibility wrappers, legacy aliases, or duplicate old APIs.
+- This repo is new and rapidly changing. Do not add new backward-compatibility wrappers, legacy aliases, or duplicate old APIs.
 - When a contract changes, update callers and notebooks directly.
-- Remove unused compatibility code instead of preserving it.
+- Existing migration helpers and compatibility shims reflect current code state; remove them when the migration path is no longer used instead of extending them.
 
 ## Build Vs Buy Policy
 

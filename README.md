@@ -23,7 +23,6 @@ catalog/        SQLite metadata — gap-fill state, columns_present, date ranges
 cd quant-warehouse
 conda env create -f environment.yml
 conda activate quant-warehouse
-openbb-build
 ```
 
 Or update an existing env:
@@ -36,14 +35,18 @@ conda env update -f environment.yml --prune
 
 ```bash
 cp .env.example .env
-# set FMP_API_KEY and optionally QW_HOME
+# set vendor keys such as FMP_API_KEY and optionally THETADATA_API_KEY
 export QW_HOME=~/.quant-warehouse
 ```
+
+The current environment installs `quant-warehouse` with the `[openbb,dev]` extra, which pulls OpenBB packages from the `quantarb/OpenBB` `develop` branch. The warehouse itself reads `QW_HOME`, `QW_ARCTIC_URI`, and `QW_CATALOG_PATH`; by default it stores ArcticDB data under `~/.quant-warehouse/arctic` and metadata in `~/.quant-warehouse/catalog.sqlite`.
 
 ## CLI
 
 ```bash
-quant-warehouse refresh AAPL --sections prices,income --providers fmp,sec
+quant-warehouse refresh AAPL --sections prices,income --providers fmp,yfinance,sec
+quant-warehouse refresh-prices AAPL --providers fmp,yfinance,tiingo --start-date 2020-01-01
+quant-warehouse refresh-fundamentals AAPL --sections income,balance,cash --providers fmp,sec
 quant-warehouse status AAPL
 ```
 
@@ -53,8 +56,8 @@ quant-warehouse status AAPL
 from quant_warehouse import Warehouse
 
 wh = Warehouse()
-wh.refresh("AAPL", sections=["prices", "income"], providers=["fmp", "sec"])
-prices = wh.read_prices("AAPL", start="2020-01-01")
+wh.refresh("AAPL", sections=["prices", "income"], providers=["fmp", "yfinance", "sec"])
+prices = wh.read_prices("AAPL", provider="fmp", start="2020-01-01")
 income = wh.read_fundamentals("AAPL", section="income", provider="fmp")
 ```
 
