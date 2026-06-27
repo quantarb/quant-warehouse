@@ -30,6 +30,12 @@
 - When a contract changes, update callers and notebooks directly.
 - Remove unused compatibility code instead of preserving it.
 
+## Build Vs Buy Policy
+
+- Prefer widely used, actively maintained third-party packages or small forks of proven projects over custom implementations.
+- For storage, validation, scheduling helpers, dataframe operations, feature engineering primitives, and target engineering utilities, use battle-tested libraries when they fit the warehouse boundary.
+- Build from scratch only when no reliable package fits the requirement or the warehouse needs a small opinionated wrapper around a proven dependency; document that reason in the change.
+
 ## Notebook Policy
 
 - Use `notebooks/` for one-off data work only: EDA, warehouse refresh inspection, schema experiments, experimental feature engineering, and experimental target engineering.
