@@ -117,8 +117,9 @@ def compute_features_worldclass(df: pd.DataFrame) -> pd.DataFrame:
     for window in [2, 3, 5, 10, 20, 21, 63, 126, 189, 252]:
         feats[f"Ret{window}d"] = close.pct_change(window)
 
-    for window in [5, 10, 20, 50, 100, 200]:
+    for window in [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 60, 70, 80, 90, 100, 120, 140, 150, 160, 180, 200]:
         sma = close.rolling(window).mean()
+        feats[f"SMA{window}"] = sma
         feats[f"DistSMA{window}"] = _safe_div(close - sma, sma)
         feats[f"SMASlope{window}"] = sma.diff()
 
@@ -241,8 +242,9 @@ def _compute_features_worldclass_cuda(df: pd.DataFrame) -> pd.DataFrame | None:
         feats["Ret1d"] = ret_1d
         for window in [2, 3, 5, 10, 20, 21, 63, 126, 189, 252]:
             feats[f"Ret{window}d"] = close.pct_change(window)
-        for window in [5, 10, 20, 50, 100, 200]:
+        for window in [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 60, 70, 80, 90, 100, 120, 140, 150, 160, 180, 200]:
             sma = close.rolling(window).mean()
+            feats[f"SMA{window}"] = sma
             feats[f"DistSMA{window}"] = _safe_div(close - sma, sma)
             feats[f"SMASlope{window}"] = sma.diff()
         for window in [12, 26, 50]:
