@@ -7,7 +7,7 @@ from quant_warehouse.target_engineering.event_pairs.event_pair_taxonomy import (
     get_event_side,
     get_mirror_event_type,
 )
-from quant_warehouse.target_engineering.event_pairs.fmp_fetch import (
+from quant_warehouse.platforms.data_providers.fmp.event_pairs import (
     fetch_fmp_event_pair_family,
     fetch_fmp_event_pairs,
 )

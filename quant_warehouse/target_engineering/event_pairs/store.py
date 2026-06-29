@@ -11,7 +11,7 @@ from quant_warehouse.config import WarehouseConfig
 from quant_warehouse.ingest.normalize import symbol_provider_key
 from quant_warehouse.target_engineering.event_pairs.event_pair_schema import EVENT_PAIR_COLUMNS
 from quant_warehouse.target_engineering.event_pairs.event_pair_taxonomy import EVENT_PAIR_TAXONOMY
-from quant_warehouse.target_engineering.event_pairs.fmp_fetch import (
+from quant_warehouse.platforms.data_providers.fmp.event_pairs import (
     _combine_names,
     _congress_event_type,
     _dividend_event_type,

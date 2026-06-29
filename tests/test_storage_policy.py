@@ -41,11 +41,11 @@ def test_default_thetadata_option_download_uses_arctic_paths(monkeypatch) -> Non
             written.append((symbol, df))
 
     monkeypatch.setattr(
-        "quant_warehouse.target_engineering.thetadata_loader.fetch_option_history_eod",
+        "quant_warehouse.platforms.data_providers.thetadata.options.fetch_option_history_eod",
         _fake_fetch,
     )
     monkeypatch.setattr(
-        "quant_warehouse.target_engineering.thetadata_loader.open_backend",
+        "quant_warehouse.platforms.data_providers.thetadata.options.open_backend",
         lambda *args, **kwargs: _Backend(),
     )
 

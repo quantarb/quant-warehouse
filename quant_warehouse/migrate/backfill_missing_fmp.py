@@ -16,9 +16,9 @@ from quant_warehouse.refresh.universe import (
     refresh_universe_nport_disclosure,
     refresh_universe_prices,
 )
+from quant_warehouse.platforms.data_providers.fmp.sections import FMP_HISTORICAL_EQUITY_SECTIONS
 from quant_warehouse.warehouse.api import Warehouse
 from quant_warehouse.warehouse.sections import (
-    FMP_HISTORICAL_EQUITY_SECTIONS,
     MIN_HISTORICAL_DATE,
     fundamental_period_for_section,
     normalize_fundamental_period,

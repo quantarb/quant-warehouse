@@ -50,25 +50,9 @@ def provider_from_library(library: str) -> str | None:
     text = str(library or "").strip().lower()
     if not text:
         return None
-    known_prefixes = (
-        "federal_reserve",
-        "government_us",
-        "tradingeconomics",
-        "congress_gov",
-        "yfinance",
-        "thetadata",
-        "intrinio",
-        "tiingo",
-        "econdb",
-        "fred",
-        "fmp",
-        "sec",
-        "bls",
-        "oecd",
-        "imf",
-        "cftc",
-    )
-    for prefix in known_prefixes:
+    from quant_warehouse.platforms.data_providers.registry import PROVIDER_PREFIXES
+
+    for prefix in PROVIDER_PREFIXES:
         if text == prefix or text.startswith(f"{prefix}_"):
             return prefix
     return None

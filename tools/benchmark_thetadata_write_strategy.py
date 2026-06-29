@@ -10,7 +10,7 @@ from pathlib import Path
 import pandas as pd
 
 from quant_warehouse.config import WarehouseConfig
-from quant_warehouse.target_engineering.thetadata_loader import (
+from quant_warehouse.platforms.data_providers.thetadata.options import (
     OPTIONS_THETADATA_EOD_LIBRARY,
     option_chain_storage_symbol,
     read_option_chain_arctic,

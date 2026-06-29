@@ -7,9 +7,10 @@ from pathlib import Path
 from typing import Callable, Sequence
 
 from quant_warehouse.config import WarehouseConfig
+from quant_warehouse.platforms.data_providers.fmp.sections import FMP_HISTORICAL_ETF_SECTIONS
 from quant_warehouse.refresh.universe import refresh_universe_fundamentals
 from quant_warehouse.warehouse.api import Warehouse
-from quant_warehouse.warehouse.sections import EQUITY_CALENDAR_SECTIONS, FMP_HISTORICAL_ETF_SECTIONS
+from quant_warehouse.warehouse.sections import EQUITY_CALENDAR_SECTIONS
 
 ProgressLogger = Callable[[str], None] | None
 

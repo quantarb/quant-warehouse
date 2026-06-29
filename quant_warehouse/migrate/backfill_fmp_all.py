@@ -21,11 +21,13 @@ from quant_warehouse.refresh.universe import (
     refresh_universe_prices,
     refresh_universe_profiles,
 )
+from quant_warehouse.platforms.data_providers.fmp.sections import (
+    FMP_ALL_EQUITY_SECTIONS,
+    FMP_HISTORICAL_ETF_SECTIONS,
+)
 from quant_warehouse.warehouse.api import Warehouse
 from quant_warehouse.warehouse.sections import (
     EQUITY_CALENDAR_SECTIONS,
-    FMP_ALL_EQUITY_SECTIONS,
-    FMP_HISTORICAL_ETF_SECTIONS,
     MIN_HISTORICAL_DATE,
 )
 

@@ -10,7 +10,7 @@ from typing import Callable, Literal, Sequence
 import pandas as pd
 
 from quant_warehouse.config import WarehouseConfig
-from quant_warehouse.target_engineering.thetadata_loader import (
+from quant_warehouse.platforms.data_providers.thetadata.options import (
     ThetaDataDownloadSpec,
     download_option_snapshots_for_range,
     option_chain_range_cached,

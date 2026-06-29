@@ -90,22 +90,6 @@ EXTENDED_FUNDAMENTAL_SECTIONS: tuple[str, ...] = (
     "senate_trading",
 )
 
-LEGACY_FMP_SECTION_MAP: dict[str, str] = {
-    "income_statement": "income",
-    "balance_sheet": "balance",
-    "cash_flow": "cash",
-    "key_metrics": "metrics",
-    "ratios": "ratios",
-    "income_statement_growth": "income_growth",
-    "balance_sheet_growth": "balance_growth",
-    "cash_flow_growth": "cash_growth",
-    "dividends": "dividends",
-    "splits": "historical_splits",
-    "earnings": "earnings",
-    "financial_growth": "financial_growth",
-    "senate_trading": "senate_trading",
-}
-
 ALL_FUNDAMENTAL_SECTIONS: frozenset[str] = frozenset(
     (
         *EQUITY_FUNDAMENTAL_SECTIONS,
@@ -193,52 +177,13 @@ LEGACY_FUNDAMENTALS_LIBRARY = "fundamentals"
 # Absolute historical floor. Equities use max(MIN_HISTORICAL_DATE, ipo_date); macro/ETF use this date.
 MIN_HISTORICAL_DATE = "1900-01-01"
 
-# OpenBB/FMP historical equity routes (excludes snapshots and non-FMP-only routes).
-FMP_HISTORICAL_EQUITY_SECTIONS: tuple[str, ...] = (
-    "income",
-    "balance",
-    "cash",
-    "metrics",
-    "ratios",
-    "income_growth",
-    "balance_growth",
-    "cash_growth",
-    "dividends",
-    "historical_eps",
-    "historical_splits",
-    "revenue_per_geography",
-    "revenue_per_segment",
-    "employee_count",
+from quant_warehouse.platforms.data_providers.fmp.sections import (
+    FMP_ALL_EQUITY_SECTIONS,
+    FMP_EXTENDED_EQUITY_SECTIONS,
+    FMP_HISTORICAL_EQUITY_SECTIONS,
+    FMP_HISTORICAL_ETF_SECTIONS,
+    LEGACY_FMP_SECTION_MAP,
 )
-
-# Extended per-symbol FMP equity routes (estimates, ownership, ESG, etc.).
-# Transcript is stored under EQUITY_FUNDAMENTAL_SECTIONS but fetched via refresh_transcripts().
-FMP_EXTENDED_EQUITY_SECTIONS: tuple[str, ...] = (
-    "historical_market_cap",
-    "esg_score",
-    "management_compensation",
-    "management",
-    "filings",
-    "compare_peers",
-    "estimates_historical",
-    "estimates_consensus",
-    "estimates_forward_eps",
-    "estimates_forward_ebitda",
-    "estimates_price_target",
-    "ownership_insider_trading",
-    "ownership_government_trades",
-    "ownership_institutional",
-    "ownership_share_statistics",
-)
-
-# All per-symbol FMP equity routes for comprehensive backfill.
-FMP_ALL_EQUITY_SECTIONS: tuple[str, ...] = (
-    *FMP_HISTORICAL_EQUITY_SECTIONS,
-    *FMP_EXTENDED_EQUITY_SECTIONS,
-)
-
-# OpenBB/FMP historical ETF routes.
-FMP_HISTORICAL_ETF_SECTIONS: tuple[str, ...] = ETF_FUNDAMENTAL_SECTIONS
 
 EQUITY_CALENDAR_EARNINGS_SECTION = "equity_calendar_earnings"
 EQUITY_CALENDAR_DIVIDEND_SECTION = "equity_calendar_dividend"

@@ -10,7 +10,7 @@ from quant_warehouse.target_engineering.option_labels import (
     OptionLabelSpec,
     build_option_label_panel,
 )
-from quant_warehouse.target_engineering.thetadata_loader import (
+from quant_warehouse.platforms.data_providers.thetadata.options import (
     ThetaDataDownloadSpec,
     load_cached_snapshots_for_trade_window,
 )

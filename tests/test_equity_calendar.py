@@ -1,7 +1,7 @@
 import pandas as pd
 
 from quant_warehouse.ingest.equity_calendar_fetch import normalize_equity_calendar_frame
-from quant_warehouse.warehouse.sections import (
+from quant_warehouse.platforms.data_providers.fmp.sections import (
     FMP_ALL_EQUITY_SECTIONS,
     FMP_EXTENDED_EQUITY_SECTIONS,
     FMP_HISTORICAL_ETF_SECTIONS,

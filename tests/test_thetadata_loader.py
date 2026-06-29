@@ -138,7 +138,7 @@ def test_fetch_option_history_eod_chunks_requests(monkeypatch) -> None:
         )
 
     monkeypatch.setattr(
-        "quant_warehouse.target_engineering.thetadata_loader.fetch_openbb",
+        "quant_warehouse.platforms.data_providers.thetadata.options.fetch_openbb",
         fake_fetch_openbb,
     )
     frame = fetch_option_history_eod("AAPL", "2024-01-01", "2025-06-01", api_key="test-key")
@@ -156,11 +156,11 @@ def test_load_thetadata_option_snapshots_uses_cache_without_fetch(monkeypatch) -
         raise AssertionError("fetch should not be called when cache is warm")
 
     monkeypatch.setattr(
-        "quant_warehouse.target_engineering.thetadata_loader.fetch_option_history_eod",
+        "quant_warehouse.platforms.data_providers.thetadata.options.fetch_option_history_eod",
         _fail_fetch,
     )
     monkeypatch.setattr(
-        "quant_warehouse.target_engineering.thetadata_loader.open_backend",
+        "quant_warehouse.platforms.data_providers.thetadata.options.open_backend",
         lambda *args, **kwargs: backend,
     )
     snapshots = load_thetadata_option_snapshots(
@@ -182,11 +182,11 @@ def test_download_option_snapshots_for_range_returns_cached_manifest(
         raise AssertionError("fetch should not be called when every business day is cached")
 
     monkeypatch.setattr(
-        "quant_warehouse.target_engineering.thetadata_loader.fetch_option_history_eod",
+        "quant_warehouse.platforms.data_providers.thetadata.options.fetch_option_history_eod",
         _fail_fetch,
     )
     monkeypatch.setattr(
-        "quant_warehouse.target_engineering.thetadata_loader.open_backend",
+        "quant_warehouse.platforms.data_providers.thetadata.options.open_backend",
         lambda *args, **kwargs: backend,
     )
     manifest = download_option_snapshots_for_range(
@@ -244,11 +244,11 @@ def test_download_option_snapshots_for_range_fetches_only_missing_business_range
         )
 
     monkeypatch.setattr(
-        "quant_warehouse.target_engineering.thetadata_loader.fetch_option_history_eod",
+        "quant_warehouse.platforms.data_providers.thetadata.options.fetch_option_history_eod",
         _fake_fetch,
     )
     monkeypatch.setattr(
-        "quant_warehouse.target_engineering.thetadata_loader.open_backend",
+        "quant_warehouse.platforms.data_providers.thetadata.options.open_backend",
         lambda *args, **kwargs: backend,
     )
     manifest = download_option_snapshots_for_range(

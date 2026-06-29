@@ -49,7 +49,7 @@ from quant_warehouse.target_engineering.option_dataset import (
     build_option_ml_dataset,
     save_option_ml_dataset,
 )
-from quant_warehouse.target_engineering.thetadata_loader import (
+from quant_warehouse.platforms.data_providers.thetadata.options import (
     OPTIONS_THETADATA_EOD_LIBRARY,
     ThetaDataDownloadSpec,
     download_option_snapshots_for_range,

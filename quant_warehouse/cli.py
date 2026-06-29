@@ -18,6 +18,7 @@ from quant_warehouse.migrate.backfill_thetadata_options import (
     write_backfill_log as write_thetadata_options_log,
 )
 from quant_warehouse.migrate.separate_fundamentals import separate_legacy_fundamentals
+from quant_warehouse.platforms.data_providers.fmp.sections import FMP_HISTORICAL_EQUITY_SECTIONS
 from quant_warehouse.warehouse.sections import (
     EQUITY_FUNDAMENTAL_SECTIONS,
     ETF_FUNDAMENTAL_SECTIONS,
@@ -25,7 +26,6 @@ from quant_warehouse.warehouse.sections import (
     DEFAULT_CURRENCY_SYMBOLS,
     DEFAULT_ECONOMIC_SERIES,
     DEFAULT_INDEX_SYMBOLS,
-    FMP_HISTORICAL_EQUITY_SECTIONS,
     MIN_HISTORICAL_DATE,
 )
 from quant_warehouse.warehouse.api import Warehouse
