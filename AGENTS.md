@@ -39,6 +39,8 @@
 ## Notebook Policy
 
 - Use `notebooks/` for one-off data work only: EDA, warehouse refresh inspection, schema experiments, experimental feature engineering, and experimental target engineering.
+- `notebooks/` should contain notebook files only. Do not add standalone `.py` scripts in that directory.
+- Keep exploratory, one-off, and notebook-only code inside the notebook itself so people can edit and rerun it interactively.
 - Notebooks in this repo must not train ML models, run backtests, simulate portfolios, or submit orders.
 - Even notebooks must use OpenBB through `quant-warehouse`; do not call vendor APIs directly.
 
@@ -47,3 +49,8 @@
 - Prefer vectorized Pandas/NumPy and batched warehouse reads/writes.
 - Add GPU/CUDA acceleration only for data transformations where it materially helps and the CPU path is not kept as a compatibility duplicate.
 - Do not move model training or backtesting into this repo for CUDA reasons; those belong in `quant-orchestrator`.
+
+## Git Hygiene
+
+- This workspace is maintained by a single author. Push completed changes directly to the remote branch; do not create or wait on pull requests unless the user explicitly asks for one.
+- Use `--force-with-lease` only when intentionally rewriting the current branch history.
