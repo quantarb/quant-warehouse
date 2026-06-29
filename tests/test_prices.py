@@ -96,3 +96,44 @@ def test_prices_store_gap_fill_and_read(tmp_path: Path):
     out = store.read("AAPL", provider="yfinance")
     assert len(out) == 2
     assert out.loc["2024-01-02", "close"] == 101.0
+
+
+def test_prices_store_requests_dividend_adjusted_prices(tmp_path: Path, monkeypatch):
+    config = WarehouseConfig(
+        home=tmp_path / "home",
+        arctic_uri=f"lmdb://{tmp_path / 'arctic'}",
+        catalog_path=tmp_path / "catalog.sqlite",
+    )
+    backend = ArcticBackend(config.arctic_uri)
+    catalog = CatalogStore(config.catalog_path)
+    store = PricesStore(config, backend=backend, catalog=catalog)
+    raw = pd.DataFrame(
+        {
+            "open": [100.0],
+            "high": [101.0],
+            "low": [99.0],
+            "close": [100.5],
+            "volume": [1000],
+        },
+        index=pd.to_datetime(["2024-01-02"]),
+    )
+    raw.index.name = "date"
+    calls = []
+
+    def _fake_fetch(section, *, symbol, provider, **kwargs):
+        calls.append((section, symbol, provider, kwargs))
+        return raw
+
+    monkeypatch.setattr("quant_warehouse.warehouse.prices.fetch_dataframe", _fake_fetch)
+
+    stats = store.refresh("AAPL", providers=("yfinance",), full_refresh=True)
+
+    assert stats["yfinance"]["rows"] == 1
+    assert calls == [
+        (
+            "prices",
+            "AAPL",
+            "yfinance",
+            {"adjustment": "splits_and_dividends"},
+        )
+    ]

@@ -16,6 +16,7 @@ from quant_warehouse.warehouse.merge import merge_upsert
 PRICES_LIBRARY = "prices"
 GAP_OVERLAP_DAYS = 5
 GAP_FILL_RETRY_LOOKBACK_DAYS = 30
+EQUITY_PRICE_ADJUSTMENT = "splits_and_dividends"
 
 
 def parse_symbol_provider_key(storage_symbol: str) -> tuple[str, str] | None:
@@ -92,6 +93,7 @@ class PricesStore:
                 kwargs["start_date"] = fetch_start
             if end_date:
                 kwargs["end_date"] = end_date
+            kwargs["adjustment"] = EQUITY_PRICE_ADJUSTMENT
 
             raw = fetch_dataframe("prices", symbol=symbol, provider=provider, **kwargs)
             history_floor = self.catalog.equity_historical_start(symbol)
