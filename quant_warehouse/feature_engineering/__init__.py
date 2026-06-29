@@ -4,7 +4,7 @@ from quant_warehouse.feature_engineering.specs import (
     FeatureToggleSpec,
     RepresentationEmbeddingSpec,
 )
-from quant_warehouse.feature_engineering.ta_classic_technical import (
+from quant_warehouse.platforms.computation_libraries.pandas_ta_classic import (
     TA_CLASSIC_FAMILY_PREFIXES,
     build_price_ta_classic_feature_families,
 )

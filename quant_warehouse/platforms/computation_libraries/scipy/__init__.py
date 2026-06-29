@@ -1,0 +1,1 @@
+"""SciPy integration boundary."""
