@@ -42,6 +42,7 @@ def test_open_backend_uses_arctic(tmp_path: Path, monkeypatch):
 def test_provider_library_names_are_provider_scoped_without_duplicate_provider():
     assert provider_library("prices", "yfinance") == "yfinance_equity_prices"
     assert provider_library("etf_prices", "fmp") == "fmp_etf_prices"
+    assert provider_library("fund_prices", "yfinance") == "yfinance_fund_prices"
     assert provider_library("fundamental_income", "fmp") == "fmp_equity_fundamental_income"
     assert provider_library("options_thetadata_eod", "thetadata") == "thetadata_derivatives_options_eod"
 

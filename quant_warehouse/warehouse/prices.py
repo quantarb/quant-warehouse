@@ -12,6 +12,7 @@ from quant_warehouse.ingest.openbb_fetch import fetch_dataframe
 from quant_warehouse.ingest.providers import DEFAULT_PRICE_PROVIDERS, validate_price_provider
 from quant_warehouse.warehouse.backend import ArcticBackend, StorageBackend, open_backend
 from quant_warehouse.warehouse.merge import merge_upsert
+from quant_warehouse.warehouse.sections import ETF_PRICES_LIBRARY, FUND_PRICES_LIBRARY
 from quant_warehouse.warehouse.storage import read_provider_frame, provider_library
 
 PRICES_LIBRARY = "prices"
@@ -247,6 +248,20 @@ class PricesStore:
             provider=provider,
             symbol=storage_symbol,
         )
+        if df is None or df.empty:
+            df = read_provider_frame(
+                self.backend,
+                base_library=ETF_PRICES_LIBRARY,
+                provider=provider,
+                symbol=storage_symbol,
+            )
+        if df is None or df.empty:
+            df = read_provider_frame(
+                self.backend,
+                base_library=FUND_PRICES_LIBRARY,
+                provider=provider,
+                symbol=storage_symbol,
+            )
         if df is None or df.empty:
             return pd.DataFrame()
         return _slice_dates(df, start=start, end=end)

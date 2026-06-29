@@ -5,7 +5,7 @@ import pandas as pd
 from quant_warehouse.catalog.store import CatalogStore
 from quant_warehouse.config import WarehouseConfig
 from quant_warehouse.ingest.normalize import clip_to_min_historical_date, normalize_prices
-from quant_warehouse.warehouse.sections import MIN_HISTORICAL_DATE
+from quant_warehouse.warehouse.sections import FUND_PRICES_LIBRARY, MIN_HISTORICAL_DATE
 from quant_warehouse.warehouse.backend import ArcticBackend
 from quant_warehouse.warehouse.merge import merge_upsert
 from quant_warehouse.warehouse.prices import PRICES_LIBRARY, PricesStore
@@ -141,3 +141,26 @@ def test_prices_store_requests_dividend_adjusted_prices(tmp_path: Path, monkeypa
     ]
     assert backend.read(provider_library(PRICES_LIBRARY, "yfinance"), "AAPL__yfinance") is not None
     assert backend.read(PRICES_LIBRARY, "AAPL__yfinance") is None
+
+
+def test_prices_store_read_falls_back_to_fund_price_library(tmp_path: Path):
+    config = WarehouseConfig(
+        home=tmp_path / "home",
+        arctic_uri=f"lmdb://{tmp_path / 'arctic'}",
+        catalog_path=tmp_path / "catalog.sqlite",
+    )
+    backend = ArcticBackend(config.arctic_uri)
+    catalog = CatalogStore(config.catalog_path)
+    store = PricesStore(config, backend=backend, catalog=catalog)
+    frame = pd.DataFrame(
+        {"close": [10.0, 10.5]},
+        index=pd.to_datetime(["2024-01-01", "2024-01-02"]),
+    )
+    frame.index.name = "date"
+
+    backend.write(provider_library(FUND_PRICES_LIBRARY, "yfinance"), "VTSAX__yfinance", frame)
+
+    out = store.read("VTSAX", provider="yfinance")
+
+    assert len(out) == 2
+    assert out.loc["2024-01-02", "close"] == 10.5

@@ -2,9 +2,11 @@ from __future__ import annotations
 
 EQUITY_PRICES_LIBRARY = "prices"
 ETF_PRICES_LIBRARY = "etf_prices"
+FUND_PRICES_LIBRARY = "fund_prices"
 
 EQUITY_PRICES_SECTION = "prices"
 ETF_PRICES_SECTION = "etf_prices"
+FUND_PRICES_SECTION = "fund_prices"
 EQUITY_PROFILE_SECTION = "profile"
 ETF_PROFILE_SECTION = "etf_profile"
 
@@ -155,6 +157,7 @@ DATE_WINDOW_SECTIONS: frozenset[str] = frozenset(
     {
         "prices",
         "etf_prices",
+        "fund_prices",
         "crypto_prices",
         "currency_prices",
         "index_prices",
