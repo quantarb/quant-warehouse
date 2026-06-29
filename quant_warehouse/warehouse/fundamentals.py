@@ -21,6 +21,7 @@ from quant_warehouse.ingest.providers import (
 from quant_warehouse.warehouse.backend import ArcticBackend, StorageBackend, open_backend
 from quant_warehouse.warehouse.merge import merge_panel_upsert, merge_upsert
 from quant_warehouse.warehouse.prices import _slice_dates
+from quant_warehouse.warehouse.storage import read_provider_frame, provider_library
 from quant_warehouse.warehouse.sections import (
     ALL_FUNDAMENTAL_SECTIONS,
     DATED_SNAPSHOT_SECTIONS,
@@ -94,9 +95,15 @@ class FundamentalsStore:
                         min_date=history_floor,
                     )
 
-                library = fundamental_library(section)
+                base_library = fundamental_library(section)
+                library = provider_library(base_library, provider)
                 storage_symbol = symbol_provider_key(symbol, provider)
-                existing = self.backend.read(library, storage_symbol)
+                existing = read_provider_frame(
+                    self.backend,
+                    base_library=base_library,
+                    provider=provider,
+                    symbol=storage_symbol,
+                )
 
                 if section in PANEL_FUNDAMENTAL_SECTIONS or section in DATED_SNAPSHOT_SECTIONS:
                     merged = merge_panel_upsert(existing, frame)
@@ -152,7 +159,7 @@ class FundamentalsStore:
             "min_date": state.min_date if state else None,
             "max_date": state.max_date if state else None,
             "storage_symbol": symbol_provider_key(symbol, provider),
-            "library": fundamental_library(section),
+            "library": provider_library(fundamental_library(section), provider),
             "storage_backend": self.storage_kind,
         }
 
@@ -169,7 +176,12 @@ class FundamentalsStore:
         provider = validate_fundamental_provider(provider)
         storage_symbol = symbol_provider_key(symbol, provider)
         library = fundamental_library(section)
-        df = self.backend.read(library, storage_symbol)
+        df = read_provider_frame(
+            self.backend,
+            base_library=library,
+            provider=provider,
+            symbol=storage_symbol,
+        )
         if df is None or df.empty:
             return pd.DataFrame()
         if section in SNAPSHOT_FUNDAMENTAL_SECTIONS:
@@ -204,11 +216,17 @@ class FundamentalsStore:
         else:
             normalized = normalize_vendor_frame(frame, provider=provider, vendor_only_prefix=None)
 
-        library = fundamental_library(section)
+        base_library = fundamental_library(section)
+        library = provider_library(base_library, provider)
         storage_symbol = symbol_provider_key(symbol, provider)
         merged = normalized
         if merge:
-            existing = self.backend.read(library, storage_symbol)
+            existing = read_provider_frame(
+                self.backend,
+                base_library=base_library,
+                provider=provider,
+                symbol=storage_symbol,
+            )
             if section in PANEL_FUNDAMENTAL_SECTIONS or section in DATED_SNAPSHOT_SECTIONS:
                 merged = merge_panel_upsert(existing, normalized)
             elif isinstance(normalized.index, pd.DatetimeIndex):

@@ -10,6 +10,7 @@ from pandas.api.types import is_object_dtype, is_string_dtype
 from quant_warehouse.config import WarehouseConfig
 from quant_warehouse.ingest.openbb_fetch import fetch_openbb
 from quant_warehouse.warehouse.backend import ArcticBackend, open_backend
+from quant_warehouse.warehouse.storage import read_provider_frame, provider_library
 
 # ThetaData EOD history rejects spans longer than 365 calendar days.
 THETADATA_MAX_EOD_SPAN_DAYS = 364
@@ -127,7 +128,12 @@ def read_option_chain_arctic(
     config: WarehouseConfig | None = None,
 ) -> pd.DataFrame:
     backend = backend or open_backend(config or WarehouseConfig.from_env())
-    frame = backend.read(OPTIONS_THETADATA_EOD_LIBRARY, option_chain_storage_symbol(symbol))
+    frame = read_provider_frame(
+        backend,
+        base_library=OPTIONS_THETADATA_EOD_LIBRARY,
+        provider=OPTIONS_THETADATA_PROVIDER,
+        symbol=option_chain_storage_symbol(symbol),
+    )
     if frame is None or frame.empty:
         return pd.DataFrame()
     out = frame.copy()
@@ -157,10 +163,20 @@ def write_option_chain_arctic(
     backend = backend or open_backend(config or WarehouseConfig.from_env())
     storage_symbol = option_chain_storage_symbol(symbol)
     incoming = _prepare_option_chain_for_arctic(frame)
-    existing = backend.read(OPTIONS_THETADATA_EOD_LIBRARY, storage_symbol) if merge else None
+    library = provider_library(OPTIONS_THETADATA_EOD_LIBRARY, OPTIONS_THETADATA_PROVIDER)
+    existing = (
+        read_provider_frame(
+            backend,
+            base_library=OPTIONS_THETADATA_EOD_LIBRARY,
+            provider=OPTIONS_THETADATA_PROVIDER,
+            symbol=storage_symbol,
+        )
+        if merge
+        else None
+    )
     merged = _merge_option_chain_upsert(existing, incoming)
     if not merged.empty:
-        backend.write(OPTIONS_THETADATA_EOD_LIBRARY, storage_symbol, merged, prune_previous_versions=True)
+        backend.write(library, storage_symbol, merged, prune_previous_versions=True)
     return _arctic_ref(symbol)
 
 
@@ -540,7 +556,8 @@ def _sanitize_option_chain_for_arctic(frame: pd.DataFrame) -> pd.DataFrame:
 
 
 def _arctic_ref(symbol: str) -> str:
-    return f"arctic://{OPTIONS_THETADATA_EOD_LIBRARY}/{option_chain_storage_symbol(symbol)}"
+    library = provider_library(OPTIONS_THETADATA_EOD_LIBRARY, OPTIONS_THETADATA_PROVIDER)
+    return f"arctic://{library}/{option_chain_storage_symbol(symbol)}"
 
 
 def _normalize_snapshot_dates(values: pd.Series) -> pd.Series:

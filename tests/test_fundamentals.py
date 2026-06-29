@@ -8,6 +8,7 @@ from quant_warehouse.ingest.normalize import normalize_vendor_frame
 from quant_warehouse.warehouse.backend import ArcticBackend
 from quant_warehouse.warehouse.fundamentals import FundamentalsStore
 from quant_warehouse.warehouse.sections import fundamental_library
+from quant_warehouse.warehouse.storage import provider_library
 
 
 def test_normalize_vendor_frame_without_provider_prefix():
@@ -51,10 +52,14 @@ def test_fundamentals_store_per_section_libraries(tmp_path: Path):
 
     income_lib = fundamental_library("income")
     balance_lib = fundamental_library("balance")
-    assert backend.read(income_lib, "AAPL__fmp") is not None
-    assert backend.read(balance_lib, "AAPL__fmp") is not None
-    assert backend.read(income_lib, "AAPL__fmp").shape[1] == 1
-    assert backend.read(balance_lib, "AAPL__fmp").shape[1] == 1
+    income_vendor_lib = provider_library(income_lib, "fmp")
+    balance_vendor_lib = provider_library(balance_lib, "fmp")
+    assert backend.read(income_vendor_lib, "AAPL__fmp") is not None
+    assert backend.read(balance_vendor_lib, "AAPL__fmp") is not None
+    assert backend.read(income_lib, "AAPL__fmp") is None
+    assert backend.read(balance_lib, "AAPL__fmp") is None
+    assert backend.read(income_vendor_lib, "AAPL__fmp").shape[1] == 1
+    assert backend.read(balance_vendor_lib, "AAPL__fmp").shape[1] == 1
 
     out = store.read("AAPL", section="income", provider="fmp")
     assert out.loc["2024-12-31", "total_revenue"] == 120.0

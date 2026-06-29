@@ -95,10 +95,71 @@ class ArcticBackend:
         return True
 
 
+class ProviderRoutingBackend:
+    """Route provider-scoped libraries to provider-specific Arctic roots."""
+
+    kind: StorageKind = "arctic"
+
+    def __init__(
+        self,
+        config: WarehouseConfig,
+        *,
+        storage_lock: threading.RLock | None = None,
+    ) -> None:
+        self.config = config
+        self._storage_lock = storage_lock
+        self._default = ArcticBackend(config.arctic_uri, storage_lock=storage_lock)
+        self._provider_backends: dict[str, ArcticBackend] = {}
+
+    def _backend_for_library(self, library: str) -> ArcticBackend:
+        from quant_warehouse.warehouse.storage import provider_from_library
+
+        provider = provider_from_library(library)
+        if provider is None:
+            return self._default
+        backend = self._provider_backends.get(provider)
+        if backend is None:
+            uri = self.config.provider_arctic_uri(provider)
+            if uri.startswith("lmdb://"):
+                from pathlib import Path
+
+                Path(uri.removeprefix("lmdb://")).mkdir(parents=True, exist_ok=True)
+            backend = ArcticBackend(uri, storage_lock=self._storage_lock)
+            self._provider_backends[provider] = backend
+        return backend
+
+    def read(self, library: str, symbol: str) -> pd.DataFrame | None:
+        return self._backend_for_library(library).read(library, symbol)
+
+    def write(
+        self,
+        library: str,
+        symbol: str,
+        df: pd.DataFrame,
+        *,
+        prune_previous_versions: bool = True,
+    ) -> None:
+        self._backend_for_library(library).write(
+            library,
+            symbol,
+            df,
+            prune_previous_versions=prune_previous_versions,
+        )
+
+    def list_symbols(self, library: str) -> list[str]:
+        return self._backend_for_library(library).list_symbols(library)
+
+    def has_symbol(self, library: str, symbol: str) -> bool:
+        return self._backend_for_library(library).has_symbol(library, symbol)
+
+    def delete(self, library: str, symbol: str) -> bool:
+        return self._backend_for_library(library).delete(library, symbol)
+
+
 def open_backend(
     config: WarehouseConfig,
     *,
     storage_lock: threading.RLock | None = None,
-) -> ArcticBackend:
+) -> ProviderRoutingBackend:
     config.ensure_dirs()
-    return ArcticBackend(config.arctic_uri, storage_lock=storage_lock)
+    return ProviderRoutingBackend(config, storage_lock=storage_lock)

@@ -12,6 +12,7 @@ from quant_warehouse.ingest.openbb_fetch import fetch_dataframe
 from quant_warehouse.warehouse.backend import ArcticBackend, StorageBackend, open_backend
 from quant_warehouse.warehouse.merge import merge_upsert
 from quant_warehouse.warehouse.prices import _slice_dates
+from quant_warehouse.warehouse.storage import read_provider_frame, provider_library
 from quant_warehouse.warehouse.sections import (
     MARKET_PRICE_SECTIONS,
     MIN_HISTORICAL_DATE,
@@ -78,7 +79,14 @@ class MarketPricesStore:
                     fetch_start = retry_kwargs["start_date"]
 
         storage_symbol = symbol_provider_key(symbol, provider_name)
-        existing = self.backend.read(library, storage_symbol)
+        base_library = library
+        library = provider_library(base_library, provider_name)
+        existing = read_provider_frame(
+            self.backend,
+            base_library=base_library,
+            provider=provider_name,
+            symbol=storage_symbol,
+        )
         merged = merge_upsert(existing, frame)
         if not merged.empty:
             self.backend.write(library, storage_symbol, merged)
@@ -107,6 +115,7 @@ class MarketPricesStore:
             "min_date": min_date,
             "max_date": max_date,
             "storage_symbol": storage_symbol,
+            "library": library,
             "fetch_start": fetch_start,
             "storage_backend": self.storage_kind,
         }
@@ -125,7 +134,12 @@ class MarketPricesStore:
         if library is None:
             raise ValueError(f"Unknown market price section: {section}")
         storage_symbol = symbol_provider_key(symbol.strip().upper(), provider.strip().lower())
-        frame = self.backend.read(library, storage_symbol)
+        frame = read_provider_frame(
+            self.backend,
+            base_library=library,
+            provider=provider.strip().lower(),
+            symbol=storage_symbol,
+        )
         if frame is None or frame.empty:
             return pd.DataFrame()
         return _slice_dates(frame, start=start, end=end)

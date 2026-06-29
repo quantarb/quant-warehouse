@@ -12,6 +12,7 @@ from quant_warehouse.ingest.openbb_fetch import fetch_dataframe
 from quant_warehouse.ingest.providers import DEFAULT_PRICE_PROVIDERS, validate_price_provider
 from quant_warehouse.warehouse.backend import ArcticBackend, StorageBackend, open_backend
 from quant_warehouse.warehouse.merge import merge_upsert
+from quant_warehouse.warehouse.storage import read_provider_frame, provider_library
 
 PRICES_LIBRARY = "prices"
 GAP_OVERLAP_DAYS = 5
@@ -42,15 +43,21 @@ def list_arctic_price_underlyings(
     target_provider = str(provider).strip().lower()
     symbols: list[str] = []
     seen: set[str] = set()
-    for storage_symbol in backend.list_symbols(library):
-        parsed = parse_symbol_provider_key(storage_symbol)
-        if parsed is None:
+    libraries = [provider_library(library, target_provider), library]
+    for library_name in libraries:
+        try:
+            library_symbols = backend.list_symbols(library_name)
+        except Exception:
             continue
-        symbol, stored_provider = parsed
-        if stored_provider != target_provider or symbol in seen:
-            continue
-        seen.add(symbol)
-        symbols.append(symbol)
+        for storage_symbol in library_symbols:
+            parsed = parse_symbol_provider_key(storage_symbol)
+            if parsed is None:
+                continue
+            symbol, stored_provider = parsed
+            if stored_provider != target_provider or symbol in seen:
+                continue
+            seen.add(symbol)
+            symbols.append(symbol)
     return sorted(symbols)
 
 
@@ -93,9 +100,14 @@ class PricesStore:
                 kwargs["start_date"] = fetch_start
             if end_date:
                 kwargs["end_date"] = end_date
-            kwargs["adjustment"] = EQUITY_PRICE_ADJUSTMENT
 
-            raw = fetch_dataframe("prices", symbol=symbol, provider=provider, **kwargs)
+            raw = fetch_dataframe(
+                "prices",
+                symbol=symbol,
+                provider=provider,
+                adjustment=EQUITY_PRICE_ADJUSTMENT,
+                **kwargs,
+            )
             history_floor = self.catalog.equity_historical_start(symbol)
             frame = normalize_prices(raw, provider=provider, min_date=history_floor)
             if (
@@ -109,17 +121,29 @@ class PricesStore:
                     wider_start = pd.Timestamp(state.max_date) - timedelta(days=GAP_FILL_RETRY_LOOKBACK_DAYS)
                     retry_kwargs = dict(kwargs)
                     retry_kwargs["start_date"] = wider_start.strftime("%Y-%m-%d")
-                    raw = fetch_dataframe("prices", symbol=symbol, provider=provider, **retry_kwargs)
+                    raw = fetch_dataframe(
+                        "prices",
+                        symbol=symbol,
+                        provider=provider,
+                        adjustment=EQUITY_PRICE_ADJUSTMENT,
+                        **retry_kwargs,
+                    )
                     frame = normalize_prices(raw, provider=provider, min_date=history_floor)
                     if not frame.empty:
                         fetch_start = retry_kwargs["start_date"]
             storage_symbol = symbol_provider_key(symbol, provider)
 
-            existing = self.backend.read(PRICES_LIBRARY, storage_symbol)
+            library = provider_library(PRICES_LIBRARY, provider)
+            existing = read_provider_frame(
+                self.backend,
+                base_library=PRICES_LIBRARY,
+                provider=provider,
+                symbol=storage_symbol,
+            )
             merged = merge_upsert(existing, frame)
             rows_written = 0
             if not merged.empty:
-                self.backend.write(PRICES_LIBRARY, storage_symbol, merged)
+                self.backend.write(library, storage_symbol, merged)
                 rows_written = len(merged)
 
             min_date = None
@@ -143,6 +167,7 @@ class PricesStore:
                 "min_date": min_date,
                 "max_date": max_date,
                 "storage_symbol": storage_symbol,
+                "library": library,
                 "fetch_start": fetch_start,
                 "storage_backend": self.storage_kind,
             }
@@ -165,12 +190,20 @@ class PricesStore:
 
         merged = normalized
         if merge:
-            existing = self.backend.read(PRICES_LIBRARY, storage_symbol)
+            library = provider_library(PRICES_LIBRARY, provider)
+            existing = read_provider_frame(
+                self.backend,
+                base_library=PRICES_LIBRARY,
+                provider=provider,
+                symbol=storage_symbol,
+            )
             merged = merge_upsert(existing, normalized)
+        else:
+            library = provider_library(PRICES_LIBRARY, provider)
 
         rows_written = 0
         if not merged.empty:
-            self.backend.write(PRICES_LIBRARY, storage_symbol, merged)
+            self.backend.write(library, storage_symbol, merged)
             rows_written = len(merged)
 
         min_date = None
@@ -194,6 +227,7 @@ class PricesStore:
             "min_date": min_date,
             "max_date": max_date,
             "storage_symbol": storage_symbol,
+            "library": library,
             "storage_backend": self.storage_kind,
         }
 
@@ -207,7 +241,12 @@ class PricesStore:
     ) -> pd.DataFrame:
         provider = validate_price_provider(provider)
         storage_symbol = symbol_provider_key(symbol, provider)
-        df = self.backend.read(PRICES_LIBRARY, storage_symbol)
+        df = read_provider_frame(
+            self.backend,
+            base_library=PRICES_LIBRARY,
+            provider=provider,
+            symbol=storage_symbol,
+        )
         if df is None or df.empty:
             return pd.DataFrame()
         return _slice_dates(df, start=start, end=end)

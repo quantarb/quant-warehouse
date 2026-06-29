@@ -4,8 +4,10 @@ import pandas as pd
 
 from quant_warehouse.target_engineering.thetadata_loader import (
     OPTIONS_THETADATA_EOD_LIBRARY,
+    OPTIONS_THETADATA_PROVIDER,
     download_option_snapshots_for_range,
 )
+from quant_warehouse.warehouse.storage import provider_library
 
 
 def test_default_thetadata_option_download_uses_arctic_paths(monkeypatch) -> None:
@@ -28,11 +30,14 @@ def test_default_thetadata_option_download_uses_arctic_paths(monkeypatch) -> Non
 
     class _Backend:
         def read(self, library: str, symbol: str) -> pd.DataFrame | None:
-            assert library == OPTIONS_THETADATA_EOD_LIBRARY
+            assert library in {
+                OPTIONS_THETADATA_EOD_LIBRARY,
+                provider_library(OPTIONS_THETADATA_EOD_LIBRARY, OPTIONS_THETADATA_PROVIDER),
+            }
             return None
 
         def write(self, library: str, symbol: str, df: pd.DataFrame, **kwargs) -> None:
-            assert library == OPTIONS_THETADATA_EOD_LIBRARY
+            assert library == provider_library(OPTIONS_THETADATA_EOD_LIBRARY, OPTIONS_THETADATA_PROVIDER)
             written.append((symbol, df))
 
     monkeypatch.setattr(
@@ -46,7 +51,8 @@ def test_default_thetadata_option_download_uses_arctic_paths(monkeypatch) -> Non
 
     manifest = download_option_snapshots_for_range("AAPL", "2025-01-06", "2025-01-06")
 
-    assert manifest["paths"] == [f"arctic://{OPTIONS_THETADATA_EOD_LIBRARY}/AAPL"]
+    expected_library = provider_library(OPTIONS_THETADATA_EOD_LIBRARY, OPTIONS_THETADATA_PROVIDER)
+    assert manifest["paths"] == [f"arctic://{expected_library}/AAPL"]
     assert written
     assert written[0][0] == "AAPL"
     assert "snapshot_date" in written[0][1].columns

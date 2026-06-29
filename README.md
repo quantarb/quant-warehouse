@@ -40,7 +40,7 @@ cp .env.example .env
 export QW_HOME=~/.quant-warehouse
 ```
 
-The current environment installs `quant-warehouse` with the `[openbb,dev]` extra, which pulls OpenBB packages from the `quantarb/OpenBB` `develop` branch. The warehouse itself reads `QW_HOME`, `QW_ARCTIC_URI`, and `QW_CATALOG_PATH`; by default it stores ArcticDB data under `~/.quant-warehouse/arctic` and metadata in `~/.quant-warehouse/catalog.sqlite`.
+The current environment installs `quant-warehouse` with the `[openbb,dev]` extra, which pulls OpenBB packages from the `quantarb/OpenBB` `develop` branch. The warehouse itself reads `QW_HOME`, `QW_ARCTIC_URI`, and `QW_CATALOG_PATH`; by default it stores legacy/shared ArcticDB data under `~/.quant-warehouse/arctic`, provider-isolated ArcticDB roots under `~/.quant-warehouse/arctic/providers/{provider}`, and metadata in `~/.quant-warehouse/catalog.sqlite`.
 
 ## CLI
 
@@ -71,6 +71,7 @@ income = wh.read_fundamentals("AAPL", section="income", provider="fmp")
 5. **Gold features are daily** — same row count as prices after PIT join + derived columns.
 6. **Only store columns a vendor returns** — no empty cross-vendor placeholders.
 7. **Gap-fill** — merge on date/period per symbol; catalog tracks ranges and `last_fetched_at`.
+8. **Provider isolation for new writes** — provider-owned data is written to provider-scoped physical libraries with OpenBB route-family-style dataset names such as `yfinance_equity_prices`, `fmp_etf_prices`, `fmp_equity_fundamental_income`, and `thetadata_derivatives_options_eod`. Provider-scoped libraries are routed to provider-specific ArcticDB roots by default, so heavy ThetaData writes use a different LMDB root than FMP or YFinance. Existing shared libraries remain readable as migration fallbacks.
 
 ## License
 

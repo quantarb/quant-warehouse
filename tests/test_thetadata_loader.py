@@ -4,6 +4,7 @@ import pandas as pd
 
 from quant_warehouse.target_engineering.thetadata_loader import (
     OPTIONS_THETADATA_EOD_LIBRARY,
+    OPTIONS_THETADATA_PROVIDER,
     _iter_eod_date_chunks,
     download_option_snapshots_for_range,
     fetch_option_history_eod,
@@ -13,6 +14,7 @@ from quant_warehouse.target_engineering.thetadata_loader import (
     split_snapshots_by_date,
     load_thetadata_option_snapshots,
 )
+from quant_warehouse.warehouse.storage import provider_library
 
 
 def _raw_frame() -> pd.DataFrame:
@@ -68,7 +70,10 @@ class _MemoryBackend:
         self.writes: list[tuple[str, str, pd.DataFrame, bool]] = []
 
     def read(self, library: str, symbol: str) -> pd.DataFrame | None:
-        assert library == OPTIONS_THETADATA_EOD_LIBRARY
+        assert library in {
+            OPTIONS_THETADATA_EOD_LIBRARY,
+            provider_library(OPTIONS_THETADATA_EOD_LIBRARY, OPTIONS_THETADATA_PROVIDER),
+        }
         return None if self.frame is None else self.frame.copy()
 
     def write(
@@ -79,7 +84,7 @@ class _MemoryBackend:
         *,
         prune_previous_versions: bool = False,
     ) -> None:
-        assert library == OPTIONS_THETADATA_EOD_LIBRARY
+        assert library == provider_library(OPTIONS_THETADATA_EOD_LIBRARY, OPTIONS_THETADATA_PROVIDER)
         self.frame = df.copy()
         self.writes.append((library, symbol, df.copy(), prune_previous_versions))
 
@@ -87,7 +92,9 @@ class _MemoryBackend:
 def test_arctic_option_chain_roundtrip() -> None:
     frame = normalize_thetadata_option_chain(_raw_frame().iloc[[0]])
     backend = _MemoryBackend()
-    assert write_option_chain_arctic("AAPL", frame, backend=backend) == "arctic://options_thetadata_eod/AAPL"
+    expected_library = provider_library(OPTIONS_THETADATA_EOD_LIBRARY, OPTIONS_THETADATA_PROVIDER)
+    assert write_option_chain_arctic("AAPL", frame, backend=backend) == f"arctic://{expected_library}/AAPL"
+    assert backend.writes[0][0] == expected_library
     assert backend.writes[0][3] is True
     loaded = read_option_chain_arctic("AAPL", start_date="2025-01-06", end_date="2025-01-06", backend=backend)
     assert len(loaded) == 1
@@ -191,7 +198,8 @@ def test_download_option_snapshots_for_range_returns_cached_manifest(
     assert manifest["snapshot_days"] == 1
     assert manifest["contracts_total"] == 1
     assert manifest["cached_days"] == 1
-    assert manifest["paths"] == ["arctic://options_thetadata_eod/AAPL"]
+    expected_library = provider_library(OPTIONS_THETADATA_EOD_LIBRARY, OPTIONS_THETADATA_PROVIDER)
+    assert manifest["paths"] == [f"arctic://{expected_library}/AAPL"]
 
 
 def test_download_option_snapshots_for_range_fetches_only_missing_business_ranges(

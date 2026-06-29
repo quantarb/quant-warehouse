@@ -9,6 +9,7 @@ from quant_warehouse.warehouse.sections import MIN_HISTORICAL_DATE
 from quant_warehouse.warehouse.backend import ArcticBackend
 from quant_warehouse.warehouse.merge import merge_upsert
 from quant_warehouse.warehouse.prices import PRICES_LIBRARY, PricesStore
+from quant_warehouse.warehouse.storage import provider_library
 
 
 def test_clip_to_min_historical_date_drops_pre_floor_rows():
@@ -129,6 +130,7 @@ def test_prices_store_requests_dividend_adjusted_prices(tmp_path: Path, monkeypa
     stats = store.refresh("AAPL", providers=("yfinance",), full_refresh=True)
 
     assert stats["yfinance"]["rows"] == 1
+    assert stats["yfinance"]["library"] == provider_library(PRICES_LIBRARY, "yfinance")
     assert calls == [
         (
             "prices",
@@ -137,3 +139,5 @@ def test_prices_store_requests_dividend_adjusted_prices(tmp_path: Path, monkeypa
             {"adjustment": "splits_and_dividends"},
         )
     ]
+    assert backend.read(provider_library(PRICES_LIBRARY, "yfinance"), "AAPL__yfinance") is not None
+    assert backend.read(PRICES_LIBRARY, "AAPL__yfinance") is None

@@ -14,6 +14,7 @@ from quant_warehouse.warehouse.backend import ArcticBackend, StorageBackend, ope
 from quant_warehouse.warehouse.merge import merge_upsert
 from quant_warehouse.warehouse.prices import _slice_dates
 from quant_warehouse.warehouse.fundamentals import FundamentalsStore
+from quant_warehouse.warehouse.storage import read_provider_frame, provider_library
 from quant_warehouse.warehouse.sections import (
     ETF_FUNDAMENTAL_SECTIONS,
     ETF_PRICES_LIBRARY,
@@ -85,11 +86,17 @@ class EtfStore:
                         fetch_start = retry_kwargs["start_date"]
             storage_symbol = symbol_provider_key(symbol, provider)
 
-            existing = self.backend.read(ETF_PRICES_LIBRARY, storage_symbol)
+            library = provider_library(ETF_PRICES_LIBRARY, provider)
+            existing = read_provider_frame(
+                self.backend,
+                base_library=ETF_PRICES_LIBRARY,
+                provider=provider,
+                symbol=storage_symbol,
+            )
             merged = merge_upsert(existing, frame)
             rows_written = 0
             if not merged.empty:
-                self.backend.write(ETF_PRICES_LIBRARY, storage_symbol, merged)
+                self.backend.write(library, storage_symbol, merged)
                 rows_written = len(merged)
 
             min_date = None
@@ -113,6 +120,7 @@ class EtfStore:
                 "min_date": min_date,
                 "max_date": max_date,
                 "storage_symbol": storage_symbol,
+                "library": library,
                 "fetch_start": fetch_start,
                 "storage_backend": self.storage_kind,
             }
@@ -133,13 +141,19 @@ class EtfStore:
         storage_symbol = symbol_provider_key(symbol, provider)
 
         merged = normalized
+        library = provider_library(ETF_PRICES_LIBRARY, provider)
         if merge:
-            existing = self.backend.read(ETF_PRICES_LIBRARY, storage_symbol)
+            existing = read_provider_frame(
+                self.backend,
+                base_library=ETF_PRICES_LIBRARY,
+                provider=provider,
+                symbol=storage_symbol,
+            )
             merged = merge_upsert(existing, normalized)
 
         rows_written = 0
         if not merged.empty:
-            self.backend.write(ETF_PRICES_LIBRARY, storage_symbol, merged)
+            self.backend.write(library, storage_symbol, merged)
             rows_written = len(merged)
 
         min_date = None
@@ -163,6 +177,7 @@ class EtfStore:
             "min_date": min_date,
             "max_date": max_date,
             "storage_symbol": storage_symbol,
+            "library": library,
             "storage_backend": self.storage_kind,
         }
 
@@ -176,7 +191,12 @@ class EtfStore:
     ) -> pd.DataFrame:
         provider = validate_price_provider(provider)
         storage_symbol = symbol_provider_key(symbol, provider)
-        df = self.backend.read(ETF_PRICES_LIBRARY, storage_symbol)
+        df = read_provider_frame(
+            self.backend,
+            base_library=ETF_PRICES_LIBRARY,
+            provider=provider,
+            symbol=storage_symbol,
+        )
         if df is None or df.empty:
             return pd.DataFrame()
         return _slice_dates(df, start=start, end=end)
