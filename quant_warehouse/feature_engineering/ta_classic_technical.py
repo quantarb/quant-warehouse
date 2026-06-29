@@ -69,7 +69,8 @@ def _import_pandas_ta_classic():
     except ImportError as exc:
         raise ImportError(
             "pandas-ta-classic is required for split technical feature families. "
-            "Install it with `pip install pandas-ta-classic`."
+            "Install the Quant fork with "
+            "`pip install 'pandas-ta-classic @ git+https://github.com/quantarb/pandas-ta-classic.git@main'`."
         ) from exc
     return ta
 

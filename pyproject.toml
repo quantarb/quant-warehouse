@@ -55,7 +55,7 @@ openbb = [
     "openbb-thetadata @ git+https://github.com/quantarb/OpenBB.git@develop#subdirectory=openbb_platform/providers/thetadata",
 ]
 thetadata = ["thetadata>=1.0.9", "pyarrow>=14.0"]
-feature-engineering = ["pandas-ta-classic>=0.3.54"]
+feature-engineering = ["pandas-ta-classic @ git+https://github.com/quantarb/pandas-ta-classic.git@main"]
 dev = ["pytest>=8.0", "ruff>=0.6"]
 all = ["quant-warehouse[openbb,thetadata,feature-engineering,dev]"]
 
