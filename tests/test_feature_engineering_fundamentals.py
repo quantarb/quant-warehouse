@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from quant_warehouse.feature_engineering import fundamentals
+from quant_warehouse.platforms.data_providers.fmp.feature_engineering import fundamentals
 
 
 def test_warehouse_section_mapping_excludes_removed_ttm_sections():

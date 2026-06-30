@@ -9,7 +9,7 @@ import pandas as pd
 from quant_warehouse.catalog.store import CatalogStore
 from quant_warehouse.config import WarehouseConfig
 from quant_warehouse.ingest.normalize import symbol_provider_key
-from quant_warehouse.target_engineering.event_pairs.classifiers import (
+from quant_warehouse.platforms.data_providers.fmp.target_engineering.event_pairs.classifiers import (
     analyst_rating_event_type,
     combine_names,
     congress_event_type,
@@ -28,8 +28,8 @@ from quant_warehouse.target_engineering.event_pairs.classifiers import (
     split_event_type,
     split_ratio,
 )
-from quant_warehouse.target_engineering.event_pairs.event_pair_schema import EVENT_PAIR_COLUMNS
-from quant_warehouse.target_engineering.event_pairs.event_pair_taxonomy import EVENT_PAIR_TAXONOMY
+from quant_warehouse.platforms.data_providers.fmp.target_engineering.event_pairs.event_pair_schema import EVENT_PAIR_COLUMNS
+from quant_warehouse.platforms.data_providers.fmp.target_engineering.event_pairs.event_pair_taxonomy import EVENT_PAIR_TAXONOMY
 from quant_warehouse.warehouse.backend import ArcticBackend, StorageBackend, open_backend
 from quant_warehouse.warehouse.equity_calendar import EquityCalendarStore
 from quant_warehouse.warehouse.fundamentals import FundamentalsStore

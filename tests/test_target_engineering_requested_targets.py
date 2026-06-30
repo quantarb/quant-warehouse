@@ -3,20 +3,24 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from quant_warehouse.target_engineering import (
-    build_cross_sectional_rank_labels,
-    build_forward_return_labels,
-    build_optimal_trade_labels,
-    build_option_best_return_labels,
-    build_option_mean_variance_labels,
-    build_option_return_rank_labels,
-    build_event_pairs_from_historical_data,
+from quant_warehouse.platforms.data_providers.fmp.target_engineering import (
     EventPairStore,
+    build_event_pairs_from_historical_data,
     fetch_fmp_event_pair_family,
     fetch_fmp_event_pairs,
     get_event_side,
     get_mirror_event_type,
     normalize_event_pairs,
+)
+from quant_warehouse.platforms.data_providers.thetadata.target_engineering import (
+    build_option_best_return_labels,
+    build_option_mean_variance_labels,
+    build_option_return_rank_labels,
+)
+from quant_warehouse.target_engineering import (
+    build_cross_sectional_rank_labels,
+    build_forward_return_labels,
+    build_optimal_trade_labels,
 )
 
 

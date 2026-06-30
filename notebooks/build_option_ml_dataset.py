@@ -8,12 +8,12 @@ import pandas as pd
 
 from quant_warehouse import Warehouse
 from quant_warehouse.target_engineering import LabelBuildSpec, build_trade_results
-from quant_warehouse.target_engineering.option_dataset import (
+from quant_warehouse.platforms.data_providers.thetadata.target_engineering.option_dataset import (
     OptionMlDatasetSpec,
     build_option_ml_dataset,
     save_option_ml_dataset,
 )
-from quant_warehouse.target_engineering.thetadata_loader import ThetaDataDownloadSpec
+from quant_warehouse.platforms.data_providers.thetadata.options import ThetaDataDownloadSpec
 
 
 def _load_price_frame(symbol: str, start: str, end: str) -> pd.DataFrame:

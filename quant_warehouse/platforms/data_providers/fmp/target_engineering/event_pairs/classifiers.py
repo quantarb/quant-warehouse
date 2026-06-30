@@ -4,7 +4,7 @@ from typing import Any, Sequence
 
 import pandas as pd
 
-from quant_warehouse.target_engineering.event_pairs.event_pair_normalizer import normalize_event_pairs
+from quant_warehouse.platforms.data_providers.fmp.target_engineering.event_pairs.event_pair_normalizer import normalize_event_pairs
 
 
 def insider_event_type(row: pd.Series) -> str | None:

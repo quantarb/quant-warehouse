@@ -6,7 +6,7 @@ from typing import Any, Mapping, Sequence
 
 import pandas as pd
 
-from quant_warehouse.target_engineering.option_labels import (
+from quant_warehouse.platforms.data_providers.thetadata.target_engineering.option_labels import (
     OptionLabelSpec,
     build_option_label_panel,
 )

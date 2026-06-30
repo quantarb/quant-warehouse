@@ -6,7 +6,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from quant_warehouse.feature_engineering.fundamentals import (
+from quant_warehouse.platforms.data_providers.fmp.feature_engineering.fundamentals import (
     section_prefix,
     warehouse_section_to_indexed_frame,
 )

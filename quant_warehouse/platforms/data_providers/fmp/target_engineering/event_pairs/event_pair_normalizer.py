@@ -4,8 +4,8 @@ from typing import Any
 
 import pandas as pd
 
-from quant_warehouse.target_engineering.event_pairs.event_pair_schema import EVENT_PAIR_COLUMNS
-from quant_warehouse.target_engineering.event_pairs.event_pair_taxonomy import get_event_side, get_mirror_event_type
+from quant_warehouse.platforms.data_providers.fmp.target_engineering.event_pairs.event_pair_schema import EVENT_PAIR_COLUMNS
+from quant_warehouse.platforms.data_providers.fmp.target_engineering.event_pairs.event_pair_taxonomy import get_event_side, get_mirror_event_type
 
 
 def normalize_event_pairs(

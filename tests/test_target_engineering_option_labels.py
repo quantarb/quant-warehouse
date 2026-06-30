@@ -4,7 +4,7 @@ import pandas as pd
 
 import numpy as np
 
-from quant_warehouse.target_engineering import (
+from quant_warehouse.platforms.data_providers.thetadata.target_engineering import (
     OptionLabelSpec,
     build_option_label_panel,
     build_option_labels,
@@ -12,7 +12,7 @@ from quant_warehouse.target_engineering import (
     solve_long_only_mean_variance_weights,
     solve_mean_variance_weights,
 )
-from quant_warehouse.target_engineering.option_labels import _build_trade_window_price_panel
+from quant_warehouse.platforms.data_providers.thetadata.target_engineering.option_labels import _build_trade_window_price_panel
 
 
 def _option_snapshot(snapshot_date: str, returns: dict[str, tuple[float, float]]) -> pd.DataFrame:
