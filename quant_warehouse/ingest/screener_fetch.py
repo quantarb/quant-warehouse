@@ -26,6 +26,7 @@ class ScreenerQuery:
     is_etf: bool | None = None
     is_fund: bool | None = None
     is_active: bool | None = None
+    all_share_classes: bool | None = None
     limit: int = 10_000
 
 
@@ -127,6 +128,8 @@ def _fetch_openbb_screener(query: ScreenerQuery) -> pd.DataFrame:
         kwargs["is_fund"] = bool(query.is_fund)
     if query.is_active is not None:
         kwargs["is_active"] = bool(query.is_active)
+    if query.all_share_classes is not None:
+        kwargs["all_share_classes"] = bool(query.all_share_classes)
     if len(query.exchanges) == 1:
         kwargs["exchange"] = query.exchanges[0].lower() if provider == "yfinance" else query.exchanges[0]
 
