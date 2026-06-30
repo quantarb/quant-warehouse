@@ -177,14 +177,6 @@ LEGACY_FUNDAMENTALS_LIBRARY = "fundamentals"
 # Absolute historical floor. Equities use max(MIN_HISTORICAL_DATE, ipo_date); macro/ETF use this date.
 MIN_HISTORICAL_DATE = "1900-01-01"
 
-from quant_warehouse.platforms.data_providers.fmp.sections import (
-    FMP_ALL_EQUITY_SECTIONS,
-    FMP_EXTENDED_EQUITY_SECTIONS,
-    FMP_HISTORICAL_EQUITY_SECTIONS,
-    FMP_HISTORICAL_ETF_SECTIONS,
-    LEGACY_FMP_SECTION_MAP,
-)
-
 EQUITY_CALENDAR_EARNINGS_SECTION = "equity_calendar_earnings"
 EQUITY_CALENDAR_DIVIDEND_SECTION = "equity_calendar_dividend"
 EQUITY_CALENDAR_SPLITS_SECTION = "equity_calendar_splits"

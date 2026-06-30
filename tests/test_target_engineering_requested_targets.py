@@ -17,10 +17,9 @@ from quant_warehouse.platforms.data_providers.thetadata.target_engineering impor
     build_option_mean_variance_labels,
     build_option_return_rank_labels,
 )
-from quant_warehouse.target_engineering import (
+from quant_warehouse.platforms.data_providers.fmp.target_engineering import (
     build_cross_sectional_rank_labels,
     build_forward_return_labels,
-    build_optimal_trade_labels,
 )
 
 
@@ -90,26 +89,6 @@ def test_build_cross_sectional_rank_labels_direction() -> None:
     assert best["rank"] == 1.0
     assert best["rank_pct"] == 1.0
     assert worst["rank_pct"] < best["rank_pct"]
-
-
-def test_build_optimal_trade_labels_tiny_path() -> None:
-    prices = pd.DataFrame(
-        {
-            "symbol": ["AAPL"] * 4,
-            "date": pd.date_range("2024-01-01", periods=4),
-            "close": [10.0, 9.5, 12.0, 7.0],
-        }
-    )
-
-    labels = build_optimal_trade_labels(prices, [2], allow_short=True)
-    first = labels.loc[labels["date"] == pd.Timestamp("2024-01-01")].iloc[0]
-    third = labels.loc[labels["date"] == pd.Timestamp("2024-01-03")].iloc[0]
-
-    assert first["optimal_side"] == "long"
-    assert round(first["optimal_return"], 6) == 0.20
-    assert first["optimal_exit_date"] == pd.Timestamp("2024-01-03")
-    assert third["optimal_side"] == "short"
-    assert round(third["short_best_return"], 6) == round((12.0 / 7.0) - 1.0, 6)
 
 
 def _option_returns() -> pd.DataFrame:

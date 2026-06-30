@@ -7,7 +7,7 @@ from pathlib import Path
 import pandas as pd
 
 from quant_warehouse import Warehouse
-from quant_warehouse.target_engineering import LabelBuildSpec, build_trade_results
+from quant_warehouse.platforms.data_providers.fmp.target_engineering import LabelBuildSpec, build_trade_results
 from quant_warehouse.platforms.data_providers.thetadata.target_engineering.option_labels import build_option_labels
 from quant_warehouse.platforms.data_providers.thetadata.options import (
     load_thetadata_option_snapshots,

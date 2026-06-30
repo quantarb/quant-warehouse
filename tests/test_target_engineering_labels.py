@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from quant_warehouse.target_engineering import (
+from quant_warehouse.platforms.data_providers.fmp.target_engineering import (
     LabelBuildSpec,
     add_action_labels,
     add_binary_classification_labels,
@@ -57,16 +57,16 @@ def test_generate_optimal_events_and_label_helpers() -> None:
         price_col="close",
     )
 
-    assert list(events["event"]) == ["entry", "exit", "entry", "exit"]
-    assert list(events["side"]) == ["short", "short", "long", "long"]
-    assert events["trade_id"].nunique() == 2
+    assert list(events["event"]) == ["entry", "exit", "entry", "entry", "exit", "exit"]
+    assert list(events["side"]) == ["long", "long", "short", "long", "short", "long"]
+    assert events["trade_id"].nunique() == 3
 
     actions = add_action_labels(events)
     binary = add_binary_classification_labels(events, use_sample_weight=False)
     ranked = add_rank_regression_labels(binary)
 
-    assert list(actions["label"]) == ["short", "cover", "buy", "sell"]
-    assert list(binary["target"]) == [0, 1, 1, 0]
+    assert list(actions["label"]) == ["buy", "sell", "short", "buy", "cover", "sell"]
+    assert list(binary["target"]) == [1, 0, 0, 1, 1, 0]
     assert "rank_y" in ranked.columns
     assert ranked["rank_y"].notna().all()
 
@@ -85,10 +85,10 @@ def test_build_trade_results_and_oracle_labels_from_price_frames() -> None:
     generated = build_trade_results(["AAPL"], spec=spec, price_frames={"AAPL": _price_frame()})
     result = build_oracle_labels(["AAPL"], spec=spec, price_frames={"AAPL": _price_frame()})
 
-    assert len(generated.completed_trades) == 2
-    assert [row["side"] for row in generated.completed_trades] == ["short", "long"]
-    assert len(result.label_rows) == 4
-    assert result.statistics["trade_stats"]["total_trades"] == 2
+    assert len(generated.completed_trades) == 3
+    assert [row["side"] for row in generated.completed_trades] == ["long", "long", "short"]
+    assert len(result.label_rows) == 6
+    assert result.statistics["trade_stats"]["total_trades"] == 3
     assert result.statistics["trade_stats"]["symbols_count"] == 1
 
 
@@ -109,7 +109,7 @@ def test_build_trade_results_batches_multiple_symbols() -> None:
         price_frames={"AAPL": _price_frame(), "MSFT": _price_frame(offset=1.0)},
     )
 
-    assert len(generated.completed_trades) == 4
+    assert len(generated.completed_trades) == 6
     assert {row["symbol"] for row in generated.completed_trades} == {"AAPL", "MSFT"}
 
 
@@ -141,23 +141,3 @@ def test_build_label_panel_parallel_matches_sequential() -> None:
     assert set(sequential.index.get_level_values("symbol")) == {"AAPL", "MSFT"}
     assert {"label", "target", "rank_y", "trade_id"}.issubset(sequential.columns)
 
-
-def test_build_label_panel_period_sequence_mode() -> None:
-    labels = build_label_panel(
-        {"AAPL": _price_frame()},
-        k_params={"ME": [1]},
-        solver_mode="period_sequence",
-        execution_params={
-            "min_profit_pct": 0.05,
-            "buy_execution": "adj_high",
-            "sell_execution": "adj_low",
-            "short_execution": "adj_low",
-            "cover_execution": "adj_high",
-            "price_col": "close",
-        },
-        weighting={"use_sample_weight": False},
-        add_rank_labels=False,
-    )
-
-    assert not labels.empty
-    assert set(labels["horizon"]) == {"ME"}

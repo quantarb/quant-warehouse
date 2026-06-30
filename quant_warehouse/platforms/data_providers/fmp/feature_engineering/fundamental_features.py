@@ -10,8 +10,8 @@ from quant_warehouse.platforms.data_providers.fmp.feature_engineering.fundamenta
     section_prefix,
     warehouse_section_to_indexed_frame,
 )
-from quant_warehouse.feature_engineering.specs import BuiltFeatureSet
-from quant_warehouse.feature_engineering.broadcast import broadcast_asof_to_target_index
+from quant_warehouse.platforms.data_providers.fmp.feature_engineering.specs import BuiltFeatureSet
+from quant_warehouse.platforms.data_providers.fmp.feature_engineering.broadcast import broadcast_asof_to_target_index
 
 
 SparseLoader = Callable[..., pd.DataFrame]

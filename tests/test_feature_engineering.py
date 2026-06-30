@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from quant_warehouse.feature_engineering import (
+from quant_warehouse.platforms.data_providers.fmp.feature_engineering import (
     TA_CLASSIC_FAMILY_PREFIXES,
     build_price_ta_classic_feature_families,
     build_price_technical_features,

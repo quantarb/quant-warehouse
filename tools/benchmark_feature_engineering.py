@@ -18,8 +18,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from quant_warehouse.feature_engineering import build_price_technical_features  # noqa: E402
-from quant_warehouse.feature_engineering.specs import BuiltFeatureSet  # noqa: E402
+from quant_warehouse.platforms.data_providers.fmp.feature_engineering import build_price_technical_features  # noqa: E402
+from quant_warehouse.platforms.data_providers.fmp.feature_engineering.specs import BuiltFeatureSet  # noqa: E402
 
 
 FeatureBuilder = Callable[[str, pd.DataFrame], BuiltFeatureSet]

@@ -16,7 +16,10 @@
 ## Change Placement
 
 - Fix provider pagination, endpoint coverage, schema normalization, and vendor-specific behavior in the OpenBB fork.
-- Keep `quant-warehouse` focused on storage, point-in-time normalization, feature engineering, target engineering, and route orchestration through OpenBB.
+- Keep `quant-warehouse` focused on storage, point-in-time normalization, provider-owned feature engineering, provider-owned target engineering, and route orchestration through OpenBB.
+- Put provider-specific feature and target code under `quant_warehouse/platforms/data_providers/{provider}/`.
+- Do not recreate top-level `quant_warehouse.feature_engineering` or `quant_warehouse.target_engineering` packages. The current code intentionally keeps FMP equity/fundamental logic under `platforms/data_providers/fmp` and ThetaData option logic under `platforms/data_providers/thetadata`.
+- Put computation-library adapters under `quant_warehouse/platforms/computation_libraries/`; those adapters are implementation backends, not canonical feature-family definitions.
 
 ## Warehouse Responsibility
 
@@ -47,7 +50,7 @@
 ## Performance Policy
 
 - Prefer vectorized Pandas/NumPy and batched warehouse reads/writes.
-- Add GPU/CUDA acceleration only for data transformations where it materially helps and the CPU path is not kept as a compatibility duplicate.
+- Add GPU/CUDA acceleration only for data transformations where it materially helps. The FMP oracle-trade target path intentionally does not have a CUDA implementation because the measured version was not materially faster than the CPU/Numba path.
 - Do not move model training or backtesting into this repo for CUDA reasons; those belong in `quant-orchestrator`.
 
 ## Git Hygiene
