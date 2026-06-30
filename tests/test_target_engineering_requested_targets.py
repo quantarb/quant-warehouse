@@ -166,8 +166,10 @@ def test_build_option_mean_variance_labels_score_rank_selection() -> None:
 def test_event_pair_mirror_lookup() -> None:
     assert get_mirror_event_type("congress", "congress_buy") == "congress_sell"
     assert get_mirror_event_type("analyst_rating", "analyst_downgrade") == "analyst_upgrade"
+    assert get_mirror_event_type("guidance", "guidance_raise") == "guidance_cut"
     assert get_event_side("institutional", "institutional_add") == 1
     assert get_event_side("institutional", "institutional_reduce") == -1
+    assert get_event_side("guidance", "guidance_cut") == -1
 
 
 def test_normalize_event_pairs_exact_dates() -> None:
@@ -241,6 +243,32 @@ def test_build_event_pairs_from_existing_historical_sections() -> None:
         "warehouse:ownership_insider_trading",
         "warehouse:ownership_insider_trading",
     ]
+
+
+def test_build_guidance_event_pairs_from_forward_estimate_revisions() -> None:
+    fundamentals = _FakeFundamentals(
+        {
+            "estimates_forward_eps": pd.DataFrame(
+                {
+                    "symbol": ["AAPL", "AAPL", "AAPL"],
+                    "date": ["2024-01-01", "2024-02-01", "2024-03-01"],
+                    "fiscal_date_ending": ["2024-12-31", "2024-12-31", "2024-12-31"],
+                    "estimated_eps_avg": [6.00, 6.25, 6.10],
+                }
+            )
+        }
+    )
+
+    events = build_event_pairs_from_historical_data(
+        "AAPL",
+        fundamentals=fundamentals,
+        event_families=("guidance",),
+    )
+
+    assert list(events["event_type"]) == ["guidance_raise", "guidance_cut"]
+    assert list(events["event_side"]) == [1, -1]
+    assert list(events["source"]) == ["warehouse:forward_estimates", "warehouse:forward_estimates"]
+    assert list(events["strength"]) == [6.25, 6.10]
 
 
 def test_event_pair_store_uses_cached_labels_without_refetch(monkeypatch) -> None:

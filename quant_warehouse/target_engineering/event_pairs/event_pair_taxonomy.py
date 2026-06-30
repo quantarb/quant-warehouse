@@ -17,6 +17,10 @@ EVENT_PAIR_TAXONOMY = {
         "positive": "price_target_raise",
         "negative": "price_target_cut",
     },
+    "guidance": {
+        "positive": "guidance_raise",
+        "negative": "guidance_cut",
+    },
     "institutional": {
         "positive": "institutional_add",
         "negative": "institutional_reduce",

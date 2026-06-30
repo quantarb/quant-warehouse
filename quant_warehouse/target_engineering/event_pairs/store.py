@@ -9,26 +9,27 @@ import pandas as pd
 from quant_warehouse.catalog.store import CatalogStore
 from quant_warehouse.config import WarehouseConfig
 from quant_warehouse.ingest.normalize import symbol_provider_key
+from quant_warehouse.target_engineering.event_pairs.classifiers import (
+    analyst_rating_event_type,
+    combine_names,
+    congress_event_type,
+    dividend_event_type,
+    earnings_event_type,
+    ensure_symbol,
+    filter_dates,
+    first_numeric_column,
+    first_present_column,
+    guidance_event_type,
+    insider_event_type,
+    institutional_event_type,
+    normalize_family_frame,
+    price_target_event_type,
+    raw_records,
+    split_event_type,
+    split_ratio,
+)
 from quant_warehouse.target_engineering.event_pairs.event_pair_schema import EVENT_PAIR_COLUMNS
 from quant_warehouse.target_engineering.event_pairs.event_pair_taxonomy import EVENT_PAIR_TAXONOMY
-from quant_warehouse.platforms.data_providers.fmp.event_pairs import (
-    _combine_names,
-    _congress_event_type,
-    _dividend_event_type,
-    _earnings_event_type,
-    _ensure_symbol,
-    _filter_dates,
-    _first_numeric_column,
-    _first_present_column,
-    _analyst_rating_event_type,
-    _insider_event_type,
-    _institutional_event_type,
-    _normalize_family_frame,
-    _price_target_event_type,
-    _raw_records,
-    _split_event_type,
-    _split_ratio,
-)
 from quant_warehouse.warehouse.backend import ArcticBackend, StorageBackend, open_backend
 from quant_warehouse.warehouse.equity_calendar import EquityCalendarStore
 from quant_warehouse.warehouse.fundamentals import FundamentalsStore
@@ -43,6 +44,7 @@ _HISTORICAL_SECTIONS: dict[str, tuple[str, ...]] = {
     "insider": ("ownership_insider_trading",),
     "congress": ("ownership_government_trades",),
     "price_target": ("estimates_price_target",),
+    "guidance": ("estimates_forward_eps", "estimates_forward_ebitda", "estimates_consensus"),
     "institutional": ("ownership_institutional",),
     "dividend": ("dividends", "equity_calendar_dividend"),
     "split": ("historical_splits", "equity_calendar_splits"),
@@ -317,6 +319,18 @@ def _build_family_from_historical(
     if family == "price_target":
         frame = fundamentals.read(symbol, section="estimates_price_target", provider=provider, start=start_date, end=end_date)
         return _build_price_target(symbol, frame, start_date=start_date, end_date=end_date)
+    if family == "guidance":
+        frames = []
+        for section, metric in (
+            ("estimates_forward_eps", "eps"),
+            ("estimates_forward_ebitda", "ebitda"),
+            ("estimates_consensus", "consensus"),
+        ):
+            frame = fundamentals.read(symbol, section=section, provider=provider, start=start_date, end=end_date)
+            if frame is not None and not frame.empty:
+                frames.append(_with_guidance_source(frame, section=section, metric=metric))
+        frame = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+        return _build_guidance(symbol, frame, start_date=start_date, end_date=end_date)
     if family == "institutional":
         frame = fundamentals.read(symbol, section="ownership_institutional", provider=provider, start=start_date, end=end_date)
         return _build_institutional(symbol, frame, start_date=start_date, end_date=end_date)
@@ -342,40 +356,40 @@ def _build_analyst_rating(symbol: str, frame: pd.DataFrame, *, start_date: str |
     frame = _prepare_historical_frame(symbol, frame)
     if frame.empty:
         return pd.DataFrame(columns=EVENT_PAIR_COLUMNS)
-    frame = _filter_dates(frame, start_date=start_date, end_date=end_date)
+    frame = filter_dates(frame, start_date=start_date, end_date=end_date)
     if frame.empty:
         return pd.DataFrame(columns=EVENT_PAIR_COLUMNS)
     if "action" not in frame.columns:
-        frame["action"] = _first_present_column(frame, ("action", "news_title", "title"))
-    frame["event_type"] = frame.apply(_analyst_rating_event_type, axis=1)
+        frame["action"] = first_present_column(frame, ("action", "news_title", "title"))
+    frame["event_type"] = frame.apply(analyst_rating_event_type, axis=1)
     frame = frame.dropna(subset=["event_type"]).copy()
     if frame.empty:
         return pd.DataFrame(columns=EVENT_PAIR_COLUMNS)
-    frame["event_date"] = _first_present_column(frame, ("date", "publishedDate", "published_date", "gradingDate", "grading_date"))
+    frame["event_date"] = first_present_column(frame, ("date", "publishedDate", "published_date", "gradingDate", "grading_date"))
     frame["actor_type"] = "analyst"
-    frame["actor_name"] = _first_present_column(
+    frame["actor_name"] = first_present_column(
         frame,
         ("gradingCompany", "grading_company", "company", "analystCompany", "analyst_company", "analystFirm", "analyst_firm", "firm", "analystName", "analyst_name"),
     )
-    frame["strength"] = _first_present_column(frame, ("newGrade", "new_grade", "newRating", "new_rating", "action", "news_title", "title"))
-    frame["raw_json"] = _raw_records(frame)
-    return _normalize_family_frame(frame, event_family="analyst_rating", source="warehouse:estimates_price_target")
+    frame["strength"] = first_present_column(frame, ("newGrade", "new_grade", "newRating", "new_rating", "action", "news_title", "title"))
+    frame["raw_json"] = raw_records(frame)
+    return normalize_family_frame(frame, event_family="analyst_rating", source="warehouse:estimates_price_target")
 
 
 def _build_capital_action(symbol: str, frame: pd.DataFrame, *, start_date: str | None, end_date: str | None) -> pd.DataFrame:
     frame = _prepare_historical_frame(symbol, frame)
     if frame.empty:
         return pd.DataFrame(columns=EVENT_PAIR_COLUMNS)
-    frame = _filter_dates(frame, start_date=start_date, end_date=end_date)
+    frame = filter_dates(frame, start_date=start_date, end_date=end_date)
     if frame.empty:
         return pd.DataFrame(columns=EVENT_PAIR_COLUMNS)
 
-    event_date = _first_present_column(frame, ("filing_date", "date", "accepted_date", "period_ending"))
-    repurchased = _first_numeric_column(
+    event_date = first_present_column(frame, ("filing_date", "date", "accepted_date", "period_ending"))
+    repurchased = first_numeric_column(
         frame,
         ("common_stock_repurchased", "commonStockRepurchased", "repurchases_of_common_stock", "stock_repurchased"),
     )
-    issued = _first_numeric_column(
+    issued = first_numeric_column(
         frame,
         ("common_stock_issuance", "commonStockIssuance", "issuance_of_common_stock", "stock_issued", "net_common_stock_issuance"),
     )
@@ -388,7 +402,7 @@ def _build_capital_action(symbol: str, frame: pd.DataFrame, *, start_date: str |
         buyback["actor_type"] = "issuer"
         buyback["actor_name"] = symbol
         buyback["strength"] = repurchased.loc[buyback.index]
-        buyback["raw_json"] = _raw_records(buyback)
+        buyback["raw_json"] = raw_records(buyback)
         rows.append(buyback)
 
     offering = frame.loc[issued.fillna(0) > 0].copy()
@@ -398,86 +412,141 @@ def _build_capital_action(symbol: str, frame: pd.DataFrame, *, start_date: str |
         offering["actor_type"] = "issuer"
         offering["actor_name"] = symbol
         offering["strength"] = issued.loc[offering.index]
-        offering["raw_json"] = _raw_records(offering)
+        offering["raw_json"] = raw_records(offering)
         rows.append(offering)
 
     if not rows:
         return pd.DataFrame(columns=EVENT_PAIR_COLUMNS)
     out = pd.concat(rows, ignore_index=True)
-    return _normalize_family_frame(out, event_family="capital_action", source="warehouse:cash")
+    return normalize_family_frame(out, event_family="capital_action", source="warehouse:cash")
 
 
 def _build_insider(symbol: str, frame: pd.DataFrame, *, start_date: str | None, end_date: str | None) -> pd.DataFrame:
     frame = _prepare_historical_frame(symbol, frame)
     if frame.empty:
         return pd.DataFrame(columns=EVENT_PAIR_COLUMNS)
-    frame = _filter_dates(frame, start_date=start_date, end_date=end_date)
-    frame["event_type"] = frame.apply(_insider_event_type, axis=1)
+    frame = filter_dates(frame, start_date=start_date, end_date=end_date)
+    frame["event_type"] = frame.apply(insider_event_type, axis=1)
     frame = frame.dropna(subset=["event_type"]).copy()
     if frame.empty:
         return pd.DataFrame(columns=EVENT_PAIR_COLUMNS)
-    frame["event_date"] = _first_present_column(frame, ("transactionDate", "transaction_date", "filingDate", "filing_date", "date"))
-    frame["actor_type"] = _first_present_column(frame, ("typeOfOwner", "type_of_owner", "relationship", "officerTitle", "officer_title"))
-    frame["actor_name"] = _first_present_column(frame, ("reportingName", "reporting_name", "ownerName", "owner_name", "name"))
-    frame["strength"] = _first_present_column(frame, ("securitiesTransacted", "securities_transacted", "shares", "transactionShares", "transaction_shares"))
-    frame["raw_json"] = _raw_records(frame)
-    return _normalize_family_frame(frame, event_family="insider", source="warehouse:ownership_insider_trading")
+    frame["event_date"] = first_present_column(frame, ("transactionDate", "transaction_date", "filingDate", "filing_date", "date"))
+    frame["actor_type"] = first_present_column(frame, ("typeOfOwner", "type_of_owner", "relationship", "officerTitle", "officer_title"))
+    frame["actor_name"] = first_present_column(frame, ("reportingName", "reporting_name", "ownerName", "owner_name", "name"))
+    frame["strength"] = first_present_column(frame, ("securitiesTransacted", "securities_transacted", "shares", "transactionShares", "transaction_shares"))
+    frame["raw_json"] = raw_records(frame)
+    return normalize_family_frame(frame, event_family="insider", source="warehouse:ownership_insider_trading")
 
 
 def _build_congress(symbol: str, frame: pd.DataFrame, *, start_date: str | None, end_date: str | None) -> pd.DataFrame:
     frame = _prepare_historical_frame(symbol, frame)
     if frame.empty:
         return pd.DataFrame(columns=EVENT_PAIR_COLUMNS)
-    frame = _filter_dates(frame, start_date=start_date, end_date=end_date)
-    frame["event_type"] = frame.apply(_congress_event_type, axis=1)
+    frame = filter_dates(frame, start_date=start_date, end_date=end_date)
+    frame["event_type"] = frame.apply(congress_event_type, axis=1)
     frame = frame.dropna(subset=["event_type"]).copy()
     if frame.empty:
         return pd.DataFrame(columns=EVENT_PAIR_COLUMNS)
-    frame["event_date"] = _first_present_column(frame, ("transactionDate", "transaction_date", "disclosureDate", "disclosure_date", "date"))
-    frame["actor_type"] = _first_present_column(frame, ("chamber", "office", "representative", "senator")).fillna("congress")
-    actor_name = _first_present_column(frame, ("representative", "senator", "firstName", "first_name", "name"))
-    frame["actor_name"] = _combine_names(actor_name, _first_present_column(frame, ("lastName", "last_name")))
-    frame["strength"] = _first_present_column(frame, ("amount", "amountRange", "amount_range", "assetDescription", "asset_description"))
-    frame["raw_json"] = _raw_records(frame)
-    return _normalize_family_frame(frame, event_family="congress", source="warehouse:ownership_government_trades")
+    frame["event_date"] = first_present_column(frame, ("transactionDate", "transaction_date", "disclosureDate", "disclosure_date", "date"))
+    frame["actor_type"] = first_present_column(frame, ("chamber", "office", "representative", "senator")).fillna("congress")
+    actor_name = first_present_column(frame, ("representative", "senator", "firstName", "first_name", "name"))
+    frame["actor_name"] = combine_names(actor_name, first_present_column(frame, ("lastName", "last_name")))
+    frame["strength"] = first_present_column(frame, ("amount", "amountRange", "amount_range", "assetDescription", "asset_description"))
+    frame["raw_json"] = raw_records(frame)
+    return normalize_family_frame(frame, event_family="congress", source="warehouse:ownership_government_trades")
 
 
 def _build_price_target(symbol: str, frame: pd.DataFrame, *, start_date: str | None, end_date: str | None) -> pd.DataFrame:
     frame = _prepare_historical_frame(symbol, frame)
     if frame.empty:
         return pd.DataFrame(columns=EVENT_PAIR_COLUMNS)
-    frame = _filter_dates(frame, start_date=start_date, end_date=end_date)
-    frame["event_date"] = _first_present_column(frame, ("publishedDate", "published_date", "date"))
-    frame["target_value"] = _first_numeric_column(frame, ("priceTarget", "price_target", "adjPriceTarget", "adj_price_target", "target"))
+    frame = filter_dates(frame, start_date=start_date, end_date=end_date)
+    frame["event_date"] = first_present_column(frame, ("publishedDate", "published_date", "date"))
+    frame["target_value"] = first_numeric_column(frame, ("priceTarget", "price_target", "adjPriceTarget", "adj_price_target", "target"))
     frame = frame.dropna(subset=["event_date", "target_value"]).copy()
-    group_key = _first_present_column(
+    group_key = first_present_column(
         frame,
         ("analystCompany", "analyst_company", "analystFirm", "analyst_firm", "analystName", "analyst_name", "publisher"),
     ).fillna("all")
     frame["_group_key"] = group_key
     frame = frame.sort_values(["_group_key", "event_date"])
     frame["previous_target_value"] = frame.groupby("_group_key")["target_value"].shift(1)
-    frame["event_type"] = frame.apply(_price_target_event_type, axis=1)
+    frame["event_type"] = frame.apply(price_target_event_type, axis=1)
     frame = frame.dropna(subset=["event_type"]).copy()
     if frame.empty:
         return pd.DataFrame(columns=EVENT_PAIR_COLUMNS)
     frame["actor_type"] = "analyst"
-    frame["actor_name"] = _first_present_column(
+    frame["actor_name"] = first_present_column(
         frame,
         ("analystName", "analyst_name", "analystFirm", "analyst_firm", "analystCompany", "analyst_company", "publisher"),
     )
     frame["strength"] = frame["target_value"]
-    frame["raw_json"] = _raw_records(frame)
-    return _normalize_family_frame(frame, event_family="price_target", source="warehouse:estimates_price_target")
+    frame["raw_json"] = raw_records(frame)
+    return normalize_family_frame(frame, event_family="price_target", source="warehouse:estimates_price_target")
+
+
+def _build_guidance(symbol: str, frame: pd.DataFrame, *, start_date: str | None, end_date: str | None) -> pd.DataFrame:
+    frame = _prepare_historical_frame(symbol, frame)
+    if frame.empty:
+        return pd.DataFrame(columns=EVENT_PAIR_COLUMNS)
+    frame = filter_dates(frame, start_date=start_date, end_date=end_date)
+    frame["event_date"] = first_present_column(
+        frame,
+        ("date", "publishedDate", "published_date", "fiscalDateEnding", "fiscal_date_ending", "period_ending"),
+    )
+    frame["guidance_value"] = first_numeric_column(
+        frame,
+        (
+            "estimatedEpsAvg",
+            "estimated_eps_avg",
+            "estimatedEps",
+            "estimated_eps",
+            "epsEstimated",
+            "eps_estimated",
+            "estimatedEbitdaAvg",
+            "estimated_ebitda_avg",
+            "estimatedEbitda",
+            "estimated_ebitda",
+            "ebitdaEstimated",
+            "ebitda_estimated",
+            "estimate",
+            "consensus",
+            "value",
+        ),
+    )
+    frame = frame.dropna(subset=["event_date", "guidance_value"]).copy()
+    if frame.empty:
+        return pd.DataFrame(columns=EVENT_PAIR_COLUMNS)
+    metric = first_present_column(frame, ("guidance_metric", "metric", "period", "fiscal_period")).fillna("estimate")
+    fiscal_period = first_present_column(
+        frame,
+        ("fiscalDateEnding", "fiscal_date_ending", "period_ending", "period", "fiscalPeriod", "fiscal_period"),
+    ).fillna("all")
+    actor = first_present_column(
+        frame,
+        ("analystName", "analyst_name", "analystFirm", "analyst_firm", "analystCompany", "analyst_company", "publisher"),
+    ).fillna("consensus")
+    frame["_group_key"] = metric.astype(str) + "|" + fiscal_period.astype(str) + "|" + actor.astype(str)
+    frame = frame.sort_values(["_group_key", "event_date"])
+    frame["previous_guidance_value"] = frame.groupby("_group_key")["guidance_value"].shift(1)
+    frame["event_type"] = frame.apply(guidance_event_type, axis=1)
+    frame = frame.dropna(subset=["event_type"]).copy()
+    if frame.empty:
+        return pd.DataFrame(columns=EVENT_PAIR_COLUMNS)
+    frame["actor_type"] = "issuer_guidance"
+    frame["actor_name"] = actor.loc[frame.index]
+    frame["strength"] = frame["guidance_value"]
+    frame["raw_json"] = raw_records(frame)
+    return normalize_family_frame(frame, event_family="guidance", source="warehouse:forward_estimates")
 
 
 def _build_institutional(symbol: str, frame: pd.DataFrame, *, start_date: str | None, end_date: str | None) -> pd.DataFrame:
     frame = _prepare_historical_frame(symbol, frame)
     if frame.empty:
         return pd.DataFrame(columns=EVENT_PAIR_COLUMNS)
-    frame = _filter_dates(frame, start_date=start_date, end_date=end_date)
-    frame["event_date"] = _first_present_column(frame, ("event_date", "date", "as_of", "period_ending", "filing_date"))
-    frame["delta"] = _first_numeric_column(
+    frame = filter_dates(frame, start_date=start_date, end_date=end_date)
+    frame["event_date"] = first_present_column(frame, ("event_date", "date", "as_of", "period_ending", "filing_date"))
+    frame["delta"] = first_numeric_column(
         frame,
         (
             "changeInShares",
@@ -497,67 +566,67 @@ def _build_institutional(symbol: str, frame: pd.DataFrame, *, start_date: str | 
         ),
     )
     if frame["delta"].isna().all():
-        shares = _first_numeric_column(frame, ("sharesHeld", "shares_held", "shares", "totalShares", "total_shares"))
+        shares = first_numeric_column(frame, ("sharesHeld", "shares_held", "shares", "totalShares", "total_shares"))
         frame = frame.sort_values("event_date")
         frame["delta"] = shares.diff()
-    frame["event_type"] = frame["delta"].map(_institutional_event_type)
+    frame["event_type"] = frame["delta"].map(institutional_event_type)
     frame = frame.dropna(subset=["event_type"]).copy()
     if frame.empty:
         return pd.DataFrame(columns=EVENT_PAIR_COLUMNS)
     frame["actor_type"] = "institution"
-    frame["actor_name"] = _first_present_column(frame, ("holder", "holder_name", "investor", "name")).fillna("aggregate")
+    frame["actor_name"] = first_present_column(frame, ("holder", "holder_name", "investor", "name")).fillna("aggregate")
     frame["strength"] = frame["delta"]
-    frame["raw_json"] = _raw_records(frame)
-    return _normalize_family_frame(frame, event_family="institutional", source="warehouse:ownership_institutional")
+    frame["raw_json"] = raw_records(frame)
+    return normalize_family_frame(frame, event_family="institutional", source="warehouse:ownership_institutional")
 
 
 def _build_dividend(symbol: str, frame: pd.DataFrame, *, start_date: str | None, end_date: str | None) -> pd.DataFrame:
     frame = _prepare_historical_frame(symbol, frame)
     if frame.empty:
         return pd.DataFrame(columns=EVENT_PAIR_COLUMNS)
-    frame = _filter_dates(frame, start_date=start_date, end_date=end_date)
-    frame["event_date"] = _first_present_column(frame, ("exDividendDate", "ex_dividend_date", "declarationDate", "declaration_date", "date", "paymentDate", "payment_date"))
-    frame["dividend_value"] = _first_numeric_column(frame, ("adjDividend", "adj_dividend", "dividend", "amount", "cashAmount", "cash_amount"))
+    frame = filter_dates(frame, start_date=start_date, end_date=end_date)
+    frame["event_date"] = first_present_column(frame, ("exDividendDate", "ex_dividend_date", "declarationDate", "declaration_date", "date", "paymentDate", "payment_date"))
+    frame["dividend_value"] = first_numeric_column(frame, ("adjDividend", "adj_dividend", "dividend", "amount", "cashAmount", "cash_amount"))
     frame = frame.dropna(subset=["event_date", "dividend_value"]).copy()
     frame = frame.sort_values("event_date")
     frame["previous_dividend_value"] = frame["dividend_value"].shift(1)
-    frame["event_type"] = frame.apply(_dividend_event_type, axis=1)
+    frame["event_type"] = frame.apply(dividend_event_type, axis=1)
     frame = frame.dropna(subset=["event_type"]).copy()
     if frame.empty:
         return pd.DataFrame(columns=EVENT_PAIR_COLUMNS)
     frame["actor_type"] = "issuer"
     frame["actor_name"] = symbol
     frame["strength"] = frame["dividend_value"]
-    frame["raw_json"] = _raw_records(frame)
-    return _normalize_family_frame(frame, event_family="dividend", source="warehouse:dividends")
+    frame["raw_json"] = raw_records(frame)
+    return normalize_family_frame(frame, event_family="dividend", source="warehouse:dividends")
 
 
 def _build_split(symbol: str, frame: pd.DataFrame, *, start_date: str | None, end_date: str | None) -> pd.DataFrame:
     frame = _prepare_historical_frame(symbol, frame)
     if frame.empty:
         return pd.DataFrame(columns=EVENT_PAIR_COLUMNS)
-    frame = _filter_dates(frame, start_date=start_date, end_date=end_date)
-    frame["event_date"] = _first_present_column(frame, ("date", "splitDate", "split_date"))
-    frame["split_ratio"] = frame.apply(_split_ratio, axis=1)
-    frame["event_type"] = frame["split_ratio"].map(_split_event_type)
+    frame = filter_dates(frame, start_date=start_date, end_date=end_date)
+    frame["event_date"] = first_present_column(frame, ("date", "splitDate", "split_date"))
+    frame["split_ratio"] = frame.apply(split_ratio, axis=1)
+    frame["event_type"] = frame["split_ratio"].map(split_event_type)
     frame = frame.dropna(subset=["event_type"]).copy()
     if frame.empty:
         return pd.DataFrame(columns=EVENT_PAIR_COLUMNS)
     frame["actor_type"] = "issuer"
     frame["actor_name"] = symbol
     frame["strength"] = frame["split_ratio"]
-    frame["raw_json"] = _raw_records(frame)
-    return _normalize_family_frame(frame, event_family="split", source="warehouse:historical_splits")
+    frame["raw_json"] = raw_records(frame)
+    return normalize_family_frame(frame, event_family="split", source="warehouse:historical_splits")
 
 
 def _build_earnings(symbol: str, frame: pd.DataFrame, *, start_date: str | None, end_date: str | None) -> pd.DataFrame:
     frame = _prepare_historical_frame(symbol, frame)
     if frame.empty:
         return pd.DataFrame(columns=EVENT_PAIR_COLUMNS)
-    frame = _filter_dates(frame, start_date=start_date, end_date=end_date)
-    frame["event_date"] = _first_present_column(frame, ("date", "reportDate", "report_date", "reportedDate", "reported_date", "fiscalDateEnding", "fiscal_date_ending"))
-    actual = _first_numeric_column(frame, ("epsActual", "eps_actual", "actualEps", "actual_eps", "eps", "reportedEPS", "reported_eps"))
-    estimated = _first_numeric_column(
+    frame = filter_dates(frame, start_date=start_date, end_date=end_date)
+    frame["event_date"] = first_present_column(frame, ("date", "reportDate", "report_date", "reportedDate", "reported_date", "fiscalDateEnding", "fiscal_date_ending"))
+    actual = first_numeric_column(frame, ("epsActual", "eps_actual", "actualEps", "actual_eps", "eps", "reportedEPS", "reported_eps"))
+    estimated = first_numeric_column(
         frame,
         (
             "epsEstimated",
@@ -571,15 +640,15 @@ def _build_earnings(symbol: str, frame: pd.DataFrame, *, start_date: str | None,
         ),
     )
     frame["surprise"] = actual - estimated
-    frame["event_type"] = frame["surprise"].map(_earnings_event_type)
+    frame["event_type"] = frame["surprise"].map(earnings_event_type)
     frame = frame.dropna(subset=["event_type"]).copy()
     if frame.empty:
         return pd.DataFrame(columns=EVENT_PAIR_COLUMNS)
     frame["actor_type"] = "issuer"
     frame["actor_name"] = symbol
     frame["strength"] = frame["surprise"]
-    frame["raw_json"] = _raw_records(frame)
-    return _normalize_family_frame(frame, event_family="earnings", source="warehouse:equity_calendar_earnings")
+    frame["raw_json"] = raw_records(frame)
+    return normalize_family_frame(frame, event_family="earnings", source="warehouse:equity_calendar_earnings")
 
 
 def _prepare_historical_frame(symbol: str, frame: pd.DataFrame) -> pd.DataFrame:
@@ -591,7 +660,15 @@ def _prepare_historical_frame(symbol: str, frame: pd.DataFrame) -> pd.DataFrame:
         out = out.reset_index()
         if "index" in out.columns and index_name not in out.columns:
             out = out.rename(columns={"index": index_name})
-    return _ensure_symbol(out, symbol)
+    return ensure_symbol(out, symbol)
+
+
+def _with_guidance_source(frame: pd.DataFrame, *, section: str, metric: str) -> pd.DataFrame:
+    out = frame.copy()
+    out["guidance_source_section"] = section
+    if "guidance_metric" not in out.columns:
+        out["guidance_metric"] = metric
+    return out
 
 
 def _filter_calendar_symbol(frame: pd.DataFrame, symbol: str) -> pd.DataFrame:
