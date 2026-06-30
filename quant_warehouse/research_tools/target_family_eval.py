@@ -23,7 +23,6 @@ class BinaryTargetConfig:
     start_date: str = "2018-01-01"
     end_date: str | None = None
     event_families: tuple[str, ...] = ("congress", "insider", "analyst_rating", "price_target", "guidance", "earnings")
-    event_windows: tuple[int, ...] = (20, 60)
     oracle_trade_k_by_frequency: dict[str, tuple[int, ...]] | None = None
     oracle_trade_min_profit_pct: float = 0.01
     oracle_trade_long_entry_price_col: str = "high"
@@ -92,7 +91,12 @@ def build_event_target_panel(
     events: pd.DataFrame,
     config: BinaryTargetConfig,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Create same-day and forward-window binary event targets on feature-panel dates."""
+    """Create same-day binary event targets on feature-panel dates.
+
+    FMP event-pair targets are labels for the date the event happened only.
+    Do not create future-window event labels; those smear sparse events across
+    future dates and are not valid event-pair targets for this research path.
+    """
 
     base = _base_panel_dates(feature_panel)
     event_types = _event_types_for_families(config.event_families)
@@ -124,14 +128,7 @@ def build_event_target_panel(
             else:
                 out[column] = out[column].fillna(0).astype("int8")
 
-    forward_columns: list[str] = []
-    for window in sorted(set(int(value) for value in config.event_windows if int(value) > 0)):
-        for source_column in target_columns:
-            forward_column = source_column.replace("target_event_on__", f"target_event_next_{window}d__")
-            out[forward_column] = _future_binary_by_symbol(out, source_column, window)
-            forward_columns.append(forward_column)
-
-    metadata = _target_metadata(target_columns + forward_columns, "event")
+    metadata = _target_metadata(target_columns, "event")
     return out, metadata
 
 
@@ -372,17 +369,6 @@ def _align_events_to_panel_dates(base: pd.DataFrame, events: pd.DataFrame, *, to
     if not aligned_frames:
         return pd.DataFrame(columns=["symbol", "date", "event_type"])
     return pd.concat(aligned_frames, ignore_index=True).drop_duplicates()
-
-
-def _future_binary_by_symbol(panel: pd.DataFrame, source_column: str, window: int) -> pd.Series:
-    pieces: list[pd.Series] = []
-    for _, group in panel.sort_values(["symbol", "date"]).groupby("symbol", sort=False):
-        values = pd.to_numeric(group[source_column], errors="coerce").fillna(0).astype("int8")
-        future = pd.concat([values.shift(-offset).fillna(0) for offset in range(1, int(window) + 1)], axis=1).max(axis=1)
-        pieces.append(future.astype("int8"))
-    if not pieces:
-        return pd.Series(index=panel.index, dtype="int8")
-    return pd.concat(pieces).sort_index().astype("int8")
 
 
 def _target_metadata(columns: Sequence[str], family: str) -> pd.DataFrame:

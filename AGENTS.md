@@ -26,6 +26,7 @@
 - Treat `quant-warehouse` as the opinionated persistence layer over the OpenBB fork SDK.
 - Use it to request vendor data through OpenBB, normalize schemas, compare requested refreshes against what is already stored, and write point-in-time warehouse datasets.
 - Do not put ML model training, backtesting engines, broker integrations, or order submission logic in this repo.
+- FMP event-pair targets are exact event-date labels only. Never create future-window event-pair labels. Forward returns and oracle-trade horizons are separate target families; they must not be encoded by smearing event-pair labels across future dates.
 
 ## Compatibility Policy
 

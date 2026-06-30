@@ -22,7 +22,7 @@ def test_binary_target_config_defaults_match_optimal_trader_execution_prices() -
     assert config.oracle_trade_short_exit_price_col == "high"
 
 
-def test_build_event_target_panel_aligns_events_and_forward_windows() -> None:
+def test_build_event_target_panel_aligns_events_same_day_only() -> None:
     feature_panel = pd.DataFrame(
         {
             "symbol": ["A"] * 4,
@@ -45,19 +45,21 @@ def test_build_event_target_panel_aligns_events_and_forward_windows() -> None:
             "raw_json": ["{}"],
         }
     )
-    config = BinaryTargetConfig(event_families=("congress",), event_windows=(2,))
+    config = BinaryTargetConfig(event_families=("congress",))
 
     target_panel, metadata = build_event_target_panel(feature_panel, events, config)
 
     assert set(metadata["target"]) == {
         "target_event_on__congress_buy",
         "target_event_on__congress_sell",
-        "target_event_next_2d__congress_buy",
-        "target_event_next_2d__congress_sell",
     }
+    assert all(str(target).startswith("target_event_on__") for target in metadata["target"])
+    assert all(
+        not str(column).startswith("target_event_") or str(column).startswith("target_event_on__")
+        for column in target_panel.columns
+    )
+    assert target_panel.loc[target_panel["date"].eq(pd.Timestamp("2024-01-02")), "target_event_on__congress_buy"].item() == 0
     assert target_panel.loc[target_panel["date"].eq(pd.Timestamp("2024-01-03")), "target_event_on__congress_buy"].item() == 1
-    assert target_panel.loc[target_panel["date"].eq(pd.Timestamp("2024-01-02")), "target_event_next_2d__congress_buy"].item() == 1
-    assert target_panel.loc[target_panel["date"].eq(pd.Timestamp("2024-01-03")), "target_event_next_2d__congress_buy"].item() == 0
 
 
 def test_evaluate_feature_target_matrix_reports_usable_pairs() -> None:

@@ -116,6 +116,8 @@ from quant_warehouse.platforms.data_providers.thetadata.target_engineering impor
 
 FMP oracle-trade labels use `LabelBuildSpec` and default to `min_profit_pct=0.01`. Long and short trades are solved as separate top-k problems. The `any` target in research notebooks should be treated as the union of side-specific entry labels, not as a mixed long/short capital allocation solver.
 
+FMP event-pair labels are exact event-date labels only. Congress buy/sell, insider buy/sell, analyst upgrades/downgrades, price target raises/cuts, guidance raises/cuts, and earnings beats/misses should be labeled on the date the event happened. Do not create future-window labels for event pairs; future return horizons and oracle-trade labels are separate target families.
+
 ## Design rules
 
 1. **ArcticDB is canonical for historical series** — prices, ETF prices, macro series, fundamentals, event pairs, features, calendars, and ThetaData option chains are stored in ArcticDB libraries.
@@ -128,6 +130,7 @@ FMP oracle-trade labels use `LabelBuildSpec` and default to `min_profit_pct=0.01
 8. **Provider isolation for new writes** — provider-owned data is written to provider-scoped physical libraries with OpenBB route-family-style dataset names such as `yfinance_equity_prices`, `fmp_etf_prices`, `fmp_equity_fundamental_income`, and `thetadata_derivatives_options_eod`. Provider-scoped libraries are routed to provider-specific ArcticDB roots by default, so heavy ThetaData writes use a different LMDB root than FMP or YFinance. Existing shared libraries remain readable as migration fallbacks.
 9. **No premature global feature/target layer** — feature engineering and target engineering belong to the data provider until multiple provider implementations justify a shared abstraction.
 10. **FMP oracle trade labels are side-specific** — long and short top-k trades are optimized independently. The mixed long/short joint solver and CUDA oracle solver were removed to avoid ambiguous labels.
+11. **FMP event-pair labels are same-day only** — event pairs mark the date the event happened. Do not smear events into future-window event columns.
 
 ## License
 
