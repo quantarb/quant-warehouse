@@ -18,10 +18,10 @@ def require_arcticdb() -> None:
                 "install it automatically. Install into this env first:\n"
                 "  conda install -c conda-forge arcticdb\n"
                 "Then reinstall quant-warehouse if needed:\n"
-                "  pip install -e /path/to/quant-warehouse[openbb]"
+                "  pip install -e /path/to/quant-warehouse"
             ) from exc
         raise ImportError(
             "ArcticDB is required. It should install with quant-warehouse on this "
             "platform. Try:\n"
-            "  pip install 'quant-warehouse[openbb]'"
+            "  pip install 'quant-warehouse'"
         ) from exc

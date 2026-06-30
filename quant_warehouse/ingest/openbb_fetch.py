@@ -97,7 +97,7 @@ def _call_route(route: str, *, symbol: str | None, provider: str, **kwargs: Any)
     try:
         from openbb import obb
     except ImportError as exc:
-        raise ImportError("Install OpenBB: pip install quant-warehouse[openbb]") from exc
+        raise ImportError("OpenBB is a required quant-warehouse dependency; reinstall quant-warehouse.") from exc
 
     configure_openbb_credentials()
 

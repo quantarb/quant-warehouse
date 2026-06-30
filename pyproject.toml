@@ -15,12 +15,12 @@ dependencies = [
     "numpy>=1.26,<2.5",
     "pandas>=2.1,<3",
     "protobuf<7",
-    # PyPI wheels: Linux x86_64, macOS, Windows. Linux arm64 → conda-forge only.
-    'arcticdb>=5.0; platform_machine != "aarch64" or sys_platform != "linux"',
-]
-
-[project.optional-dependencies]
-openbb = [
+    "financetoolkit>=2.1,<3",
+    "ortools>=9.12,<10",
+    "pandas-ta-classic @ git+https://github.com/quantarb/pandas-ta-classic.git@main",
+    "pyarrow>=14.0",
+    "scipy>=1.14,<2",
+    "thetadata>=1.0.9",
     "openbb @ git+https://github.com/quantarb/OpenBB.git@develop#subdirectory=openbb_platform",
     "openbb-core @ git+https://github.com/quantarb/OpenBB.git@develop#subdirectory=openbb_platform/core",
     "openbb-fmp @ git+https://github.com/quantarb/OpenBB.git@develop#subdirectory=openbb_platform/providers/fmp",
@@ -53,11 +53,13 @@ openbb = [
     "openbb-econdb @ git+https://github.com/quantarb/OpenBB.git@develop#subdirectory=openbb_platform/providers/econdb",
     "openbb-platform-api @ git+https://github.com/quantarb/OpenBB.git@develop#subdirectory=openbb_platform/extensions/platform_api",
     "openbb-thetadata @ git+https://github.com/quantarb/OpenBB.git@develop#subdirectory=openbb_platform/providers/thetadata",
+    # PyPI wheels: Linux x86_64, macOS, Windows. Linux arm64 → conda-forge only.
+    'arcticdb>=5.0; platform_machine != "aarch64" or sys_platform != "linux"',
 ]
-thetadata = ["thetadata>=1.0.9", "pyarrow>=14.0"]
-feature-engineering = ["pandas-ta-classic @ git+https://github.com/quantarb/pandas-ta-classic.git@main"]
+
+[project.optional-dependencies]
 dev = ["pytest>=8.0", "ruff>=0.6"]
-all = ["quant-warehouse[openbb,thetadata,feature-engineering,dev]"]
+all = ["quant-warehouse[dev]"]
 
 [project.scripts]
 quant-warehouse = "quant_warehouse.cli:main"

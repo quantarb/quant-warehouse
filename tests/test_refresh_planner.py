@@ -198,7 +198,7 @@ def test_nport_disclosure_skips_when_history_is_complete():
                 section="etf_nport_disclosure",
                 provider="fmp",
                 min_date="2019-03-31",
-                max_date="2026-03-31",
+                max_date=expected_latest_price_date().isoformat(),
                 row_count=3866,
                 columns_present=("cusip", "weight"),
                 last_fetched_at=datetime.now(timezone.utc).isoformat(),

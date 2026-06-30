@@ -13,4 +13,4 @@ dependencies:
   - arcticdb>=6.18
   - protobuf<7
   - pip:
-      - -e ".[openbb,dev]"
+      - -e ".[dev]"

@@ -7,7 +7,7 @@ DEFAULT_PRICE_PROVIDERS: tuple[str, ...] = ("fmp", "yfinance", "tiingo")
 FUNDAMENTAL_PROVIDERS: tuple[str, ...] = ("fmp", "yfinance", "sec", "intrinio", "tiingo")
 DEFAULT_FUNDAMENTAL_PROVIDERS: tuple[str, ...] = ("fmp", "yfinance", "sec")
 
-# OpenBB extension packages bundled in the [openbb] extra (equity + macro + alt data).
+# Required OpenBB extension packages (equity + macro + alt data).
 OPENBB_EXTENSIONS: tuple[str, ...] = (
     "openbb-fmp",
     "openbb-yfinance",

@@ -105,7 +105,7 @@ def _fetch_openbb_screener(query: ScreenerQuery) -> pd.DataFrame:
     try:
         from openbb import obb
     except ImportError as exc:
-        raise ImportError("Install OpenBB: pip install quant-warehouse[openbb]") from exc
+        raise ImportError("OpenBB is a required quant-warehouse dependency; reinstall quant-warehouse.") from exc
 
     configure_openbb_credentials()
     provider = str(query.provider or "fmp").strip().lower()

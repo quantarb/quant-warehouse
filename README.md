@@ -40,7 +40,7 @@ cp .env.example .env
 export QW_HOME=~/.quant-warehouse
 ```
 
-The current environment installs `quant-warehouse` with the `[openbb,dev]` extra, which pulls OpenBB packages from the `quantarb/OpenBB` `develop` branch. The warehouse itself reads `QW_HOME`, `QW_ARCTIC_URI`, and `QW_CATALOG_PATH`; by default it stores legacy/shared ArcticDB data under `~/.quant-warehouse/arctic`, provider-isolated ArcticDB roots under `~/.quant-warehouse/arctic/providers/{provider}`, and metadata in `~/.quant-warehouse/catalog.sqlite`.
+The current environment installs `quant-warehouse` with required platform dependencies. OpenBB packages come from the `quantarb/OpenBB` `develop` branch, `pandas-ta-classic` comes from the `quantarb/pandas-ta-classic` `main` branch, and computation libraries without `quantarb` forks use their official packages. The warehouse itself reads `QW_HOME`, `QW_ARCTIC_URI`, and `QW_CATALOG_PATH`; by default it stores legacy/shared ArcticDB data under `~/.quant-warehouse/arctic`, provider-isolated ArcticDB roots under `~/.quant-warehouse/arctic/providers/{provider}`, and metadata in `~/.quant-warehouse/catalog.sqlite`.
 
 ## CLI
 
