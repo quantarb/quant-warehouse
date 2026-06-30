@@ -1,1 +1,0 @@
-"""VectorAlpha integration boundary."""

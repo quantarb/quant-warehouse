@@ -21,6 +21,7 @@ dependencies = [
     "pyarrow>=14.0",
     "scipy>=1.14,<2",
     "thetadata>=1.0.9",
+    "vector-ta>=0.2.8,<0.3",
     "openbb @ git+https://github.com/quantarb/OpenBB.git@develop#subdirectory=openbb_platform",
     "openbb-core @ git+https://github.com/quantarb/OpenBB.git@develop#subdirectory=openbb_platform/core",
     "openbb-fmp @ git+https://github.com/quantarb/OpenBB.git@develop#subdirectory=openbb_platform/providers/fmp",
