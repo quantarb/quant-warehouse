@@ -13,6 +13,54 @@ from quant_warehouse.platforms.data_providers.fmp.target_engineering.event_pairs
 from quant_warehouse.research_tools.target_family_eval import BinaryTargetConfig
 from quant_warehouse.warehouse.api import Warehouse
 
+FMP_EVENT_CONTEXT_FEATURE_FAMILIES: dict[str, tuple[str, tuple[str, ...]]] = {
+    "congress": (
+        "fmp_congress_event_context",
+        (
+            "actor_name",
+            "actor_type",
+            "actor_chamber",
+            "transaction_value",
+            "reported_date",
+            "disclosure_lag_days",
+        ),
+    ),
+    "insider": (
+        "fmp_insider_event_context",
+        (
+            "actor_name",
+            "actor_type",
+            "actor_role",
+            "actor_title",
+            "transaction_shares",
+            "transaction_price",
+            "transaction_value",
+            "reported_date",
+            "disclosure_lag_days",
+        ),
+    ),
+    "analyst_rating": (
+        "fmp_analyst_rating_event_context",
+        (
+            "actor_name",
+            "actor_firm",
+            "actor_role",
+            "reported_date",
+            "disclosure_lag_days",
+        ),
+    ),
+    "price_target": (
+        "fmp_price_target_event_context",
+        (
+            "actor_name",
+            "actor_firm",
+            "actor_role",
+            "reported_date",
+            "disclosure_lag_days",
+        ),
+    ),
+}
+
 
 @dataclass(frozen=True)
 class EventFeatureDatasetConfig:
@@ -111,6 +159,7 @@ def build_event_feature_text_dataset(
     *,
     config: EventFeatureDatasetConfig | None = None,
     allowed_feature_families: set[tuple[str, str]] | None = None,
+    allowed_feature_families_by_task: dict[str, set[tuple[str, str]]] | None = None,
 ) -> EventFeatureDatasetResult:
     """Build long-form text rows from actual event/oracle rows and covered feature families.
 
@@ -145,6 +194,14 @@ def build_event_feature_text_dataset(
         diagnostics["feature_families"] = int(diagnostics["feature_families"]) + 1
         base_columns = list(dict.fromkeys(["symbol", "date", *features]))
         for spec in task_specs:
+            if not _task_allows_feature_family(
+                str(spec["task_id"]),
+                str(spec["target_task"]),
+                source_key,
+                family_key,
+                allowed_feature_families_by_task,
+            ):
+                continue
             selected = _select_task_index(panel, coverage_index, spec)
             if selected.empty:
                 continue
@@ -184,6 +241,101 @@ def build_event_feature_text_dataset(
     out = out.sort_values(["date", "symbol", "feature_family", "target_task"]).reset_index(drop=True)
     diagnostics["event_feature_rows"] = len(out)
     return EventFeatureDatasetResult(out, _task_inventory(out), diagnostics)
+
+
+def add_fmp_event_context_feature_families(
+    feature_target_panel: pd.DataFrame,
+    feature_metadata: pd.DataFrame,
+    events: pd.DataFrame,
+    *,
+    families: dict[str, tuple[str, tuple[str, ...]]] | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Attach FMP event metadata as sparse feature families on a symbol/date panel.
+
+    The returned panel remains keyed by ``(symbol, date)``. Each event source gets a
+    separate feature family, so congress metadata is not represented as analyst
+    metadata. Pair this with ``fmp_event_context_allowed_feature_families_by_task``
+    when building text rows to prevent task/family mismatches.
+    """
+
+    if feature_target_panel is None or feature_target_panel.empty or events is None or events.empty:
+        return feature_target_panel, feature_metadata
+
+    panel = _normalize_panel(feature_target_panel)
+    event_frame = events.copy()
+    event_frame["symbol"] = event_frame["symbol"].astype(str).str.upper()
+    event_frame["date"] = pd.to_datetime(event_frame["event_date"], errors="coerce").dt.tz_localize(None).dt.normalize()
+    event_frame = event_frame.dropna(subset=["symbol", "date", "event_family"])
+    if event_frame.empty:
+        return panel, feature_metadata
+
+    metadata_rows: list[dict[str, object]] = []
+    context_frames: list[pd.DataFrame] = []
+    family_map = families or FMP_EVENT_CONTEXT_FEATURE_FAMILIES
+    for event_family, (feature_family, columns) in family_map.items():
+        family_events = event_frame.loc[event_frame["event_family"].astype(str).eq(event_family)].copy()
+        if family_events.empty:
+            continue
+        available_columns = [column for column in columns if column in family_events.columns]
+        if not available_columns:
+            continue
+        renamed = {column: f"{feature_family}__{column}" for column in available_columns}
+        family_values = family_events[["symbol", "date", *available_columns]].rename(columns=renamed)
+        aggregated = (
+            family_values.groupby(["symbol", "date"], as_index=False)
+            .agg({renamed[column]: _aggregate_event_context_values for column in available_columns})
+        )
+        context_frames.append(aggregated)
+        for column in available_columns:
+            metadata_rows.append(
+                {
+                    "feature": renamed[column],
+                    "family": feature_family,
+                    "source": "fmp",
+                    "source_column": column,
+                    "expected_direction": _event_context_expected_direction(family_events[column]),
+                }
+            )
+
+    out = panel
+    for context_frame in context_frames:
+        out = out.merge(context_frame, on=["symbol", "date"], how="left")
+    if not metadata_rows:
+        return out, feature_metadata
+    context_metadata = pd.DataFrame(metadata_rows)
+    metadata = (
+        pd.concat([feature_metadata, context_metadata], ignore_index=True)
+        .drop_duplicates(["source", "family", "feature"])
+        .sort_values(["source", "family", "feature"])
+        .reset_index(drop=True)
+    )
+    return out, metadata
+
+
+def fmp_event_context_allowed_feature_families_by_task(
+    task_specs: Sequence[dict[str, object]],
+    allowed_feature_families: set[tuple[str, str]] | None = None,
+    *,
+    event_context_families: dict[str, tuple[str, tuple[str, ...]]] | None = None,
+) -> dict[str, set[tuple[str, str]]]:
+    """Return per-task feature-family allowlists for FMP event context families."""
+
+    family_map = event_context_families or FMP_EVENT_CONTEXT_FEATURE_FAMILIES
+    base_allowed = set(allowed_feature_families) if allowed_feature_families is not None else set()
+    out: dict[str, set[tuple[str, str]]] = {}
+    for spec in task_specs:
+        target_task = str(spec["target_task"])
+        task_id = str(spec["task_id"])
+        task_allowed: set[tuple[str, str]] = set()
+        for event_family, (feature_family, _) in family_map.items():
+            if target_task == f"event_pair__{event_family}":
+                family_key = ("fmp", feature_family)
+                if allowed_feature_families is None or family_key in base_allowed:
+                    task_allowed.add(family_key)
+        if task_allowed:
+            out[task_id] = task_allowed
+            out[target_task] = task_allowed
+    return out
 
 
 def build_event_context(
@@ -442,6 +594,48 @@ def _lineage_value(columns: Any) -> str:
     if isinstance(columns, str):
         return columns
     return "|".join(str(column) for column in columns)
+
+
+def _task_allows_feature_family(
+    task_id: str,
+    target_task: str,
+    source: str,
+    family: str,
+    allowed_feature_families_by_task: dict[str, set[tuple[str, str]]] | None,
+) -> bool:
+    if allowed_feature_families_by_task is None:
+        return True
+    family_key = (source, family)
+    event_context_keys = {("fmp", feature_family) for feature_family, _ in FMP_EVENT_CONTEXT_FEATURE_FAMILIES.values()}
+    if family_key not in event_context_keys:
+        return True
+    allowed = allowed_feature_families_by_task.get(task_id)
+    if allowed is None:
+        allowed = allowed_feature_families_by_task.get(target_task)
+    if allowed is None:
+        return False
+    return family_key in allowed
+
+
+def _aggregate_event_context_values(values: pd.Series) -> object:
+    clean = values.dropna()
+    if clean.empty:
+        return pd.NA
+    numeric = pd.to_numeric(clean, errors="coerce")
+    if numeric.notna().all():
+        return float(numeric.sum())
+    normalized = clean.astype(str).str.strip()
+    normalized = normalized.loc[normalized.ne("")]
+    if normalized.empty:
+        return pd.NA
+    return "|".join(dict.fromkeys(normalized.tolist()))
+
+
+def _event_context_expected_direction(values: pd.Series) -> str:
+    numeric = pd.to_numeric(values.dropna(), errors="coerce")
+    if not numeric.empty and numeric.notna().all():
+        return "unknown"
+    return "categorical"
 
 
 def _normalize_panel(frame: pd.DataFrame) -> pd.DataFrame:

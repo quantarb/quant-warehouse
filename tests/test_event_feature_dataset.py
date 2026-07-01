@@ -5,10 +5,12 @@ import pandas as pd
 from quant_warehouse.research_tools import (
     BinaryTargetConfig,
     EventFeatureDatasetConfig,
+    add_fmp_event_context_feature_families,
     build_event_context,
     build_event_feature_text_dataset,
     build_identity_text_dataset,
     event_pair_task_specs,
+    fmp_event_context_allowed_feature_families_by_task,
 )
 
 
@@ -67,6 +69,94 @@ def test_event_feature_text_dataset_drops_orphan_feature_family_without_coverage
 
     assert set(result.rows["feature_family"]) == {"covered"}
     assert "orphan" not in set(result.rows["feature_family"])
+
+
+def test_fmp_event_context_feature_families_are_sparse_by_event_family() -> None:
+    panel = pd.DataFrame(
+        {
+            "symbol": ["AAPL"],
+            "date": pd.to_datetime(["2024-01-01"]),
+            "target_event_on__congress_buy": [1],
+            "target_event_on__congress_sell": [0],
+            "target_event_on__analyst_upgrade": [1],
+            "target_event_on__analyst_downgrade": [0],
+        }
+    )
+    metadata = pd.DataFrame([{"source": "fmp", "family": "issuer", "feature": "issuer_feature"}])
+    events = pd.DataFrame(
+        {
+            "symbol": ["AAPL", "AAPL"],
+            "event_date": pd.to_datetime(["2024-01-01", "2024-01-01"]),
+            "event_family": ["congress", "analyst_rating"],
+            "event_type": ["congress_buy", "analyst_upgrade"],
+            "actor_name": ["Nancy Pelosi", "Example Analyst"],
+            "actor_type": ["house", "analyst"],
+            "actor_chamber": ["house", None],
+            "actor_firm": [None, "Example Firm"],
+            "actor_role": [None, "analyst"],
+            "transaction_value": [100000.0, None],
+            "reported_date": pd.to_datetime(["2024-01-15", "2024-01-01"]),
+            "disclosure_lag_days": [14, 0],
+        }
+    )
+
+    out_panel, out_metadata = add_fmp_event_context_feature_families(panel, metadata, events)
+
+    assert out_panel.loc[0, "fmp_congress_event_context__actor_name"] == "Nancy Pelosi"
+    assert out_panel.loc[0, "fmp_analyst_rating_event_context__actor_firm"] == "Example Firm"
+    assert ("fmp_congress_event_context" in set(out_metadata["family"]))
+    assert ("fmp_analyst_rating_event_context" in set(out_metadata["family"]))
+
+
+def test_task_family_allowlist_prevents_cross_event_context_mismatch() -> None:
+    panel = pd.DataFrame(
+        {
+            "symbol": ["AAPL"],
+            "date": pd.to_datetime(["2024-01-01"]),
+            "target_event_on__congress_buy": [1],
+            "target_event_on__congress_sell": [0],
+            "target_event_on__analyst_upgrade": [1],
+            "target_event_on__analyst_downgrade": [0],
+            "fmp_congress_event_context__actor_name": ["Nancy Pelosi"],
+            "fmp_analyst_rating_event_context__actor_firm": ["Example Firm"],
+        }
+    )
+    metadata = pd.DataFrame(
+        [
+            {
+                "source": "fmp",
+                "family": "fmp_congress_event_context",
+                "feature": "fmp_congress_event_context__actor_name",
+            },
+            {
+                "source": "fmp",
+                "family": "fmp_analyst_rating_event_context",
+                "feature": "fmp_analyst_rating_event_context__actor_firm",
+            },
+        ]
+    )
+    specs = event_pair_task_specs(BinaryTargetConfig(event_families=("congress", "analyst_rating")), panel.columns)
+    allowed = {
+        ("fmp", "fmp_congress_event_context"),
+        ("fmp", "fmp_analyst_rating_event_context"),
+    }
+    by_task = fmp_event_context_allowed_feature_families_by_task(specs, allowed)
+
+    result = build_event_feature_text_dataset(
+        panel,
+        metadata,
+        specs,
+        config=EventFeatureDatasetConfig(min_feature_coverage=1.0),
+        allowed_feature_families=allowed,
+        allowed_feature_families_by_task=by_task,
+    )
+
+    congress_rows = result.rows.loc[result.rows["target_task"].eq("event_pair__congress")]
+    analyst_rows = result.rows.loc[result.rows["target_task"].eq("event_pair__analyst_rating")]
+    assert set(congress_rows["feature_family"]) == {"fmp_congress_event_context"}
+    assert set(analyst_rows["feature_family"]) == {"fmp_analyst_rating_event_context"}
+    assert "Nancy Pelosi" in congress_rows.iloc[0]["text"]
+    assert "Example Firm" not in congress_rows.iloc[0]["text"]
 
 
 def test_identity_dataset_uses_event_context_only() -> None:
