@@ -6,9 +6,7 @@ from quant_warehouse.research_tools import (
     BinaryTargetConfig,
     EventFeatureDatasetConfig,
     add_fmp_event_context_feature_families,
-    build_event_context,
     build_event_feature_text_dataset,
-    build_identity_text_dataset,
     event_pair_task_specs,
     fmp_event_context_allowed_feature_families_by_task,
 )
@@ -158,43 +156,3 @@ def test_task_family_allowlist_prevents_cross_event_context_mismatch() -> None:
     assert "Nancy Pelosi" in congress_rows.iloc[0]["text"]
     assert "Example Firm" not in congress_rows.iloc[0]["text"]
 
-
-def test_identity_dataset_uses_event_context_only() -> None:
-    events = pd.DataFrame(
-        {
-            "symbol": ["AAPL", "MSFT"],
-            "event_date": pd.to_datetime(["2024-01-01", "2024-01-03"]),
-            "event_family": ["congress", "congress"],
-            "event_type": ["congress_buy", "congress_sell"],
-            "actor_name": ["Jane", "John"],
-            "actor_type": ["house", "senate"],
-            "actor_chamber": ["house", "senate"],
-            "actor_role": [None, None],
-            "actor_firm": [None, None],
-            "reported_date": pd.to_datetime(["2024-01-10", "2024-01-12"]),
-            "disclosure_lag_days": [9, 9],
-            "event_side": [1, -1],
-        }
-    )
-    feature_panel = pd.DataFrame(
-        {
-            "symbol": ["AAPL", "AAPL", "MSFT"],
-            "date": pd.to_datetime(["2024-01-01", "2024-01-02", "2024-01-03"]),
-            "feature": [10.0, 20.0, 30.0],
-        }
-    )
-    metadata = pd.DataFrame([{"source": "fmp", "family": "family", "feature": "feature"}])
-
-    context = build_event_context(events, feature_panel, warehouse=None, event_families=("congress",))
-    result = build_identity_text_dataset(
-        context,
-        metadata,
-        [("actor_name", "identity__congress_actor", "task_identity_congress_actor")],
-        config=EventFeatureDatasetConfig(min_label_rows=1),
-    )
-
-    assert len(context) == 2
-    assert {"actor_chamber", "actor_role", "actor_firm", "reported_date", "disclosure_lag_days"}.issubset(context.columns)
-    assert set(context["actor_chamber"]) == {"house", "senate"}
-    assert set(result.rows["label"]) == {"Jane", "John"}
-    assert pd.Timestamp("2024-01-02") not in set(result.rows["date"])

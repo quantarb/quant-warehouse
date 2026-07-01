@@ -65,8 +65,6 @@ FMP_EVENT_CONTEXT_FEATURE_FAMILIES: dict[str, tuple[str, tuple[str, ...]]] = {
 @dataclass(frozen=True)
 class EventFeatureDatasetConfig:
     min_feature_coverage: float = 0.50
-    min_label_rows: int = 10
-    max_labels: int = 100
     max_rows_per_task_split: int | None = None
 
 
@@ -405,64 +403,6 @@ def build_event_context(
     return base
 
 
-def build_identity_text_dataset(
-    event_context: pd.DataFrame,
-    feature_metadata: pd.DataFrame,
-    identity_columns: Sequence[tuple[str, str, str]],
-    *,
-    config: EventFeatureDatasetConfig | None = None,
-    allowed_feature_families: set[tuple[str, str]] | None = None,
-) -> EventFeatureDatasetResult:
-    """Build identity task rows from actual event rows joined to feature families."""
-
-    cfg = config or EventFeatureDatasetConfig()
-    task_frames: list[pd.DataFrame] = []
-    task_specs: list[dict[str, object]] = []
-    if event_context is None or event_context.empty:
-        empty = pd.DataFrame()
-        return EventFeatureDatasetResult(empty, _task_inventory(empty), {"identity_tasks": 0, "event_feature_rows": 0})
-
-    panel = _normalize_panel(event_context)
-    for column, target_task, task_id in identity_columns:
-        if column not in panel.columns:
-            continue
-        labels = panel[column].dropna().astype(str).str.strip()
-        supported = supported_labels(labels, min_rows=cfg.min_label_rows, max_labels=cfg.max_labels)
-        base = panel.loc[panel[column].astype(str).isin(supported)].copy()
-        if base.empty:
-            continue
-        label_series = base[column].astype(str)
-        rows = _build_labeled_feature_rows(
-            base,
-            feature_metadata,
-            label_series,
-            target_task=target_task,
-            task_id=task_id,
-            config=cfg,
-            allowed_feature_families=allowed_feature_families,
-        )
-        if not rows.empty:
-            task_frames.append(rows)
-            task_specs.append({"column": column, "target_task": target_task, "task_id": task_id})
-
-    if not task_frames:
-        empty = pd.DataFrame()
-        return EventFeatureDatasetResult(empty, _task_inventory(empty), {"identity_tasks": 0, "event_feature_rows": 0})
-    out = pd.concat(task_frames, ignore_index=True).dropna(subset=["date", "text", "label"])
-    out = out.loc[out["text"].astype(str).str.len().gt(0)].copy()
-    out = out.sort_values(["date", "symbol", "feature_family", "target_task"]).reset_index(drop=True)
-    return EventFeatureDatasetResult(
-        out,
-        _task_inventory(out),
-        {"identity_tasks": len(task_specs), "event_feature_rows": len(out)},
-    )
-
-
-def supported_labels(labels: pd.Series, *, min_rows: int, max_labels: int) -> list[str]:
-    counts = labels.astype(str).value_counts()
-    return counts[counts.ge(int(min_rows))].head(int(max_labels)).index.tolist()
-
-
 def feature_coverage_mask(frame: pd.DataFrame, features: list[str], min_feature_coverage: float) -> pd.Series:
     if not features:
         return pd.Series(False, index=frame.index)
@@ -525,52 +465,6 @@ def compact_feature_key(feature: str, family: str) -> str:
     for old, short in replacements.items():
         key = key.replace(old, short)
     return key.strip("_") or str(feature)
-
-
-def _build_labeled_feature_rows(
-    base: pd.DataFrame,
-    feature_metadata: pd.DataFrame,
-    labels: pd.Series,
-    *,
-    target_task: str,
-    task_id: str,
-    config: EventFeatureDatasetConfig,
-    allowed_feature_families: set[tuple[str, str]] | None,
-) -> pd.DataFrame:
-    rows: list[pd.DataFrame] = []
-    for (source, family), family_meta in feature_metadata.groupby(["source", "family"], sort=True):
-        source_key = str(source)
-        family_key = str(family)
-        if allowed_feature_families is not None and (source_key, family_key) not in allowed_feature_families:
-            continue
-        features = [feature for feature in family_meta["feature"].drop_duplicates().tolist() if feature in base.columns]
-        if not features:
-            continue
-        selected = base.index[feature_coverage_mask(base, features, config.min_feature_coverage)]
-        if selected.empty:
-            continue
-        family_base = base.loc[selected, list(dict.fromkeys(["symbol", "date", *features]))].copy()
-        text_values = family_base.apply(
-            lambda row: feature_family_text(row, features, source=source_key, family=family_key),
-            axis=1,
-        )
-        rows.append(
-            pd.DataFrame(
-                {
-                    "symbol": family_base["symbol"].astype(str).str.upper().to_numpy(),
-                    "date": pd.to_datetime(family_base["date"], errors="coerce").dt.normalize().to_numpy(),
-                    "source": source_key,
-                    "feature_family": family_key,
-                    "text": text_values.to_numpy(),
-                    "target_task": target_task,
-                    "task_id": task_id,
-                    "label_type": task_id,
-                    "label": labels.loc[selected].astype(str).to_numpy(),
-                },
-                index=selected,
-            )
-        )
-    return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
 
 
 def _select_task_index(panel: pd.DataFrame, candidate_index: pd.Index, spec: dict[str, object]) -> pd.Index:
