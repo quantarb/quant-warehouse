@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Sequence
 
@@ -150,7 +151,8 @@ class EventPairStore:
                 frames.append(historical)
                 self.ingest(symbol, historical, provider=provider, merge=True)
 
-        present = set(pd.concat(frames, ignore_index=True)["event_family"]) if frames else set()
+        present_frame = _concat_event_pair_frames(frames)
+        present = set(present_frame["event_family"]) if not present_frame.empty else set()
         still_missing = tuple(family for family in missing if family not in present)
         if use_historical and refresh_source_history and refresh_missing and still_missing:
             self.refresh_source_sections(
@@ -175,8 +177,7 @@ class EventPairStore:
                 present.update(refreshed_historical["event_family"].unique())
                 still_missing = tuple(family for family in still_missing if family not in present)
 
-        combined = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=EVENT_PAIR_COLUMNS)
-        combined = _dedupe_event_pairs(combined)
+        combined = _dedupe_event_pairs(_concat_event_pair_frames(frames))
         source = "cache"
         if not historical.empty:
             source = "historical"
@@ -289,7 +290,7 @@ def build_event_pairs_from_historical_data(
             frames.append(built)
     if not frames:
         return pd.DataFrame(columns=EVENT_PAIR_COLUMNS)
-    return _dedupe_event_pairs(pd.concat(frames, ignore_index=True))
+    return _dedupe_event_pairs(_concat_event_pair_frames(frames))
 
 
 def _build_family_from_historical(
@@ -353,11 +354,15 @@ def _build_analyst_rating(symbol: str, frame: pd.DataFrame, *, start_date: str |
         return pd.DataFrame(columns=EVENT_PAIR_COLUMNS)
     frame["event_date"] = first_present_column(frame, ("date", "publishedDate", "published_date", "gradingDate", "grading_date"))
     frame["actor_type"] = "analyst"
-    frame["actor_name"] = first_present_column(
+    analyst_firm = first_present_column(
         frame,
         ("gradingCompany", "grading_company", "company", "analystCompany", "analyst_company", "analystFirm", "analyst_firm", "firm", "analystName", "analyst_name"),
     )
+    frame["actor_name"] = analyst_firm
+    frame["actor_firm"] = analyst_firm
+    frame["actor_role"] = "analyst"
     frame["strength"] = first_present_column(frame, ("newGrade", "new_grade", "newRating", "new_rating", "action", "news_title", "title"))
+    frame["reported_date"] = first_present_column(frame, ("publishedDate", "published_date", "date", "gradingDate", "grading_date"))
     frame["raw_json"] = raw_records(frame)
     return normalize_family_frame(frame, event_family="analyst_rating", source="warehouse:estimates_price_target")
 
@@ -417,9 +422,18 @@ def _build_insider(symbol: str, frame: pd.DataFrame, *, start_date: str | None, 
     if frame.empty:
         return pd.DataFrame(columns=EVENT_PAIR_COLUMNS)
     frame["event_date"] = first_present_column(frame, ("transactionDate", "transaction_date", "filingDate", "filing_date", "date"))
-    frame["actor_type"] = first_present_column(frame, ("typeOfOwner", "type_of_owner", "relationship", "officerTitle", "officer_title"))
+    actor_title = first_present_column(frame, ("officerTitle", "officer_title", "typeOfOwner", "type_of_owner", "relationship"))
+    shares = first_numeric_column(frame, ("securitiesTransacted", "securities_transacted", "shares", "transactionShares", "transaction_shares"))
+    price = first_numeric_column(frame, ("price", "transactionPrice", "transaction_price", "securityPrice", "security_price"))
+    frame["actor_type"] = actor_title
     frame["actor_name"] = first_present_column(frame, ("reportingName", "reporting_name", "ownerName", "owner_name", "name"))
-    frame["strength"] = first_present_column(frame, ("securitiesTransacted", "securities_transacted", "shares", "transactionShares", "transaction_shares"))
+    frame["actor_title"] = actor_title
+    frame["actor_role"] = actor_title.map(_normalize_insider_role)
+    frame["strength"] = shares
+    frame["transaction_shares"] = shares
+    frame["transaction_price"] = price
+    frame["transaction_value"] = shares.abs() * price
+    frame["reported_date"] = first_present_column(frame, ("filingDate", "filing_date", "reportedDate", "reported_date", "date"))
     frame["raw_json"] = raw_records(frame)
     return normalize_family_frame(frame, event_family="insider", source="warehouse:ownership_insider_trading")
 
@@ -434,9 +448,12 @@ def _build_congress(symbol: str, frame: pd.DataFrame, *, start_date: str | None,
     if frame.empty:
         return pd.DataFrame(columns=EVENT_PAIR_COLUMNS)
     frame["event_date"] = first_present_column(frame, ("transactionDate", "transaction_date", "disclosureDate", "disclosure_date", "date"))
-    frame["actor_type"] = first_present_column(frame, ("chamber", "office", "representative", "senator")).fillna("congress")
+    chamber = first_present_column(frame, ("chamber", "office")).fillna("congress")
+    frame["actor_type"] = chamber
+    frame["actor_chamber"] = chamber.map(_normalize_congress_chamber)
     actor_name = first_present_column(frame, ("representative", "senator", "firstName", "first_name", "name"))
     frame["actor_name"] = combine_names(actor_name, first_present_column(frame, ("lastName", "last_name")))
+    frame["reported_date"] = first_present_column(frame, ("disclosureDate", "disclosure_date", "filingDate", "filing_date", "date"))
     frame["strength"] = first_present_column(frame, ("amount", "amountRange", "amount_range", "assetDescription", "asset_description"))
     frame["raw_json"] = raw_records(frame)
     return normalize_family_frame(frame, event_family="congress", source="warehouse:ownership_government_trades")
@@ -461,12 +478,20 @@ def _build_price_target(symbol: str, frame: pd.DataFrame, *, start_date: str | N
     frame = frame.dropna(subset=["event_type"]).copy()
     if frame.empty:
         return pd.DataFrame(columns=EVENT_PAIR_COLUMNS)
-    frame["actor_type"] = "analyst"
-    frame["actor_name"] = first_present_column(
+    analyst_actor = first_present_column(
         frame,
         ("analystName", "analyst_name", "analystFirm", "analyst_firm", "analystCompany", "analyst_company", "publisher"),
     )
+    analyst_firm = first_present_column(
+        frame,
+        ("analystFirm", "analyst_firm", "analystCompany", "analyst_company", "publisher", "analystName", "analyst_name"),
+    )
+    frame["actor_type"] = "analyst"
+    frame["actor_name"] = analyst_actor
+    frame["actor_firm"] = analyst_firm
+    frame["actor_role"] = "analyst"
     frame["strength"] = frame["target_value"]
+    frame["reported_date"] = first_present_column(frame, ("publishedDate", "published_date", "date"))
     frame["raw_json"] = raw_records(frame)
     return normalize_family_frame(frame, event_family="price_target", source="warehouse:estimates_price_target")
 
@@ -633,6 +658,9 @@ def _dedupe_event_pairs(frame: pd.DataFrame) -> pd.DataFrame:
     if frame.empty:
         return pd.DataFrame(columns=EVENT_PAIR_COLUMNS)
     out = frame.copy()
+    for column in EVENT_PAIR_COLUMNS:
+        if column not in out.columns:
+            out[column] = None
     out["event_date"] = pd.to_datetime(out["event_date"], errors="coerce", utc=True).dt.tz_convert(None).dt.normalize()
     out = out.dropna(subset=["event_date"])
     out = out.drop_duplicates(
@@ -640,6 +668,24 @@ def _dedupe_event_pairs(frame: pd.DataFrame) -> pd.DataFrame:
         keep="last",
     )
     return out.sort_values(["symbol", "event_date", "event_family", "event_type"], ignore_index=True)[EVENT_PAIR_COLUMNS]
+
+
+def _concat_event_pair_frames(frames: Sequence[pd.DataFrame]) -> pd.DataFrame:
+    usable: list[pd.DataFrame] = []
+    for frame in frames:
+        if frame is None or frame.empty:
+            continue
+        out = frame.copy()
+        for column in EVENT_PAIR_COLUMNS:
+            if column not in out.columns:
+                out[column] = None
+        out = out[EVENT_PAIR_COLUMNS]
+        if out.dropna(how="all").empty:
+            continue
+        usable.append(out)
+    if not usable:
+        return pd.DataFrame(columns=EVENT_PAIR_COLUMNS)
+    return pd.concat(usable, ignore_index=True)
 
 
 def _prepare_event_pairs_for_storage(frame: pd.DataFrame) -> pd.DataFrame:
@@ -677,6 +723,36 @@ def _merge_event_pair_storage(existing: pd.DataFrame | None, incoming: pd.DataFr
     combined.index = pd.DatetimeIndex(combined.index)
     combined.index.name = "event_date"
     return combined.sort_index()
+
+
+def _normalize_congress_chamber(value: object) -> str | None:
+    text = str(value).strip().lower() if pd.notna(value) else ""
+    if not text:
+        return None
+    if "senate" in text or "senator" in text:
+        return "senate"
+    if "house" in text or "representative" in text or "rep." in text:
+        return "house"
+    return "congress_other"
+
+
+def _normalize_insider_role(value: object) -> str | None:
+    text = str(value).strip().lower() if pd.notna(value) else ""
+    if not text:
+        return None
+    if "chief executive" in text or re.search(r"\bceo\b", text):
+        return "ceo"
+    if "chief financial" in text or re.search(r"\bcfo\b", text):
+        return "cfo"
+    if "director" in text:
+        return "director"
+    if "president" in text:
+        return "president"
+    if "officer" in text:
+        return "officer"
+    if "10%" in text or "ten percent" in text or "beneficial owner" in text:
+        return "large_holder"
+    return "other_insider"
 
 
 def _json_text(value: object) -> str | None:

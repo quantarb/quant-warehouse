@@ -25,7 +25,6 @@ FMP_REQUIRED_FUNDAMENTAL_SECTIONS = (
     "cash_growth",
 )
 
-
 @dataclass(frozen=True)
 class FamilyEvaluationConfig:
     provider: str = "fmp"

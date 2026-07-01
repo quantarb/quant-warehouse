@@ -68,8 +68,7 @@ def load_fmp_event_pairs(
                 end_date=config.end_date,
                 provider=config.provider,
             )
-        candidates = [frame for frame in (cached, historical) if frame is not None and not frame.empty]
-        combined = _dedupe_events(pd.concat(candidates, ignore_index=True)) if candidates else pd.DataFrame(columns=EVENT_PAIR_COLUMNS)
+        combined = _dedupe_events(_concat_event_frames((cached, historical)))
         diagnostics.append(
             {
                 "symbol": symbol,
@@ -82,7 +81,7 @@ def load_fmp_event_pairs(
         if not combined.empty:
             frames.append(combined)
 
-    events = _dedupe_events(pd.concat(frames, ignore_index=True)) if frames else pd.DataFrame(columns=EVENT_PAIR_COLUMNS)
+    events = _dedupe_events(_concat_event_frames(frames))
     return events, pd.DataFrame(diagnostics), perf_counter() - start
 
 
@@ -333,6 +332,24 @@ def _dedupe_events(events: pd.DataFrame) -> pd.DataFrame:
     out["event_date"] = pd.to_datetime(out["event_date"], errors="coerce").dt.normalize()
     out = out.dropna(subset=["symbol", "event_date", "event_family", "event_type"])
     return out.drop_duplicates(["symbol", "event_date", "event_family", "event_type", "actor_name", "strength"]).reset_index(drop=True)
+
+
+def _concat_event_frames(frames: Iterable[pd.DataFrame]) -> pd.DataFrame:
+    usable: list[pd.DataFrame] = []
+    for frame in frames:
+        if frame is None or frame.empty:
+            continue
+        out = frame.copy()
+        for column in EVENT_PAIR_COLUMNS:
+            if column not in out.columns:
+                out[column] = np.nan
+        out = out[EVENT_PAIR_COLUMNS]
+        if out.dropna(how="all").empty:
+            continue
+        usable.append(out)
+    if not usable:
+        return pd.DataFrame(columns=EVENT_PAIR_COLUMNS)
+    return pd.concat(usable, ignore_index=True)
 
 
 def _base_panel_dates(feature_panel: pd.DataFrame) -> pd.DataFrame:

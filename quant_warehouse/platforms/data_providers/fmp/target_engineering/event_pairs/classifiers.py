@@ -242,7 +242,15 @@ def normalize_family_frame(frame: pd.DataFrame, *, event_family: str, source: st
         source=source,
         actor_type_col="actor_type",
         actor_name_col="actor_name",
+        actor_role_col="actor_role" if "actor_role" in frame.columns else None,
+        actor_chamber_col="actor_chamber" if "actor_chamber" in frame.columns else None,
+        actor_firm_col="actor_firm" if "actor_firm" in frame.columns else None,
+        actor_title_col="actor_title" if "actor_title" in frame.columns else None,
         strength_col="strength",
+        transaction_shares_col="transaction_shares" if "transaction_shares" in frame.columns else None,
+        transaction_price_col="transaction_price" if "transaction_price" in frame.columns else None,
+        transaction_value_col="transaction_value" if "transaction_value" in frame.columns else None,
+        reported_date_col="reported_date" if "reported_date" in frame.columns else None,
         raw_json_col="raw_json",
     )
 

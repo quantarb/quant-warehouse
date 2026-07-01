@@ -1,5 +1,16 @@
 """Research utilities for exploratory Quant Warehouse notebooks."""
 
+from quant_warehouse.research_tools.event_feature_dataset import (
+    EventFeatureDatasetConfig,
+    EventFeatureDatasetResult,
+    build_event_context,
+    build_event_feature_text_dataset,
+    build_identity_text_dataset,
+    event_pair_task_specs,
+    feature_family_text,
+    oracle_side_task_specs,
+    sanitize_task_name,
+)
 from quant_warehouse.research_tools.feature_family_eval import (
     FamilyEvaluationConfig,
     FeatureSpec,
@@ -20,16 +31,25 @@ from quant_warehouse.research_tools.target_family_eval import (
 
 __all__ = [
     "BinaryTargetConfig",
+    "EventFeatureDatasetConfig",
+    "EventFeatureDatasetResult",
     "FamilyEvaluationConfig",
     "FeatureSpec",
+    "build_event_context",
+    "build_event_feature_text_dataset",
     "build_event_target_panel",
     "build_fundamental_feature_panel",
+    "build_identity_text_dataset",
     "build_oracle_trade_target_panel",
     "cap_features_by_quality",
     "combine_target_panels",
+    "event_pair_task_specs",
     "evaluate_feature_families",
     "evaluate_feature_target_matrix",
+    "feature_family_text",
     "load_fmp_event_pairs",
+    "oracle_side_task_specs",
+    "sanitize_task_name",
     "screen_fmp_equity_universe",
     "summarize_binary_targets",
 ]

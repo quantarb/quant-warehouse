@@ -161,6 +161,11 @@ def test_normalize_event_pairs_exact_dates() -> None:
             "kind": ["insider_buy", "insider_sell"],
             "actor": ["CEO", "CFO"],
             "person": ["Jane", "John"],
+            "role": ["ceo", "cfo"],
+            "firm": ["Unit Firm", "Unit Firm"],
+            "shares": [10, 20],
+            "price": [100.0, 50.0],
+            "reported": ["2024-01-05", "2024-01-06"],
             "score": [0.8, 0.4],
             "payload": [{"id": 1}, {"id": 2}],
         }
@@ -175,6 +180,11 @@ def test_normalize_event_pairs_exact_dates() -> None:
         source="unit",
         actor_type_col="actor",
         actor_name_col="person",
+        actor_role_col="role",
+        actor_firm_col="firm",
+        transaction_shares_col="shares",
+        transaction_price_col="price",
+        reported_date_col="reported",
         strength_col="score",
         raw_json_col="payload",
     )
@@ -183,6 +193,12 @@ def test_normalize_event_pairs_exact_dates() -> None:
     assert normalized.loc[0, "event_date"] == pd.Timestamp("2024-01-03")
     assert normalized.loc[0, "event_side"] == 1
     assert normalized.loc[0, "mirror_event_type"] == "insider_sell"
+    assert normalized.loc[0, "actor_role"] == "ceo"
+    assert normalized.loc[0, "actor_firm"] == "Unit Firm"
+    assert normalized.loc[0, "transaction_shares"] == 10
+    assert normalized.loc[0, "transaction_price"] == 100.0
+    assert normalized.loc[0, "reported_date"] == pd.Timestamp("2024-01-05")
+    assert normalized.loc[0, "disclosure_lag_days"] == 2
     assert normalized.loc[1, "event_side"] == -1
     assert "horizon" not in normalized.columns
 
@@ -207,7 +223,10 @@ def test_build_event_pairs_from_existing_historical_sections() -> None:
                     "transaction_type": ["P-Purchase", "S-Sale"],
                     "reporting_name": ["Jane CEO", "John CFO"],
                     "type_of_owner": ["officer", "officer"],
+                    "officer_title": ["Chief Executive Officer", "Chief Financial Officer"],
                     "securities_transacted": [100, 50],
+                    "price": [10.0, 20.0],
+                    "filing_date": ["2024-01-05", "2024-01-06"],
                 }
             )
         }
@@ -220,10 +239,58 @@ def test_build_event_pairs_from_existing_historical_sections() -> None:
     )
 
     assert list(events["event_type"]) == ["insider_buy", "insider_sell"]
+    assert list(events["actor_role"]) == ["ceo", "cfo"]
+    assert list(events["actor_title"]) == ["Chief Executive Officer", "Chief Financial Officer"]
+    assert list(events["transaction_value"]) == [1000.0, 1000.0]
+    assert list(events["disclosure_lag_days"]) == [2, 2]
     assert list(events["source"]) == [
         "warehouse:ownership_insider_trading",
         "warehouse:ownership_insider_trading",
     ]
+
+
+def test_build_event_pairs_preserves_congress_chamber_and_analyst_firm() -> None:
+    fundamentals = _FakeFundamentals(
+        {
+            "ownership_government_trades": pd.DataFrame(
+                {
+                    "symbol": ["AAPL", "AAPL"],
+                    "transaction_date": ["2024-01-03", "2024-01-04"],
+                    "transaction_type": ["Purchase", "Sale"],
+                    "representative": ["Jane House", None],
+                    "senator": [None, "John Senate"],
+                    "chamber": ["House", "Senate"],
+                    "disclosure_date": ["2024-01-10", "2024-01-12"],
+                    "amount": ["$1,001 - $15,000", "$15,001 - $50,000"],
+                }
+            ),
+            "estimates_price_target": pd.DataFrame(
+                {
+                    "symbol": ["AAPL", "AAPL"],
+                    "date": ["2024-01-03", "2024-01-04"],
+                    "action": ["upgraded", "downgraded"],
+                    "grading_company": ["Firm A", "Firm B"],
+                    "new_grade": ["Buy", "Sell"],
+                }
+            ),
+        }
+    )
+
+    congress = build_event_pairs_from_historical_data(
+        "AAPL",
+        fundamentals=fundamentals,
+        event_families=("congress",),
+    )
+    analyst = build_event_pairs_from_historical_data(
+        "AAPL",
+        fundamentals=fundamentals,
+        event_families=("analyst_rating",),
+    )
+
+    assert list(congress["actor_chamber"]) == ["house", "senate"]
+    assert list(congress["disclosure_lag_days"]) == [7, 8]
+    assert list(analyst["actor_firm"]) == ["Firm A", "Firm B"]
+    assert list(analyst["actor_role"]) == ["analyst", "analyst"]
 
 
 def test_event_pair_store_uses_cached_labels_without_refetch(monkeypatch) -> None:
