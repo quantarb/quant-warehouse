@@ -56,15 +56,6 @@ def price_target_event_type(row: pd.Series) -> str | None:
     )
 
 
-def guidance_event_type(row: pd.Series) -> str | None:
-    return value_revision_event_type(
-        row.get("guidance_value"),
-        row.get("previous_guidance_value"),
-        positive="guidance_raise",
-        negative="guidance_cut",
-    )
-
-
 def institutional_event_type(value: Any) -> str | None:
     if pd.isna(value) or float(value) == 0.0:
         return None

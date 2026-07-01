@@ -19,7 +19,6 @@ from quant_warehouse.platforms.data_providers.fmp.target_engineering.event_pairs
     filter_dates,
     first_numeric_column,
     first_present_column,
-    guidance_event_type,
     insider_event_type,
     institutional_event_type,
     normalize_family_frame,
@@ -44,7 +43,6 @@ _HISTORICAL_SECTIONS: dict[str, tuple[str, ...]] = {
     "insider": ("ownership_insider_trading",),
     "congress": ("ownership_government_trades",),
     "price_target": ("estimates_price_target",),
-    "guidance": ("estimates_forward_eps", "estimates_forward_ebitda", "estimates_consensus"),
     "institutional": ("ownership_institutional",),
     "dividend": ("dividends", "equity_calendar_dividend"),
     "split": ("historical_splits", "equity_calendar_splits"),
@@ -319,18 +317,6 @@ def _build_family_from_historical(
     if family == "price_target":
         frame = fundamentals.read(symbol, section="estimates_price_target", provider=provider, start=start_date, end=end_date)
         return _build_price_target(symbol, frame, start_date=start_date, end_date=end_date)
-    if family == "guidance":
-        frames = []
-        for section, metric in (
-            ("estimates_forward_eps", "eps"),
-            ("estimates_forward_ebitda", "ebitda"),
-            ("estimates_consensus", "consensus"),
-        ):
-            frame = fundamentals.read(symbol, section=section, provider=provider, start=start_date, end=end_date)
-            if frame is not None and not frame.empty:
-                frames.append(_with_guidance_source(frame, section=section, metric=metric))
-        frame = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-        return _build_guidance(symbol, frame, start_date=start_date, end_date=end_date)
     if family == "institutional":
         frame = fundamentals.read(symbol, section="ownership_institutional", provider=provider, start=start_date, end=end_date)
         return _build_institutional(symbol, frame, start_date=start_date, end_date=end_date)
@@ -485,61 +471,6 @@ def _build_price_target(symbol: str, frame: pd.DataFrame, *, start_date: str | N
     return normalize_family_frame(frame, event_family="price_target", source="warehouse:estimates_price_target")
 
 
-def _build_guidance(symbol: str, frame: pd.DataFrame, *, start_date: str | None, end_date: str | None) -> pd.DataFrame:
-    frame = _prepare_historical_frame(symbol, frame)
-    if frame.empty:
-        return pd.DataFrame(columns=EVENT_PAIR_COLUMNS)
-    frame = filter_dates(frame, start_date=start_date, end_date=end_date)
-    frame["event_date"] = first_present_column(
-        frame,
-        ("date", "publishedDate", "published_date", "fiscalDateEnding", "fiscal_date_ending", "period_ending"),
-    )
-    frame["guidance_value"] = first_numeric_column(
-        frame,
-        (
-            "estimatedEpsAvg",
-            "estimated_eps_avg",
-            "estimatedEps",
-            "estimated_eps",
-            "epsEstimated",
-            "eps_estimated",
-            "estimatedEbitdaAvg",
-            "estimated_ebitda_avg",
-            "estimatedEbitda",
-            "estimated_ebitda",
-            "ebitdaEstimated",
-            "ebitda_estimated",
-            "estimate",
-            "consensus",
-            "value",
-        ),
-    )
-    frame = frame.dropna(subset=["event_date", "guidance_value"]).copy()
-    if frame.empty:
-        return pd.DataFrame(columns=EVENT_PAIR_COLUMNS)
-    metric = first_present_column(frame, ("guidance_metric", "metric", "period", "fiscal_period")).fillna("estimate")
-    fiscal_period = first_present_column(
-        frame,
-        ("fiscalDateEnding", "fiscal_date_ending", "period_ending", "period", "fiscalPeriod", "fiscal_period"),
-    ).fillna("all")
-    actor = first_present_column(
-        frame,
-        ("analystName", "analyst_name", "analystFirm", "analyst_firm", "analystCompany", "analyst_company", "publisher"),
-    ).fillna("consensus")
-    frame["_group_key"] = metric.astype(str) + "|" + fiscal_period.astype(str) + "|" + actor.astype(str)
-    frame = frame.sort_values(["_group_key", "event_date"])
-    frame["previous_guidance_value"] = frame.groupby("_group_key")["guidance_value"].shift(1)
-    frame["event_type"] = frame.apply(guidance_event_type, axis=1)
-    frame = frame.dropna(subset=["event_type"]).copy()
-    if frame.empty:
-        return pd.DataFrame(columns=EVENT_PAIR_COLUMNS)
-    frame["actor_type"] = "issuer_guidance"
-    frame["actor_name"] = actor.loc[frame.index]
-    frame["strength"] = frame["guidance_value"]
-    frame["raw_json"] = raw_records(frame)
-    return normalize_family_frame(frame, event_family="guidance", source="warehouse:forward_estimates")
-
-
 def _build_institutional(symbol: str, frame: pd.DataFrame, *, start_date: str | None, end_date: str | None) -> pd.DataFrame:
     frame = _prepare_historical_frame(symbol, frame)
     if frame.empty:
@@ -661,14 +592,6 @@ def _prepare_historical_frame(symbol: str, frame: pd.DataFrame) -> pd.DataFrame:
         if "index" in out.columns and index_name not in out.columns:
             out = out.rename(columns={"index": index_name})
     return ensure_symbol(out, symbol)
-
-
-def _with_guidance_source(frame: pd.DataFrame, *, section: str, metric: str) -> pd.DataFrame:
-    out = frame.copy()
-    out["guidance_source_section"] = section
-    if "guidance_metric" not in out.columns:
-        out["guidance_metric"] = metric
-    return out
 
 
 def _filter_calendar_symbol(frame: pd.DataFrame, symbol: str) -> pd.DataFrame:

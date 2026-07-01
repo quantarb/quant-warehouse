@@ -22,7 +22,7 @@ class BinaryTargetConfig:
     provider: str = "fmp"
     start_date: str = "2018-01-01"
     end_date: str | None = None
-    event_families: tuple[str, ...] = ("congress", "insider", "analyst_rating", "price_target", "guidance", "earnings")
+    event_families: tuple[str, ...] = ("congress", "insider", "analyst_rating", "price_target", "earnings")
     oracle_trade_k_by_frequency: dict[str, tuple[int, ...]] | None = None
     oracle_trade_min_profit_pct: float = 0.01
     oracle_trade_long_entry_price_col: str = "high"

@@ -38,7 +38,7 @@ class FamilyEvaluationConfig:
     filing_lag_days: int = 45
     horizons: tuple[int, ...] = (20, 60, 120)
     min_observations: int = 120
-    max_features_per_family: int = 50
+    max_features_per_family: int | None = None
 
 
 @dataclass(frozen=True)
@@ -251,9 +251,9 @@ def cap_features_by_quality(
     panel: pd.DataFrame,
     metadata: pd.DataFrame,
     *,
-    max_features: int,
+    max_features: int | None = None,
 ) -> tuple[list[str], pd.DataFrame, pd.DataFrame]:
-    """Cap each feature family using non-target feature quality metrics."""
+    """Optionally cap each feature family using non-target feature quality metrics."""
 
     quality_frames: list[pd.DataFrame] = []
     selected: list[str] = []
@@ -270,7 +270,7 @@ def cap_features_by_quality(
             ascending=[False, False, True],
         )
         quality = quality.reset_index(drop=True)
-        quality["selected"] = quality.index < int(max_features)
+        quality["selected"] = True if max_features is None else quality.index < int(max_features)
         quality_frames.append(quality)
         selected.extend(quality.loc[quality["selected"], "feature"].tolist())
     quality_df = pd.concat(quality_frames, ignore_index=True)
