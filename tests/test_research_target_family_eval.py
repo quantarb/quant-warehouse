@@ -10,6 +10,7 @@ from quant_warehouse.research_tools.target_family_eval import (
     _concat_event_frames,
     _mark_oracle_trade_entries,
     _price_base_panel,
+    build_collapsed_bullish_event_target_panel,
     build_event_target_panel,
     evaluate_feature_target_matrix,
     summarize_binary_targets,
@@ -233,6 +234,43 @@ def test_evaluate_feature_target_matrix_uses_actual_event_rows_for_pair_positive
     assert row["rows"] == 2
     assert row["positive_rows"] == 1
     assert row["positive_rate"] == 0.5
+
+
+def test_collapsed_bullish_event_target_uses_event_rows_only() -> None:
+    feature_panel = pd.DataFrame(
+        {
+            "symbol": ["A"] * 5,
+            "date": pd.date_range("2024-01-01", periods=5),
+            "feature": [1.0, 2.0, 3.0, 4.0, 5.0],
+        }
+    )
+    events = pd.DataFrame(
+        {
+            "symbol": ["A", "A", "A"],
+            "event_date": pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-05"]),
+            "event_family": ["congress", "congress", "earnings"],
+            "event_type": ["congress_buy", "congress_sell", "earnings_beat"],
+            "event_side": [1, -1, 1],
+            "mirror_event_type": ["congress_sell", "congress_buy", "earnings_miss"],
+            "actor_type": [None, None, None],
+            "actor_name": [None, None, None],
+            "source": ["unit", "unit", "unit"],
+            "strength": [None, None, None],
+            "raw_json": ["{}", "{}", "{}"],
+        }
+    )
+    config = BinaryTargetConfig(event_families=("congress", "earnings"))
+
+    target_panel, metadata = build_collapsed_bullish_event_target_panel(feature_panel, events, config)
+    summary = summarize_binary_targets(target_panel, metadata).set_index("target")
+
+    target = "target_event_collapsed__bullish"
+    assert list(metadata["target"]) == [target]
+    assert metadata.loc[0, "target_family"] == "event_collapsed"
+    assert target_panel[target].tolist() == [0, 1, 0, 0, 1]
+    assert summary.loc[target, "rate_rows"] == 3
+    assert summary.loc[target, "positive_rows"] == 2
+    assert summary.loc[target, "positive_rate"] == 2 / 3
 
 
 def test_mark_oracle_trade_entries_creates_sparse_entry_targets() -> None:

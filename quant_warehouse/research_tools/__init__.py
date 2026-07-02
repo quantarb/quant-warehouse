@@ -27,6 +27,7 @@ from quant_warehouse.research_tools.feature_family_eval import (
 )
 from quant_warehouse.research_tools.target_family_eval import (
     BinaryTargetConfig,
+    build_collapsed_bullish_event_target_panel,
     build_event_target_panel,
     build_oracle_trade_target_panel,
     combine_target_panels,
@@ -49,6 +50,7 @@ __all__ = [
     "FeatureSpec",
     "build_event_context",
     "build_event_feature_text_dataset",
+    "build_collapsed_bullish_event_target_panel",
     "build_event_target_panel",
     "build_fundamental_feature_panel",
     "build_oracle_trade_target_panel",

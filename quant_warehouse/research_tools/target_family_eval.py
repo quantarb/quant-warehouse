@@ -30,6 +30,13 @@ class BinaryTargetConfig:
     oracle_trade_short_entry_price_col: str = "low"
     oracle_trade_short_exit_price_col: str = "high"
     event_alignment_tolerance_days: int = 7
+    collapsed_bullish_event_types: tuple[str, ...] = (
+        "congress_buy",
+        "insider_buy",
+        "analyst_upgrade",
+        "price_target_raise",
+        "earnings_beat",
+    )
 
 
 def load_fmp_event_pairs(
@@ -129,6 +136,60 @@ def build_event_target_panel(
 
     metadata = _target_metadata(target_columns, "event")
     return out, metadata
+
+
+def build_collapsed_bullish_event_target_panel(
+    feature_panel: pd.DataFrame,
+    events: pd.DataFrame,
+    config: BinaryTargetConfig,
+    *,
+    target_name: str = "target_event_collapsed__bullish",
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Create one bullish-event target from configured event-pair families.
+
+    Positive rows are configured bullish event types. Negative rows are the
+    mirror event types from the same configured families. The activity mask
+    keeps evaluation on actual event rows instead of all symbol/date rows.
+    """
+
+    base = _base_panel_dates(feature_panel)
+    activity_column = _activity_column(target_name)
+    if base.empty:
+        return base, _target_metadata([target_name], "event_collapsed")
+
+    out = base.copy()
+    out[target_name] = 0
+    out[activity_column] = 0
+
+    aligned_events = _align_events_to_panel_dates(base, events, tolerance_days=config.event_alignment_tolerance_days)
+    if aligned_events.empty:
+        return out, _target_metadata([target_name], "event_collapsed")
+
+    allowed_event_types = set(_event_types_for_families(config.event_families))
+    bullish_event_types = set(config.collapsed_bullish_event_types) & allowed_event_types
+    if not bullish_event_types:
+        return out, _target_metadata([target_name], "event_collapsed")
+
+    usable_events = aligned_events.loc[aligned_events["event_type"].astype(str).isin(allowed_event_types)].copy()
+    if usable_events.empty:
+        return out, _target_metadata([target_name], "event_collapsed")
+
+    event_activity = (
+        usable_events.assign(activity=1)
+        .groupby(["symbol", "date"], as_index=False)["activity"]
+        .max()
+    )
+    bullish_activity = (
+        usable_events.loc[usable_events["event_type"].astype(str).isin(bullish_event_types)]
+        .assign(value=1)
+        .groupby(["symbol", "date"], as_index=False)["value"]
+        .max()
+    )
+    out = out.merge(event_activity, on=["symbol", "date"], how="left")
+    out = out.merge(bullish_activity, on=["symbol", "date"], how="left")
+    out[activity_column] = out["activity"].fillna(0).astype("int8")
+    out[target_name] = out["value"].fillna(0).astype("int8")
+    return out.drop(columns=["activity", "value"]), _target_metadata([target_name], "event_collapsed")
 
 
 def build_oracle_trade_target_panel(
@@ -330,6 +391,9 @@ def _target_activity_mask(frame: pd.DataFrame, target: str) -> pd.Series:
 
     if target not in frame.columns:
         return pd.Series(False, index=frame.index)
+    activity_column = _activity_column(target)
+    if activity_column in frame.columns:
+        return pd.to_numeric(frame[activity_column], errors="coerce").fillna(0).gt(0)
     paired = _paired_target_column(target)
     if paired is not None and paired in frame.columns:
         target_values = pd.to_numeric(frame[target], errors="coerce").fillna(0)
@@ -358,6 +422,10 @@ def _paired_target_column(target: str) -> str | None:
         if target_name.endswith("_short"):
             return f"{target_name[:-6]}_long"
     return None
+
+
+def _activity_column(target: str) -> str:
+    return f"_target_activity__{target}"
 
 
 def _dedupe_events(events: pd.DataFrame) -> pd.DataFrame:
@@ -436,7 +504,9 @@ def _target_metadata(columns: Sequence[str], family: str) -> pd.DataFrame:
     rows = []
     for column in columns:
         target_family = family
-        if column.startswith("target_event_"):
+        if column.startswith("target_event_collapsed__"):
+            target_family = "event_collapsed"
+        elif column.startswith("target_event_on__"):
             target_family = "event"
         elif column.startswith("target_oracle_trade_"):
             target_family = "oracle_trade"
