@@ -76,7 +76,12 @@ class ArcticBackend:
                 read_kwargs["date_range"] = date_range
             if columns is not None:
                 read_kwargs["columns"] = columns
-            version = lib.read(symbol, **read_kwargs)
+            try:
+                version = lib.read(symbol, **read_kwargs)
+            except Exception as exc:
+                if _is_missing_symbol_error(exc):
+                    return None
+                raise
             df = version.data
             if df is None or df.empty:
                 return None
@@ -118,6 +123,11 @@ class ArcticBackend:
             return False
         lib.delete(symbol)
         return True
+
+
+def _is_missing_symbol_error(exc: BaseException) -> bool:
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return "nodatafound" in text or "keynotfound" in text or "symbol not found" in text
 
 
 class ProviderRoutingBackend:
@@ -195,6 +205,7 @@ class ProviderRoutingBackend:
 
 _BACKEND_CACHE: dict[tuple[str], ProviderRoutingBackend] = {}
 _BACKEND_CACHE_LOCK = threading.RLock()
+_DEFAULT_STORAGE_LOCK = threading.RLock()
 
 
 def open_backend(
@@ -204,9 +215,10 @@ def open_backend(
 ) -> ProviderRoutingBackend:
     config.ensure_dirs()
     key = (str(config.arctic_uri),)
+    lock = storage_lock or _DEFAULT_STORAGE_LOCK
     with _BACKEND_CACHE_LOCK:
         backend = _BACKEND_CACHE.get(key)
         if backend is None:
-            backend = ProviderRoutingBackend(config, storage_lock=storage_lock)
+            backend = ProviderRoutingBackend(config, storage_lock=lock)
             _BACKEND_CACHE[key] = backend
         return backend

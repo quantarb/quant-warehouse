@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Literal, Sequence
@@ -127,11 +128,14 @@ def backfill_thetadata_options(
     end_date: str | None = None,
     max_dte: int = 60,
     strike_range: int = 10,
+    backfill_window_days: int = 7,
+    fallback_window_days: int = 1,
     limit: int | None = None,
     offset: int = 0,
     skip_existing: bool = True,
     overwrite: bool = False,
     request_sleep: float = 1.0,
+    max_workers: int = 1,
     us_only: bool = True,
     progress_logger: ProgressLogger = None,
 ) -> dict[str, object]:
@@ -151,20 +155,22 @@ def backfill_thetadata_options(
         offset=offset,
         us_only=us_only,
     )
-    download_spec = ThetaDataDownloadSpec(max_dte=max_dte, strike_range=strike_range)
+    download_spec = ThetaDataDownloadSpec(
+        max_dte=max_dte,
+        strike_range=strike_range,
+        backfill_window_days=backfill_window_days,
+        fallback_window_days=fallback_window_days,
+    )
     started_at = datetime.now(timezone.utc).isoformat()
     results: list[dict[str, object]] = []
     total = len(target_symbols)
 
-    for index, symbol in enumerate(target_symbols, start=1):
+    def _run_symbol(index: int, symbol: str) -> dict[str, object]:
         row: dict[str, object] = {"symbol": symbol}
         try:
             if skip_existing and not overwrite and _options_range_cached(symbol, start, end):
                 row.update({"skipped": True, "reason": "cached_range"})
-                results.append(row)
-                if callable(progress_logger):
-                    progress_logger(f"[thetadata-options] {index}/{total} skipped cached {symbol}")
-                continue
+                return row
 
             manifest = download_option_snapshots_for_range(
                 symbol,
@@ -173,29 +179,58 @@ def backfill_thetadata_options(
                 spec=download_spec,
                 overwrite=overwrite,
             )
+            row.update({"skipped": False, **manifest})
+        except Exception as exc:
+            row.update({"skipped": False, "error": str(exc)})
+        finally:
+            row["index"] = index
+            row["total"] = total
+        return row
+
+    def _record(row: dict[str, object]) -> None:
+        symbol = str(row["symbol"])
+        results.append(row)
+        if not row.get("error") and not row.get("skipped"):
             _upsert_options_catalog_state(
                 warehouse,
                 symbol=symbol,
-                start_date=str(manifest["start_date"]),
-                end_date=str(manifest["end_date"]),
-                snapshot_days=int(manifest.get("snapshot_days") or 0),
-                contracts_total=int(manifest.get("contracts_total") or 0),
+                start_date=str(row["start_date"]),
+                end_date=str(row["end_date"]),
+                snapshot_days=int(row.get("snapshot_days") or 0),
+                contracts_total=int(row.get("contracts_total") or 0),
             )
-            row.update({"skipped": False, **manifest})
-            results.append(row)
-            if callable(progress_logger):
+        if callable(progress_logger):
+            index = int(row.get("index") or len(results))
+            if row.get("error"):
+                progress_logger(f"[thetadata-options] {index}/{total} error {symbol}: {row.get('error')}")
+            elif row.get("skipped"):
+                progress_logger(f"[thetadata-options] {index}/{total} skipped cached {symbol}")
+            else:
                 progress_logger(
                     f"[thetadata-options] {index}/{total} {symbol} "
-                    f"days={manifest.get('snapshot_days')} contracts={manifest.get('contracts_total')}"
+                    f"days={row.get('snapshot_days')} contracts={row.get('contracts_total')}"
                 )
-        except Exception as exc:
-            row.update({"skipped": False, "error": str(exc)})
-            results.append(row)
-            if callable(progress_logger):
-                progress_logger(f"[thetadata-options] {index}/{total} error {symbol}: {exc}")
 
-        if request_sleep > 0 and index < total:
-            time.sleep(float(request_sleep))
+    workers = max(1, int(max_workers))
+    if workers == 1:
+        for index, symbol in enumerate(target_symbols, start=1):
+            row = _run_symbol(index, symbol)
+            _record(row)
+            if request_sleep > 0 and index < total:
+                time.sleep(float(request_sleep))
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {
+                executor.submit(_run_symbol, index, symbol): (index, symbol)
+                for index, symbol in enumerate(target_symbols, start=1)
+            }
+            completed_count = 0
+            for future in as_completed(futures):
+                completed_count += 1
+                row = future.result()
+                _record(row)
+                if request_sleep > 0 and completed_count < total:
+                    time.sleep(float(request_sleep))
 
     completed = [row for row in results if not row.get("error")]
     skipped = [row for row in results if row.get("skipped")]
@@ -216,8 +251,12 @@ def backfill_thetadata_options(
             "max_dte": download_spec.max_dte,
             "strike_range": download_spec.strike_range,
             "require_bid_ask": download_spec.require_bid_ask,
+            "backfill_window_days": download_spec.backfill_window_days,
+            "fallback_window_days": download_spec.fallback_window_days,
+            "use_direct_sdk": download_spec.use_direct_sdk,
         },
         "storage_backend": "arctic",
+        "max_workers": workers,
         "results": results,
     }
 

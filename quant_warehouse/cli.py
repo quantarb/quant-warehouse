@@ -17,6 +17,11 @@ from quant_warehouse.migrate.backfill_thetadata_options import (
     log_progress as log_thetadata_options_progress,
     write_backfill_log as write_thetadata_options_log,
 )
+from quant_warehouse.migrate.provider_storage import (
+    migrate_legacy_provider_storage,
+    summarize_provider_migration,
+    write_provider_migration_log,
+)
 from quant_warehouse.migrate.separate_fundamentals import separate_legacy_fundamentals
 from quant_warehouse.platforms.data_providers.fmp.sections import FMP_HISTORICAL_EQUITY_SECTIONS
 from quant_warehouse.warehouse.sections import (
@@ -293,11 +298,14 @@ def cmd_backfill_thetadata_options(args: argparse.Namespace) -> int:
         end_date=args.end_date or None,
         max_dte=int(args.max_dte),
         strike_range=int(args.strike_range),
+        backfill_window_days=int(args.backfill_window_days),
+        fallback_window_days=int(args.fallback_window_days),
         limit=args.limit,
         offset=int(args.offset),
         skip_existing=not args.overwrite,
         overwrite=bool(args.overwrite),
         request_sleep=float(args.request_sleep),
+        max_workers=int(args.workers),
         us_only=not args.include_non_us,
         progress_logger=log_thetadata_options_progress,
     )
@@ -309,9 +317,30 @@ def cmd_backfill_thetadata_options(args: argparse.Namespace) -> int:
 def cmd_separate_fundamentals(args: argparse.Namespace) -> int:
     symbols = _parse_csv(args.symbols) if args.symbols else None
     sections = _parse_csv(args.sections) if args.sections else None
-    stats = separate_legacy_fundamentals(symbols=symbols, sections=sections, dry_run=args.dry_run)
+    stats = separate_legacy_fundamentals(
+        symbols=symbols,
+        sections=sections,
+        dry_run=args.dry_run,
+        delete_verified_legacy=args.delete_verified_legacy,
+    )
     print(json.dumps({"migrated": len(stats), "results": stats}, indent=2))
     return 0
+
+
+def cmd_migrate_provider_storage(args: argparse.Namespace) -> int:
+    libraries = _parse_csv(args.libraries) if args.libraries else None
+    dry_run = not bool(args.apply)
+    rows = migrate_legacy_provider_storage(
+        args.provider,
+        libraries=libraries,
+        dry_run=dry_run,
+        delete_verified_legacy=bool(args.delete_verified_legacy),
+        limit=args.limit,
+    )
+    summary = summarize_provider_migration(rows, provider=args.provider, dry_run=dry_run)
+    write_provider_migration_log(summary, log_path=args.log)
+    print(json.dumps(summary, indent=2, default=str))
+    return 0 if int(summary["statuses"].get("error", 0)) == 0 else 1
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -380,7 +409,35 @@ def build_parser() -> argparse.ArgumentParser:
     separate_fundamentals.add_argument("--symbols", default="")
     separate_fundamentals.add_argument("--sections", default="")
     separate_fundamentals.add_argument("--dry-run", action="store_true")
+    separate_fundamentals.add_argument(
+        "--delete-verified-legacy",
+        action="store_true",
+        help="Delete each legacy fundamentals symbol after the provider-scoped copy verifies.",
+    )
     separate_fundamentals.set_defaults(func=cmd_separate_fundamentals)
+
+    migrate_provider_storage = sub.add_parser(
+        "migrate-provider-storage",
+        help="Copy legacy shared Arctic symbols into a provider-isolated Arctic root.",
+    )
+    migrate_provider_storage.add_argument("provider", help="Provider to migrate, e.g. fmp, yfinance, thetadata")
+    migrate_provider_storage.add_argument(
+        "--libraries",
+        default="",
+        help="Comma-separated legacy libraries. Default: all legacy libraries.",
+    )
+    migrate_provider_storage.add_argument("--limit", type=int, default=None)
+    migrate_provider_storage.add_argument("--apply", action="store_true", help="Write copied frames. Default is dry-run.")
+    migrate_provider_storage.add_argument(
+        "--delete-verified-legacy",
+        action="store_true",
+        help="Delete each source symbol after the provider-scoped copy verifies.",
+    )
+    migrate_provider_storage.add_argument(
+        "--log",
+        default="~/.quant-warehouse/logs/migrate-provider-storage.json",
+    )
+    migrate_provider_storage.set_defaults(func=cmd_migrate_provider_storage)
 
     status = sub.add_parser("status", help="Show catalog state for a symbol")
     status.add_argument("symbol")
@@ -544,6 +601,18 @@ def build_parser() -> argparse.ArgumentParser:
     backfill_thetadata.add_argument("--end-date", default="", help="Default: today (UTC)")
     backfill_thetadata.add_argument("--max-dte", type=int, default=60)
     backfill_thetadata.add_argument("--strike-range", type=int, default=10)
+    backfill_thetadata.add_argument(
+        "--backfill-window-days",
+        type=int,
+        default=7,
+        help="Calendar days per ThetaData request before fallback. Larger values reduce API calls.",
+    )
+    backfill_thetadata.add_argument(
+        "--fallback-window-days",
+        type=int,
+        default=1,
+        help="Calendar days per retry chunk if a large ThetaData request fails.",
+    )
     backfill_thetadata.add_argument("--limit", type=int, default=None)
     backfill_thetadata.add_argument("--offset", type=int, default=0)
     backfill_thetadata.add_argument("--overwrite", action="store_true", help="Re-download even if daily cache exists")
@@ -557,6 +626,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=1.0,
         help="Seconds to sleep between symbols (default: 1.0)",
+    )
+    backfill_thetadata.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Parallel symbol downloads. ArcticDB writes are serialized inside the process.",
     )
     backfill_thetadata.add_argument(
         "--log",

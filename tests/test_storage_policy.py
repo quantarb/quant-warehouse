@@ -29,11 +29,8 @@ def test_default_thetadata_option_download_uses_arctic_paths(monkeypatch) -> Non
     written: list[tuple[str, pd.DataFrame]] = []
 
     class _Backend:
-        def read(self, library: str, symbol: str) -> pd.DataFrame | None:
-            assert library in {
-                OPTIONS_THETADATA_EOD_LIBRARY,
-                provider_library(OPTIONS_THETADATA_EOD_LIBRARY, OPTIONS_THETADATA_PROVIDER),
-            }
+        def read(self, library: str, symbol: str, **kwargs) -> pd.DataFrame | None:
+            assert library == provider_library(OPTIONS_THETADATA_EOD_LIBRARY, OPTIONS_THETADATA_PROVIDER)
             return None
 
         def write(self, library: str, symbol: str, df: pd.DataFrame, **kwargs) -> None:

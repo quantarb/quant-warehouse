@@ -5,6 +5,7 @@ import pandas as pd
 from quant_warehouse.platforms.data_providers.thetadata.options import (
     OPTIONS_THETADATA_EOD_LIBRARY,
     OPTIONS_THETADATA_PROVIDER,
+    ThetaDataDownloadSpec,
     _iter_eod_date_chunks,
     download_option_snapshots_for_range,
     fetch_option_history_eod,
@@ -69,12 +70,25 @@ class _MemoryBackend:
         self.frame = initial
         self.writes: list[tuple[str, str, pd.DataFrame, bool]] = []
 
-    def read(self, library: str, symbol: str) -> pd.DataFrame | None:
+    def read(self, library: str, symbol: str, **kwargs) -> pd.DataFrame | None:
         assert library in {
-            OPTIONS_THETADATA_EOD_LIBRARY,
             provider_library(OPTIONS_THETADATA_EOD_LIBRARY, OPTIONS_THETADATA_PROVIDER),
         }
-        return None if self.frame is None else self.frame.copy()
+        if self.frame is None:
+            return None
+        out = self.frame.copy()
+        date_range = kwargs.get("date_range")
+        if date_range is not None and isinstance(out.index, pd.DatetimeIndex):
+            start, end = date_range
+            if start is not None:
+                out = out.loc[out.index >= start]
+            if end is not None:
+                out = out.loc[out.index <= end]
+        columns = kwargs.get("columns")
+        if columns is not None:
+            keep = [column for column in columns if column in out.columns]
+            out = out.loc[:, keep]
+        return out
 
     def write(
         self,
@@ -141,7 +155,13 @@ def test_fetch_option_history_eod_chunks_requests(monkeypatch) -> None:
         "quant_warehouse.platforms.data_providers.thetadata.options.fetch_openbb",
         fake_fetch_openbb,
     )
-    frame = fetch_option_history_eod("AAPL", "2024-01-01", "2025-06-01", api_key="test-key")
+    frame = fetch_option_history_eod(
+        "AAPL",
+        "2024-01-01",
+        "2025-06-01",
+        api_key="test-key",
+        spec=ThetaDataDownloadSpec(use_direct_sdk=False),
+    )
     assert not frame.empty
     assert len(calls) >= 2
     for start, end in calls:
@@ -265,3 +285,96 @@ def test_download_option_snapshots_for_range_fetches_only_missing_business_range
     assert manifest["cached_days"] == 1
     assert manifest["fetched_rows"] == 2
     assert len(backend.writes) == 1
+
+
+def test_download_option_snapshots_for_range_uses_large_backfill_window(monkeypatch) -> None:
+    backend = _MemoryBackend()
+    calls: list[tuple[pd.Timestamp, pd.Timestamp]] = []
+
+    def _fake_fetch(symbol, start_date, end_date, **kwargs):
+        start = pd.Timestamp(start_date).normalize()
+        end = pd.Timestamp(end_date).normalize()
+        calls.append((start, end))
+        rows = []
+        for ts in pd.date_range(start, end, freq="B"):
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "expiration": "2025-03-21",
+                    "strike": 230.0,
+                    "right": "PUT",
+                    "created": f"{ts.date().isoformat()} 17:21:40-05:00",
+                    "bid": 0.66,
+                    "ask": 0.81,
+                }
+            )
+        return normalize_thetadata_option_chain(
+            pd.DataFrame(rows)
+        )
+
+    monkeypatch.setattr(
+        "quant_warehouse.platforms.data_providers.thetadata.options.fetch_option_history_eod",
+        _fake_fetch,
+    )
+    monkeypatch.setattr(
+        "quant_warehouse.platforms.data_providers.thetadata.options.open_backend",
+        lambda *args, **kwargs: backend,
+    )
+
+    manifest = download_option_snapshots_for_range(
+        "AAPL",
+        "2025-01-02",
+        "2025-02-28",
+        spec=ThetaDataDownloadSpec(backfill_window_days=180),
+    )
+
+    assert calls == [(pd.Timestamp("2025-01-02"), pd.Timestamp("2025-02-28"))]
+    assert manifest["fetched_rows"] == len(pd.date_range("2025-01-02", "2025-02-28", freq="B"))
+
+
+def test_download_option_snapshots_for_range_falls_back_after_large_request_error(monkeypatch) -> None:
+    backend = _MemoryBackend()
+    calls: list[tuple[pd.Timestamp, pd.Timestamp]] = []
+
+    def _fake_fetch(symbol, start_date, end_date, **kwargs):
+        start = pd.Timestamp(start_date).normalize()
+        end = pd.Timestamp(end_date).normalize()
+        calls.append((start, end))
+        if (end - start).days > 10:
+            raise RuntimeError("range too large")
+        rows = []
+        for ts in pd.date_range(start, end, freq="B"):
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "expiration": "2025-03-21",
+                    "strike": 230.0,
+                    "right": "PUT",
+                    "created": f"{ts.date().isoformat()} 17:21:40-05:00",
+                    "bid": 0.66,
+                    "ask": 0.81,
+                }
+            )
+        return normalize_thetadata_option_chain(
+            pd.DataFrame(rows)
+        )
+
+    monkeypatch.setattr(
+        "quant_warehouse.platforms.data_providers.thetadata.options.fetch_option_history_eod",
+        _fake_fetch,
+    )
+    monkeypatch.setattr(
+        "quant_warehouse.platforms.data_providers.thetadata.options.open_backend",
+        lambda *args, **kwargs: backend,
+    )
+
+    manifest = download_option_snapshots_for_range(
+        "AAPL",
+        "2025-01-02",
+        "2025-01-24",
+        spec=ThetaDataDownloadSpec(backfill_window_days=180, fallback_window_days=7),
+    )
+
+    assert calls[0] == (pd.Timestamp("2025-01-02"), pd.Timestamp("2025-01-24"))
+    assert len(calls) > 1
+    assert manifest["fetched_rows"] > 0

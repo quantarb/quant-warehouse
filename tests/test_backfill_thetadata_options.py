@@ -23,7 +23,7 @@ def test_parse_symbol_provider_key() -> None:
 def test_list_arctic_price_underlyings_filters_provider() -> None:
     class _Backend:
         def list_symbols(self, library: str) -> list[str]:
-            assert library == "prices"
+            assert library == "fmp_equity_prices"
             return ["AAPL__fmp", "MSFT__fmp", "SPY__yfinance"]
 
     assert list_arctic_price_underlyings(_Backend(), provider="fmp") == ["AAPL", "MSFT"]

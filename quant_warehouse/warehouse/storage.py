@@ -64,12 +64,17 @@ def read_provider_frame(
     base_library: str,
     provider: str,
     symbol: str,
-    fallback_legacy: bool = True,
+    fallback_legacy: bool = False,
     start_date: pd.Timestamp | None = None,
     end_date: pd.Timestamp | None = None,
     columns: list[str] | None = None,
 ) -> pd.DataFrame | None:
-    """Read from provider-scoped storage, optionally falling back to the legacy shared library."""
+    """Read from provider-scoped storage.
+
+    Legacy shared-library fallback is opt-in and should only be used by
+    migration code. Runtime warehouse reads must fail closed against the new
+    provider-isolated layout so missing migrations are visible.
+    """
 
     date_range = (start_date, end_date) if start_date is not None or end_date is not None else None
     frame = _read_backend(

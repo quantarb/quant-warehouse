@@ -44,7 +44,7 @@ def list_arctic_price_underlyings(
     target_provider = str(provider).strip().lower()
     symbols: list[str] = []
     seen: set[str] = set()
-    libraries = [provider_library(library, target_provider), library]
+    libraries = [provider_library(library, target_provider)]
     for library_name in libraries:
         try:
             library_symbols = backend.list_symbols(library_name)

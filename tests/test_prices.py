@@ -72,7 +72,7 @@ def test_prices_store_gap_fill_and_read(tmp_path: Path):
         index=pd.to_datetime(["2024-01-01"]),
     )
     first.index.name = "date"
-    store.backend.write(PRICES_LIBRARY, "AAPL__yfinance", first)
+    store.backend.write(provider_library(PRICES_LIBRARY, "yfinance"), "AAPL__yfinance", first)
     catalog.upsert(
         symbol="AAPL",
         section="prices",
@@ -91,8 +91,8 @@ def test_prices_store_gap_fill_and_read(tmp_path: Path):
     )
     second.index.name = "date"
     merged = normalize_prices(second, provider="yfinance")
-    existing = store.backend.read(PRICES_LIBRARY, "AAPL__yfinance")
-    store.backend.write(PRICES_LIBRARY, "AAPL__yfinance", merge_upsert(existing, merged))
+    existing = store.backend.read(provider_library(PRICES_LIBRARY, "yfinance"), "AAPL__yfinance")
+    store.backend.write(provider_library(PRICES_LIBRARY, "yfinance"), "AAPL__yfinance", merge_upsert(existing, merged))
 
     out = store.read("AAPL", provider="yfinance")
     assert len(out) == 2

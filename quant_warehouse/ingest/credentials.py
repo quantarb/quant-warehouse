@@ -86,6 +86,10 @@ def configure_openbb_credentials() -> None:
     if intrinio_key and hasattr(obb.user.credentials, "intrinio_api_key"):
         obb.user.credentials.intrinio_api_key = intrinio_key
 
+    thetadata_key = resolve_thetadata_api_key()
+    if thetadata_key and hasattr(obb.user.credentials, "thetadata_api_key"):
+        obb.user.credentials.thetadata_api_key = thetadata_key
+
 
 @lru_cache(maxsize=1)
 def resolve_thetadata_api_key(*, required: bool = False) -> str:

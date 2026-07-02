@@ -16,6 +16,7 @@ from quant_warehouse.warehouse.sections import (
     MIN_HISTORICAL_DATE,
     fundamental_library,
 )
+from quant_warehouse.warehouse.storage import provider_library
 
 GAP_OVERLAP_DAYS = 5
 
@@ -72,7 +73,7 @@ class EquityCalendarStore:
                     pd.Timestamp(state.max_date) - timedelta(days=GAP_OVERLAP_DAYS)
                 ).strftime("%Y-%m-%d")
 
-        library = fundamental_library(section)
+        library = provider_library(fundamental_library(section), provider)
         storage_symbol = symbol_provider_key(EQUITY_CALENDAR_BUNDLE_SYMBOL, provider)
         existing = self.backend.read(library, storage_symbol)
         if full_refresh:
@@ -135,7 +136,7 @@ class EquityCalendarStore:
         end: str | None = None,
     ) -> pd.DataFrame:
         provider = str(provider or "fmp").strip().lower()
-        library = fundamental_library(section)
+        library = provider_library(fundamental_library(section), provider)
         storage_symbol = symbol_provider_key(EQUITY_CALENDAR_BUNDLE_SYMBOL, provider)
         frame = self.backend.read(library, storage_symbol)
         if frame is None or frame.empty:

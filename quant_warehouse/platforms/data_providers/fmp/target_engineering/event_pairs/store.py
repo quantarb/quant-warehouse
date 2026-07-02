@@ -33,6 +33,7 @@ from quant_warehouse.platforms.data_providers.fmp.target_engineering.event_pairs
 from quant_warehouse.warehouse.backend import ArcticBackend, StorageBackend, open_backend
 from quant_warehouse.warehouse.equity_calendar import EquityCalendarStore
 from quant_warehouse.warehouse.fundamentals import FundamentalsStore
+from quant_warehouse.warehouse.storage import provider_library
 
 EVENT_PAIR_LIBRARY = "target_event_pairs"
 EVENT_PAIR_SECTION = "event_pairs"
@@ -103,7 +104,8 @@ class EventPairStore:
         end_date: str | None = None,
     ) -> pd.DataFrame:
         storage_symbol = symbol_provider_key(symbol, provider)
-        frame = self.backend.read(EVENT_PAIR_LIBRARY, storage_symbol)
+        library = provider_library(EVENT_PAIR_LIBRARY, provider)
+        frame = self.backend.read(library, storage_symbol)
         if frame is None or frame.empty:
             return pd.DataFrame(columns=EVENT_PAIR_COLUMNS)
         out = _restore_event_pair_frame(frame)
@@ -238,10 +240,11 @@ class EventPairStore:
         provider = str(provider or "fmp").strip().lower()
         normalized = _prepare_event_pairs_for_storage(frame)
         storage_symbol = symbol_provider_key(symbol, provider)
-        existing = self.backend.read(EVENT_PAIR_LIBRARY, storage_symbol) if merge else None
+        library = provider_library(EVENT_PAIR_LIBRARY, provider)
+        existing = self.backend.read(library, storage_symbol) if merge else None
         merged = _merge_event_pair_storage(existing, normalized)
         if not merged.empty:
-            self.backend.write(EVENT_PAIR_LIBRARY, storage_symbol, merged)
+            self.backend.write(library, storage_symbol, merged)
 
         min_date = merged.index.min().strftime("%Y-%m-%d") if not merged.empty else None
         max_date = merged.index.max().strftime("%Y-%m-%d") if not merged.empty else None
@@ -260,7 +263,7 @@ class EventPairStore:
             "rows": int(len(merged)),
             "min_date": min_date,
             "max_date": max_date,
-            "library": EVENT_PAIR_LIBRARY,
+            "library": library,
             "storage_symbol": storage_symbol,
         }
 
