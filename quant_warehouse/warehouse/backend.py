@@ -14,7 +14,14 @@ StorageKind = Literal["arctic"]
 class StorageBackend(Protocol):
     kind: StorageKind
 
-    def read(self, library: str, symbol: str) -> pd.DataFrame | None: ...
+    def read(
+        self,
+        library: str,
+        symbol: str,
+        *,
+        date_range: tuple[pd.Timestamp | None, pd.Timestamp | None] | None = None,
+        columns: list[str] | None = None,
+    ) -> pd.DataFrame | None: ...
 
     def write(
         self,
@@ -40,18 +47,36 @@ class ArcticBackend:
         self._uri = uri
         self._arctic = Arctic(uri)
         self._storage_lock = storage_lock
+        self._libraries: dict[str, object] = {}
 
     def _library(self, name: str):
+        cached = self._libraries.get(name)
+        if cached is not None:
+            return cached
         if name not in self._arctic.list_libraries():
             self._arctic.create_library(name)
-        return self._arctic.get_library(name)
+        library = self._arctic.get_library(name)
+        self._libraries[name] = library
+        return library
 
-    def read(self, library: str, symbol: str) -> pd.DataFrame | None:
+    def read(
+        self,
+        library: str,
+        symbol: str,
+        *,
+        date_range: tuple[pd.Timestamp | None, pd.Timestamp | None] | None = None,
+        columns: list[str] | None = None,
+    ) -> pd.DataFrame | None:
         with self._storage_guard():
             lib = self._library(library)
             if not lib.has_symbol(symbol):
                 return None
-            version = lib.read(symbol)
+            read_kwargs = {}
+            if date_range is not None:
+                read_kwargs["date_range"] = date_range
+            if columns is not None:
+                read_kwargs["columns"] = columns
+            version = lib.read(symbol, **read_kwargs)
             df = version.data
             if df is None or df.empty:
                 return None
@@ -128,8 +153,20 @@ class ProviderRoutingBackend:
             self._provider_backends[provider] = backend
         return backend
 
-    def read(self, library: str, symbol: str) -> pd.DataFrame | None:
-        return self._backend_for_library(library).read(library, symbol)
+    def read(
+        self,
+        library: str,
+        symbol: str,
+        *,
+        date_range: tuple[pd.Timestamp | None, pd.Timestamp | None] | None = None,
+        columns: list[str] | None = None,
+    ) -> pd.DataFrame | None:
+        return self._backend_for_library(library).read(
+            library,
+            symbol,
+            date_range=date_range,
+            columns=columns,
+        )
 
     def write(
         self,
@@ -156,10 +193,20 @@ class ProviderRoutingBackend:
         return self._backend_for_library(library).delete(library, symbol)
 
 
+_BACKEND_CACHE: dict[tuple[str], ProviderRoutingBackend] = {}
+_BACKEND_CACHE_LOCK = threading.RLock()
+
+
 def open_backend(
     config: WarehouseConfig,
     *,
     storage_lock: threading.RLock | None = None,
 ) -> ProviderRoutingBackend:
     config.ensure_dirs()
-    return ProviderRoutingBackend(config, storage_lock=storage_lock)
+    key = (str(config.arctic_uri),)
+    with _BACKEND_CACHE_LOCK:
+        backend = _BACKEND_CACHE.get(key)
+        if backend is None:
+            backend = ProviderRoutingBackend(config, storage_lock=storage_lock)
+            _BACKEND_CACHE[key] = backend
+        return backend

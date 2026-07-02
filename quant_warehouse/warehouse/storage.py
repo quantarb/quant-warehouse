@@ -65,12 +65,56 @@ def read_provider_frame(
     provider: str,
     symbol: str,
     fallback_legacy: bool = True,
+    start_date: pd.Timestamp | None = None,
+    end_date: pd.Timestamp | None = None,
+    columns: list[str] | None = None,
 ) -> pd.DataFrame | None:
     """Read from provider-scoped storage, optionally falling back to the legacy shared library."""
 
-    frame = backend.read(provider_library(base_library, provider), symbol)
+    date_range = (start_date, end_date) if start_date is not None or end_date is not None else None
+    frame = _read_backend(
+        backend,
+        provider_library(base_library, provider),
+        symbol,
+        date_range=date_range,
+        columns=columns,
+    )
     if frame is not None and not frame.empty:
         return frame
     if fallback_legacy:
-        return backend.read(base_library, symbol)
+        return _read_backend(
+            backend,
+            base_library,
+            symbol,
+            date_range=date_range,
+            columns=columns,
+        )
     return frame
+
+
+def _read_backend(
+    backend: StorageBackend,
+    library: str,
+    symbol: str,
+    *,
+    date_range: tuple[pd.Timestamp | None, pd.Timestamp | None] | None = None,
+    columns: list[str] | None = None,
+) -> pd.DataFrame | None:
+    try:
+        return backend.read(library, symbol, date_range=date_range, columns=columns)
+    except TypeError:
+        frame = backend.read(library, symbol)
+        if frame is None or frame.empty:
+            return frame
+        out = frame.copy()
+        if date_range is not None:
+            start, end = date_range
+            if isinstance(out.index, pd.DatetimeIndex):
+                if start is not None:
+                    out = out.loc[out.index >= start]
+                if end is not None:
+                    out = out.loc[out.index <= end]
+        if columns is not None:
+            keep = [column for column in columns if column in out.columns]
+            out = out.loc[:, keep]
+        return out

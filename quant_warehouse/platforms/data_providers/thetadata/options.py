@@ -124,15 +124,23 @@ def read_option_chain_arctic(
     *,
     start_date: date | str | pd.Timestamp | None = None,
     end_date: date | str | pd.Timestamp | None = None,
+    columns: Sequence[str] | None = None,
+    fallback_legacy: bool = True,
     backend: ArcticBackend | None = None,
     config: WarehouseConfig | None = None,
 ) -> pd.DataFrame:
     backend = backend or open_backend(config or WarehouseConfig.from_env())
+    start, end = _option_chain_read_bounds(start_date, end_date)
+    projected_columns = _option_chain_projected_columns(columns)
     frame = read_provider_frame(
         backend,
         base_library=OPTIONS_THETADATA_EOD_LIBRARY,
         provider=OPTIONS_THETADATA_PROVIDER,
         symbol=option_chain_storage_symbol(symbol),
+        fallback_legacy=fallback_legacy,
+        start_date=start,
+        end_date=end,
+        columns=projected_columns,
     )
     if frame is None or frame.empty:
         return pd.DataFrame()
@@ -147,6 +155,9 @@ def read_option_chain_arctic(
     if end_date is not None:
         snapshot_dates = _normalize_snapshot_dates(out["snapshot_date"])
         out = out.loc[snapshot_dates <= pd.Timestamp(end_date).normalize()]
+    if columns is not None:
+        keep = [column for column in columns if column in out.columns]
+        out = out.loc[:, keep]
     return out.sort_index()
 
 
@@ -178,6 +189,64 @@ def write_option_chain_arctic(
     if not merged.empty:
         backend.write(library, storage_symbol, merged, prune_previous_versions=True)
     return _arctic_ref(symbol)
+
+
+def option_chain_coverage(
+    symbols: Sequence[str] | None = None,
+    *,
+    backend: ArcticBackend | None = None,
+    config: WarehouseConfig | None = None,
+    fallback_legacy: bool = True,
+) -> pd.DataFrame:
+    """Return lightweight cached ThetaData option coverage by symbol."""
+
+    backend = backend or open_backend(config or WarehouseConfig.from_env())
+    if symbols is None:
+        library = provider_library(OPTIONS_THETADATA_EOD_LIBRARY, OPTIONS_THETADATA_PROVIDER)
+        symbols = sorted(str(symbol) for symbol in backend.list_symbols(library))
+    rows: list[dict[str, Any]] = []
+    for raw_symbol in symbols:
+        symbol = option_chain_storage_symbol(raw_symbol)
+        frame = read_option_chain_arctic(
+            symbol,
+            columns=["snapshot_date"],
+            backend=backend,
+            fallback_legacy=fallback_legacy,
+        )
+        if frame.empty or "snapshot_date" not in frame.columns:
+            rows.append({"symbol": symbol, "row_count": 0, "snapshot_day_count": 0})
+            continue
+        dates = _normalize_snapshot_dates(frame["snapshot_date"]).dropna()
+        rows.append(
+            {
+                "symbol": symbol,
+                "row_count": int(len(frame)),
+                "snapshot_day_count": int(dates.nunique()),
+                "min_snapshot_date": None if dates.empty else dates.min().date().isoformat(),
+                "max_snapshot_date": None if dates.empty else dates.max().date().isoformat(),
+            }
+        )
+    return pd.DataFrame(rows).sort_values(["row_count", "symbol"], ascending=[False, True]).reset_index(drop=True)
+
+
+def _option_chain_read_bounds(
+    start_date: date | str | pd.Timestamp | None,
+    end_date: date | str | pd.Timestamp | None,
+) -> tuple[pd.Timestamp | None, pd.Timestamp | None]:
+    start = None if start_date is None else pd.Timestamp(start_date).normalize()
+    end = None
+    if end_date is not None:
+        end = pd.Timestamp(end_date).normalize() + pd.Timedelta(days=1) - pd.Timedelta(nanoseconds=1)
+    return start, end
+
+
+def _option_chain_projected_columns(columns: Sequence[str] | None) -> list[str] | None:
+    if columns is None:
+        return None
+    requested = [str(column) for column in columns]
+    if "snapshot_date" not in requested:
+        requested.append("snapshot_date")
+    return requested
 
 
 def option_chain_snapshots_cached(
