@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pandas as pd
 
 from quant_warehouse.research_tools import (
     BinaryTargetConfig,
     EventFeatureDatasetConfig,
+    add_fmp_equity_profile_feature_family,
     add_fmp_event_context_feature_families,
     build_event_feature_text_dataset,
     event_pair_task_specs,
@@ -106,6 +109,44 @@ def test_fmp_event_context_feature_families_are_sparse_by_event_family() -> None
     assert ("fmp_analyst_rating_event_context" in set(out_metadata["family"]))
 
 
+def test_fmp_equity_profile_feature_family_attaches_profile_metadata() -> None:
+    panel = pd.DataFrame(
+        {
+            "symbol": ["AAPL", "MSFT"],
+            "date": pd.to_datetime(["2024-01-01", "2024-01-01"]),
+            "feature": [1.0, 2.0],
+        }
+    )
+    metadata = pd.DataFrame([{"source": "fmp", "family": "issuer", "feature": "feature"}])
+
+    profiles = {
+        "AAPL": SimpleNamespace(
+            company_name="Apple Inc.",
+            exchange="NASDAQ",
+            country="US",
+            sector="Technology",
+            industry="Consumer Electronics",
+        ),
+        "MSFT": SimpleNamespace(
+            company_name="Microsoft Corp.",
+            exchange="NASDAQ",
+            country="US",
+            sector="Technology",
+            industry="Software",
+        ),
+    }
+    warehouse = SimpleNamespace(
+        catalog=SimpleNamespace(get_profile=lambda *, symbol, provider: profiles.get(symbol))
+    )
+
+    out_panel, out_metadata = add_fmp_equity_profile_feature_family(panel, metadata, warehouse=warehouse)
+
+    assert list(out_panel["company_name"]) == ["Apple Inc.", "Microsoft Corp."]
+    assert list(out_panel["sector"]) == ["Technology", "Technology"]
+    profile_metadata = out_metadata.loc[out_metadata["family"].eq("fmp_equity_profile")]
+    assert set(profile_metadata["feature"]) == {"date", "symbol", "company_name", "exchange", "country", "sector", "industry"}
+
+
 def test_task_family_allowlist_prevents_cross_event_context_mismatch() -> None:
     panel = pd.DataFrame(
         {
@@ -155,4 +196,3 @@ def test_task_family_allowlist_prevents_cross_event_context_mismatch() -> None:
     assert set(analyst_rows["feature_family"]) == {"fmp_analyst_rating_event_context"}
     assert "Nancy Pelosi" in congress_rows.iloc[0]["text"]
     assert "Example Firm" not in congress_rows.iloc[0]["text"]
-

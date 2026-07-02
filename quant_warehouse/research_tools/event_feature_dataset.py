@@ -61,6 +61,18 @@ FMP_EVENT_CONTEXT_FEATURE_FAMILIES: dict[str, tuple[str, tuple[str, ...]]] = {
     ),
 }
 
+FMP_EQUITY_PROFILE_FEATURE_SOURCE = "fmp"
+FMP_EQUITY_PROFILE_FEATURE_FAMILY = "fmp_equity_profile"
+FMP_EQUITY_PROFILE_FEATURE_COLUMNS = (
+    "date",
+    "symbol",
+    "company_name",
+    "exchange",
+    "country",
+    "sector",
+    "industry",
+)
+
 
 @dataclass(frozen=True)
 class EventFeatureDatasetConfig:
@@ -303,6 +315,50 @@ def add_fmp_event_context_feature_families(
     context_metadata = pd.DataFrame(metadata_rows)
     metadata = (
         pd.concat([feature_metadata, context_metadata], ignore_index=True)
+        .drop_duplicates(["source", "family", "feature"])
+        .sort_values(["source", "family", "feature"])
+        .reset_index(drop=True)
+    )
+    return out, metadata
+
+
+def add_fmp_equity_profile_feature_family(
+    feature_panel: pd.DataFrame,
+    feature_metadata: pd.DataFrame,
+    *,
+    warehouse: Warehouse,
+    provider: str = "fmp",
+    columns: Sequence[str] = FMP_EQUITY_PROFILE_FEATURE_COLUMNS,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Attach FMP issuer profile fields as a global symbol/date feature family."""
+
+    if feature_panel is None or feature_panel.empty:
+        return feature_panel, feature_metadata
+    out = feature_panel.copy()
+    profile_frame = _profile_lookup(warehouse, out["symbol"], provider=provider)
+    if not profile_frame.empty:
+        out = out.merge(profile_frame, on="symbol", how="left", suffixes=("", "_profile"))
+        for column in columns:
+            fallback = f"{column}_profile"
+            if fallback in out.columns:
+                if column in out.columns:
+                    out[column] = out[column].where(out[column].notna(), out[fallback])
+                else:
+                    out[column] = out[fallback]
+                out = out.drop(columns=[fallback])
+    metadata_rows = [
+        {
+            "feature": column,
+            "family": FMP_EQUITY_PROFILE_FEATURE_FAMILY,
+            "source": FMP_EQUITY_PROFILE_FEATURE_SOURCE,
+            "source_column": column,
+            "expected_direction": "categorical",
+        }
+        for column in columns
+    ]
+    profile_metadata = pd.DataFrame(metadata_rows)
+    metadata = (
+        pd.concat([feature_metadata, profile_metadata], ignore_index=True)
         .drop_duplicates(["source", "family", "feature"])
         .sort_values(["source", "family", "feature"])
         .reset_index(drop=True)
