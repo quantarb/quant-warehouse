@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pandas as pd
 
 from quant_warehouse.research_tools.target_family_eval import (
     BinaryTargetConfig,
+    _concat_event_frames,
     _mark_oracle_trade_entries,
     _price_base_panel,
     build_event_target_panel,
@@ -60,6 +63,32 @@ def test_build_event_target_panel_aligns_events_same_day_only() -> None:
     )
     assert target_panel.loc[target_panel["date"].eq(pd.Timestamp("2024-01-02")), "target_event_on__congress_buy"].item() == 0
     assert target_panel.loc[target_panel["date"].eq(pd.Timestamp("2024-01-03")), "target_event_on__congress_buy"].item() == 1
+
+
+def test_concat_event_frames_ignores_all_na_columns_without_future_warning() -> None:
+    frame = pd.DataFrame(
+        {
+            "symbol": ["AAPL"],
+            "event_date": [pd.Timestamp("2024-01-03")],
+            "event_family": ["congress"],
+            "event_type": ["congress_buy"],
+            "event_side": [1],
+            "mirror_event_type": ["congress_sell"],
+            "actor_type": [np.nan],
+            "actor_name": [np.nan],
+            "source": ["unit"],
+            "strength": [np.nan],
+            "raw_json": [np.nan],
+        }
+    )
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", FutureWarning)
+        combined = _concat_event_frames([frame, pd.DataFrame()])
+
+    assert not [warning for warning in caught if issubclass(warning.category, FutureWarning)]
+    assert len(combined) == 1
+    assert "actor_name" in combined.columns
 
 
 def test_evaluate_feature_target_matrix_reports_usable_pairs() -> None:
@@ -124,6 +153,86 @@ def test_evaluate_feature_target_matrix_reports_usable_pairs() -> None:
     assert set(matrix["feature_family"]) == {"family_a", "family_b"}
     assert set(matrix["status"]) == {"usable"}
     assert summary.loc[0, "positive_rows"] == 4
+
+
+def test_summarize_binary_targets_uses_actual_event_rows_for_pair_positive_rate() -> None:
+    target_panel = pd.DataFrame(
+        {
+            "symbol": ["A"] * 5,
+            "date": pd.date_range("2024-01-01", periods=5),
+            "target_event_on__congress_buy": [1, 0, 0, 0, 0],
+            "target_event_on__congress_sell": [0, 1, 0, 0, 0],
+            "target_oracle_trade_entry__YE_k1_long": [0, 1, 0, 1, 0],
+            "target_oracle_trade_entry__YE_k1_short": [1, 0, 0, 0, 0],
+        }
+    )
+    target_metadata = pd.DataFrame(
+        [
+            {"target": "target_event_on__congress_buy", "target_family": "event", "target_type": "binary"},
+            {"target": "target_event_on__congress_sell", "target_family": "event", "target_type": "binary"},
+            {"target": "target_oracle_trade_entry__YE_k1_long", "target_family": "oracle_trade", "target_type": "binary"},
+            {"target": "target_oracle_trade_entry__YE_k1_short", "target_family": "oracle_trade", "target_type": "binary"},
+        ]
+    )
+
+    summary = summarize_binary_targets(target_panel, target_metadata).set_index("target")
+
+    assert summary.loc["target_event_on__congress_buy", "rate_rows"] == 2
+    assert summary.loc["target_event_on__congress_buy", "positive_rate"] == 0.5
+    assert summary.loc["target_event_on__congress_sell", "positive_rate"] == 0.5
+    assert summary.loc["target_oracle_trade_entry__YE_k1_long", "rate_rows"] == 3
+    assert summary.loc["target_oracle_trade_entry__YE_k1_long", "positive_rate"] == 2 / 3
+    assert summary.loc["target_oracle_trade_entry__YE_k1_short", "positive_rate"] == 1 / 3
+
+
+def test_evaluate_feature_target_matrix_uses_actual_event_rows_for_pair_positive_rate() -> None:
+    feature_panel = pd.DataFrame(
+        {
+            "symbol": ["A"] * 5,
+            "date": pd.date_range("2024-01-01", periods=5),
+            "family__feature": [1.0, 2.0, 3.0, 4.0, 5.0],
+        }
+    )
+    feature_metadata = pd.DataFrame(
+        [
+            {
+                "feature": "family__feature",
+                "family": "family",
+                "source": "unit",
+                "source_column": "feature",
+                "expected_direction": "unknown",
+            }
+        ]
+    )
+    target_panel = pd.DataFrame(
+        {
+            "symbol": ["A"] * 5,
+            "date": pd.date_range("2024-01-01", periods=5),
+            "target_event_on__congress_buy": [1, 0, 0, 0, 0],
+            "target_event_on__congress_sell": [0, 1, 0, 0, 0],
+        }
+    )
+    target_metadata = pd.DataFrame(
+        [
+            {"target": "target_event_on__congress_buy", "target_family": "event", "target_type": "binary"},
+            {"target": "target_event_on__congress_sell", "target_family": "event", "target_type": "binary"},
+        ]
+    )
+
+    matrix, _ = evaluate_feature_target_matrix(
+        feature_panel,
+        feature_metadata,
+        target_panel,
+        target_metadata,
+        min_rows=1,
+        min_positive_rows=1,
+        min_feature_coverage=1.0,
+    )
+
+    row = matrix.loc[matrix["target"].eq("target_event_on__congress_buy")].iloc[0]
+    assert row["rows"] == 2
+    assert row["positive_rows"] == 1
+    assert row["positive_rate"] == 0.5
 
 
 def test_mark_oracle_trade_entries_creates_sparse_entry_targets() -> None:

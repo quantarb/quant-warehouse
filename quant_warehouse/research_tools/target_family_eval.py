@@ -220,19 +220,23 @@ def summarize_binary_targets(target_panel: pd.DataFrame, target_metadata: pd.Dat
     """Summarize target sparsity, date coverage, and symbol coverage."""
 
     rows = []
+    target_lookup = target_metadata.set_index("target")["target_family"].to_dict()
     for column in target_metadata.get("target", []):
         if column not in target_panel.columns:
             continue
         values = pd.to_numeric(target_panel[column], errors="coerce").fillna(0)
         positive = values.gt(0)
+        rate_mask = _target_activity_mask(target_panel, column)
+        rate_rows = int(rate_mask.sum())
         positive_frame = target_panel.loc[positive, ["symbol", "date"]]
         rows.append(
             {
                 "target": column,
-                "target_family": target_metadata.set_index("target").loc[column, "target_family"],
+                "target_family": target_lookup.get(column, ""),
                 "rows": int(values.notna().sum()),
+                "rate_rows": rate_rows,
                 "positive_rows": int(positive.sum()),
-                "positive_rate": float(positive.mean()) if len(values) else np.nan,
+                "positive_rate": float(positive.loc[rate_mask].mean()) if rate_rows else np.nan,
                 "positive_symbols": int(positive_frame["symbol"].nunique()) if not positive_frame.empty else 0,
                 "min_positive_date": positive_frame["date"].min() if not positive_frame.empty else pd.NaT,
                 "max_positive_date": positive_frame["date"].max() if not positive_frame.empty else pd.NaT,
@@ -267,7 +271,8 @@ def evaluate_feature_target_matrix(
         feature_mask = feature_coverage.ge(float(min_feature_coverage))
         for target in target_columns:
             target_values = pd.to_numeric(merged[target], errors="coerce").fillna(0).astype("int8")
-            mask = feature_mask & target_values.notna()
+            activity_mask = _target_activity_mask(merged, target)
+            mask = feature_mask & target_values.notna() & activity_mask
             n_rows = int(mask.sum())
             positives = int(target_values.loc[mask].gt(0).sum())
             if n_rows < int(min_rows) or positives < int(min_positive_rows):
@@ -320,6 +325,41 @@ def _event_types_for_families(families: Sequence[str]) -> list[str]:
     return event_types
 
 
+def _target_activity_mask(frame: pd.DataFrame, target: str) -> pd.Series:
+    """Rows that should be used as the denominator for a target's positive rate."""
+
+    if target not in frame.columns:
+        return pd.Series(False, index=frame.index)
+    paired = _paired_target_column(target)
+    if paired is not None and paired in frame.columns:
+        target_values = pd.to_numeric(frame[target], errors="coerce").fillna(0)
+        paired_values = pd.to_numeric(frame[paired], errors="coerce").fillna(0)
+        return target_values.gt(0) | paired_values.gt(0)
+    values = pd.to_numeric(frame[target], errors="coerce").fillna(0)
+    if str(target).startswith("target_oracle_trade_entry__") and str(target).endswith("_any"):
+        return values.gt(0)
+    return pd.Series(True, index=frame.index)
+
+
+def _paired_target_column(target: str) -> str | None:
+    target_name = str(target)
+    prefix = "target_event_on__"
+    if target_name.startswith(prefix):
+        event_type = target_name[len(prefix):]
+        for pair in EVENT_PAIR_TAXONOMY.values():
+            if event_type == pair["positive"]:
+                return f"{prefix}{pair['negative']}"
+            if event_type == pair["negative"]:
+                return f"{prefix}{pair['positive']}"
+    oracle_prefix = "target_oracle_trade_entry__"
+    if target_name.startswith(oracle_prefix):
+        if target_name.endswith("_long"):
+            return f"{target_name[:-5]}_short"
+        if target_name.endswith("_short"):
+            return f"{target_name[:-6]}_long"
+    return None
+
+
 def _dedupe_events(events: pd.DataFrame) -> pd.DataFrame:
     if events is None or events.empty:
         return pd.DataFrame(columns=EVENT_PAIR_COLUMNS)
@@ -346,10 +386,14 @@ def _concat_event_frames(frames: Iterable[pd.DataFrame]) -> pd.DataFrame:
         out = out[EVENT_PAIR_COLUMNS]
         if out.dropna(how="all").empty:
             continue
-        usable.append(out)
+        usable.append(out.dropna(axis=1, how="all"))
     if not usable:
         return pd.DataFrame(columns=EVENT_PAIR_COLUMNS)
-    return pd.concat(usable, ignore_index=True)
+    combined = pd.concat(usable, ignore_index=True)
+    for column in EVENT_PAIR_COLUMNS:
+        if column not in combined.columns:
+            combined[column] = np.nan
+    return combined[EVENT_PAIR_COLUMNS]
 
 
 def _base_panel_dates(feature_panel: pd.DataFrame) -> pd.DataFrame:

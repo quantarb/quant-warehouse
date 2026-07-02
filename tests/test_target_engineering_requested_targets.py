@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import warnings
+
+import numpy as np
 import pandas as pd
 import pytest
 
+from quant_warehouse.platforms.data_providers.fmp.target_engineering.event_pairs.store import _concat_event_pair_frames
 from quant_warehouse.platforms.data_providers.fmp.target_engineering import (
     EventPairStore,
     build_event_pairs_from_historical_data,
@@ -291,6 +295,32 @@ def test_build_event_pairs_preserves_congress_chamber_and_analyst_firm() -> None
     assert list(congress["disclosure_lag_days"]) == [7, 8]
     assert list(analyst["actor_firm"]) == ["Firm A", "Firm B"]
     assert list(analyst["actor_role"]) == ["analyst", "analyst"]
+
+
+def test_concat_event_pair_frames_ignores_all_na_columns_without_future_warning() -> None:
+    frame = pd.DataFrame(
+        {
+            "symbol": ["AAPL"],
+            "event_date": [pd.Timestamp("2024-01-03")],
+            "event_family": ["congress"],
+            "event_type": ["congress_buy"],
+            "event_side": [1],
+            "mirror_event_type": ["congress_sell"],
+            "actor_type": [np.nan],
+            "actor_name": [np.nan],
+            "source": ["unit"],
+            "strength": [np.nan],
+            "raw_json": [np.nan],
+        }
+    )
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", FutureWarning)
+        combined = _concat_event_pair_frames([frame, pd.DataFrame()])
+
+    assert not [warning for warning in caught if issubclass(warning.category, FutureWarning)]
+    assert len(combined) == 1
+    assert "actor_name" in combined.columns
 
 
 def test_event_pair_store_uses_cached_labels_without_refetch(monkeypatch) -> None:

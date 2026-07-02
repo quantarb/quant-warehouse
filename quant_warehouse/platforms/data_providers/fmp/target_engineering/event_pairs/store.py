@@ -682,10 +682,14 @@ def _concat_event_pair_frames(frames: Sequence[pd.DataFrame]) -> pd.DataFrame:
         out = out[EVENT_PAIR_COLUMNS]
         if out.dropna(how="all").empty:
             continue
-        usable.append(out)
+        usable.append(out.dropna(axis=1, how="all"))
     if not usable:
         return pd.DataFrame(columns=EVENT_PAIR_COLUMNS)
-    return pd.concat(usable, ignore_index=True)
+    combined = pd.concat(usable, ignore_index=True)
+    for column in EVENT_PAIR_COLUMNS:
+        if column not in combined.columns:
+            combined[column] = None
+    return combined[EVENT_PAIR_COLUMNS]
 
 
 def _prepare_event_pairs_for_storage(frame: pd.DataFrame) -> pd.DataFrame:
