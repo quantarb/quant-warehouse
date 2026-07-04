@@ -47,7 +47,7 @@ def main() -> None:
     entry = pd.Timestamp(trade["entry_date"])
     exit = pd.Timestamp(trade["exit_date"])
 
-    snapshots = load_thetadata_option_snapshots(symbol, [entry, exit], api_key=api_key, max_dte=45, strike_range=10)
+    snapshots = load_thetadata_option_snapshots(symbol, [entry, exit], api_key=api_key)
     normalized = {ts: normalize_thetadata_option_chain(df) for ts, df in snapshots.items()}
     labels = build_option_labels([trade], normalized)
     label_df = pd.DataFrame(labels.option_rows)

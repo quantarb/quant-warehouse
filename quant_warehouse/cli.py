@@ -304,10 +304,6 @@ def cmd_backfill_thetadata_options(args: argparse.Namespace) -> int:
         source=source,
         start_date=args.start_date,
         end_date=args.end_date or None,
-        max_dte=None if args.max_dte is None else int(args.max_dte),
-        strike_range=None if args.strike_range is None else int(args.strike_range),
-        require_bid_ask=bool(args.require_bid_ask),
-        min_ask=float(args.min_ask),
         backfill_window_days=int(args.backfill_window_days),
         fallback_window_days=int(args.fallback_window_days),
         min_market_cap=min_market_cap,
@@ -618,18 +614,6 @@ def build_parser() -> argparse.ArgumentParser:
     backfill_thetadata.add_argument("--start-date", default="2024-01-01")
     backfill_thetadata.add_argument("--end-date", default="", help="Default: today (UTC)")
     backfill_thetadata.add_argument(
-        "--max-dte",
-        type=int,
-        default=None,
-        help="Optional ThetaData max DTE filter. Default keeps the full returned chain.",
-    )
-    backfill_thetadata.add_argument(
-        "--strike-range",
-        type=int,
-        default=None,
-        help="Optional ThetaData strike-range filter. Default keeps the full returned chain.",
-    )
-    backfill_thetadata.add_argument(
         "--market-cap-tier",
         choices=sorted(MARKET_CAP_TIERS),
         default="",
@@ -641,17 +625,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--allow-missing-prices",
         action="store_true",
         help="Do not require matching FMP price history when using --source market-cap.",
-    )
-    backfill_thetadata.add_argument(
-        "--require-bid-ask",
-        action="store_true",
-        help="Drop contracts without bid/ask quotes. Default keeps the full returned chain.",
-    )
-    backfill_thetadata.add_argument(
-        "--min-ask",
-        type=float,
-        default=0.0,
-        help="Minimum ask when --require-bid-ask is used. Default: 0.0.",
     )
     backfill_thetadata.add_argument(
         "--backfill-window-days",

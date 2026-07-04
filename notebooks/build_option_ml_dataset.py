@@ -13,7 +13,6 @@ from quant_warehouse.platforms.data_providers.thetadata.target_engineering.optio
     build_option_ml_dataset,
     save_option_ml_dataset,
 )
-from quant_warehouse.platforms.data_providers.thetadata.options import ThetaDataDownloadSpec
 
 
 def _load_price_frame(symbol: str, start: str, end: str) -> pd.DataFrame:
@@ -33,8 +32,6 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--start", default="2024-01-01")
     parser.add_argument("--end", default="2025-01-31")
     parser.add_argument("--side", default=None, help="Optional trade side filter: long or short")
-    parser.add_argument("--max-dte", type=int, default=45)
-    parser.add_argument("--strike-range", type=int, default=10)
     parser.add_argument("--output", default="notebooks/outputs/option_ml_dataset.parquet")
     parser.add_argument("--format", choices=("parquet", "csv"), default="parquet")
     return parser.parse_args()
@@ -60,10 +57,7 @@ def main() -> None:
     if args.side:
         trades = [trade for trade in trades if str(trade.get("side") or "").lower() == str(args.side).lower()]
 
-    dataset_spec = OptionMlDatasetSpec(
-        thetadata=ThetaDataDownloadSpec(max_dte=args.max_dte, strike_range=args.strike_range),
-        download_missing=True,
-    )
+    dataset_spec = OptionMlDatasetSpec(download_missing=True)
     result = build_option_ml_dataset(trades, dataset_spec=dataset_spec)
     output_path = save_option_ml_dataset(result, args.output, file_format=args.format)
 

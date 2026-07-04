@@ -183,10 +183,6 @@ def backfill_thetadata_options(
     source: SymbolSource = "arctic-fmp",
     start_date: str = "2024-01-01",
     end_date: str | None = None,
-    max_dte: int | None = None,
-    strike_range: int | None = None,
-    require_bid_ask: bool = False,
-    min_ask: float = 0.0,
     backfill_window_days: int = 7,
     fallback_window_days: int = 1,
     min_market_cap: float | None = None,
@@ -201,7 +197,7 @@ def backfill_thetadata_options(
     us_only: bool = True,
     progress_logger: ProgressLogger = None,
 ) -> dict[str, object]:
-    """Download daily ThetaData EOD option chains for FMP underlyings in Arctic."""
+    """Download full daily ThetaData EOD option chains for FMP underlyings in Arctic."""
 
     warehouse = warehouse or Warehouse(config=config)
     start = pd.Timestamp(start_date).normalize()
@@ -221,10 +217,6 @@ def backfill_thetadata_options(
         us_only=us_only,
     )
     download_spec = ThetaDataDownloadSpec(
-        max_dte=max_dte,
-        strike_range=strike_range,
-        require_bid_ask=require_bid_ask,
-        min_ask=min_ask,
         backfill_window_days=backfill_window_days,
         fallback_window_days=fallback_window_days,
     )
@@ -319,9 +311,10 @@ def backfill_thetadata_options(
         "download_spec": {
             "endpoint": THETADATA_OPTION_HISTORY_ENDPOINT,
             "data_interval": download_spec.data_interval,
-            "max_dte": download_spec.max_dte,
-            "strike_range": download_spec.strike_range,
-            "require_bid_ask": download_spec.require_bid_ask,
+            "max_dte": None,
+            "strike_range": None,
+            "require_bid_ask": False,
+            "min_ask": 0.0,
             "backfill_window_days": download_spec.backfill_window_days,
             "fallback_window_days": download_spec.fallback_window_days,
         },

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pandas as pd
+import pytest
 
 from quant_warehouse.platforms.data_providers.thetadata.options import (
     OPTIONS_THETADATA_EOD_LIBRARY,
@@ -69,11 +70,12 @@ def test_normalize_thetadata_option_chain_builds_contract_symbol() -> None:
     assert frame["data_interval"].iloc[0] == "eod"
 
 
-def test_normalize_thetadata_option_chain_drops_rows_without_bid_ask() -> None:
+def test_normalize_thetadata_option_chain_keeps_rows_without_bid_ask() -> None:
     raw = _raw_frame()
     raw.loc[0, "bid"] = 0.0
     frame = normalize_thetadata_option_chain(raw)
-    assert len(frame) == 1
+    assert len(frame) == 2
+    assert frame["contract_symbol"].iloc[0] == "AAPL_put_20250124_230"
 
 
 def test_split_snapshots_by_date_groups_rows() -> None:
@@ -256,6 +258,8 @@ def test_fetch_option_history_eod_chunks_requests(monkeypatch) -> None:
         assert section == "options_eod"
         assert provider == "thetadata"
         assert kwargs["include_greeks"] is True
+        assert kwargs["require_bid_ask"] is False
+        assert kwargs["min_ask"] == 0.0
         calls.append((kwargs["start_date"], kwargs["end_date"]))
         return FakeResult(
             pd.DataFrame(
@@ -290,6 +294,20 @@ def test_fetch_option_history_eod_chunks_requests(monkeypatch) -> None:
     assert len(calls) >= 2
     for start, end in calls:
         assert (end - start).days <= 364
+
+
+def test_thetadata_download_apis_reject_contract_filters() -> None:
+    with pytest.raises(ValueError, match="full-chain-only"):
+        ThetaDataDownloadSpec(max_dte=90)
+
+    with pytest.raises(ValueError, match="full-chain-only"):
+        fetch_option_history_eod("AAPL", "2025-01-06", "2025-01-06", min_dte=30)
+
+    with pytest.raises(ValueError, match="full-chain-only"):
+        load_thetadata_option_snapshots("AAPL", ["2025-01-06"], strike_range=10)
+
+    with pytest.raises(ValueError, match="full-chain-only"):
+        download_option_snapshots_for_range("AAPL", "2025-01-06", "2025-01-06", max_dte=90)
 
 
 def test_normalize_thetadata_option_chain_preserves_greeks_endpoint_fields() -> None:

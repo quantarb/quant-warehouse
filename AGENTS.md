@@ -6,6 +6,7 @@
 - Do not add direct vendor API calls in `quant_warehouse` code, including direct FMP REST calls, direct ThetaData SDK calls, or ad hoc `requests`/`urlopen` market-data fetches.
 - If a vendor endpoint is incomplete or missing, fix or add it in the `quantarb/OpenBB` fork first, then consume it through `quant_warehouse.ingest.openbb_fetch`.
 - Direct vendor fallbacks are forbidden. If an OpenBB route is missing, fix the OpenBB fork first.
+- ThetaData option-chain downloads must preserve every contract returned for each requested underlying symbol/date. Do not add or keep provider-side DTE, strike-range, moneyness, expiration, right, bid/ask, minimum-ask, liquidity, volume, open-interest, or contract-level filters in download or storage paths. Universe filters may choose which underlying symbols to backfill, but once a symbol/date is selected the stored chain must remain complete so missing data and downstream bugs can be distinguished.
 
 ## Dependency Source Of Truth
 
@@ -25,6 +26,7 @@
 
 - Treat `quant-warehouse` as the opinionated persistence layer over the OpenBB fork SDK.
 - Use it to request vendor data through OpenBB, normalize schemas, compare requested refreshes against what is already stored, and write point-in-time warehouse datasets.
+- Store raw-enough provider datasets first, then filter in downstream feature, label, model, or backtest code after reading from the warehouse. For ThetaData options specifically, warehouse persistence is full-chain-only; selection filters belong in `quant-orchestrator` or in warehouse feature/target builders that operate on already stored full chains.
 - Do not put ML model training, backtesting engines, broker integrations, or order submission logic in this repo.
 - FMP event-pair targets are exact event-date labels only. Never create future-window event-pair labels. Never use no-event dates as negative examples for event-pair classification. The negative class must be the mirrored negative event on an actual event date. Forward returns and oracle-trade horizons are separate target families; they must not be encoded by smearing event-pair labels across future dates.
 - FMP oracle-trade side classifiers must use one buy/sell task across all configured `k` values. Never create separate oracle tasks or models per `k`. Use actual oracle entry dates only: buy/long entries versus sell/short entries. Never use non-entry dates as negative examples, and never train binary event classifiers from the oracle `any` union target.

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
-from typing import Any, Iterator, Literal, Sequence
+from typing import Any, Iterator, Literal, Mapping, Sequence
 
 import pandas as pd
 from pandas.api.types import is_object_dtype, is_string_dtype
@@ -28,6 +28,35 @@ THETADATA_RICH_OPTION_COLUMNS: tuple[str, ...] = (
     "rho",
     "iv",
 )
+THETADATA_UNSUPPORTED_DOWNLOAD_FILTERS: tuple[str, ...] = (
+    "dte",
+    "min_dte",
+    "max_dte",
+    "expiration",
+    "right",
+    "option_type",
+    "strike",
+    "strike_range",
+    "min_strike",
+    "max_strike",
+    "moneyness",
+    "min_moneyness",
+    "max_moneyness",
+    "max_abs_moneyness",
+    "delta",
+    "min_delta",
+    "max_delta",
+    "bid",
+    "ask",
+    "require_bid_ask",
+    "min_bid",
+    "min_ask",
+    "volume",
+    "min_volume",
+    "open_interest",
+    "min_open_interest",
+    "liquidity",
+)
 
 
 @dataclass(frozen=True)
@@ -36,25 +65,49 @@ class ThetaDataOptionSnapshot:
     frame: pd.DataFrame
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class ThetaDataDownloadSpec:
-    """Parameters for daily ThetaData EOD option chain downloads."""
+    """Parameters for daily ThetaData EOD option chain downloads.
+
+    Contract selection is intentionally not configurable here. Warehouse
+    downloads must preserve the full chain for each requested symbol/date, and
+    research filters belong after the complete chain is stored.
+    """
 
     data_interval: Literal["eod"] = "eod"
-    max_dte: int | None = None
-    strike_range: int | None = None
-    expiration: str = "*"
-    right: str = "both"
     annual_dividend: float | None = None
     rate_type: str | None = "sofr"
     rate_value: float | None = None
     version: str | None = "latest"
     underlyer_use_nbbo: bool = False
     dataframe_type: str = "pandas"
-    require_bid_ask: bool = False
-    min_ask: float = 0.0
     backfill_window_days: int = THETADATA_BACKFILL_WINDOW_DAYS
     fallback_window_days: int = THETADATA_FALLBACK_WINDOW_DAYS
+
+    def __init__(
+        self,
+        *,
+        data_interval: Literal["eod"] = "eod",
+        annual_dividend: float | None = None,
+        rate_type: str | None = "sofr",
+        rate_value: float | None = None,
+        version: str | None = "latest",
+        underlyer_use_nbbo: bool = False,
+        dataframe_type: str = "pandas",
+        backfill_window_days: int = THETADATA_BACKFILL_WINDOW_DAYS,
+        fallback_window_days: int = THETADATA_FALLBACK_WINDOW_DAYS,
+        **download_filters: Any,
+    ) -> None:
+        _reject_thetadata_download_filters(download_filters)
+        object.__setattr__(self, "data_interval", data_interval)
+        object.__setattr__(self, "annual_dividend", annual_dividend)
+        object.__setattr__(self, "rate_type", rate_type)
+        object.__setattr__(self, "rate_value", rate_value)
+        object.__setattr__(self, "version", version)
+        object.__setattr__(self, "underlyer_use_nbbo", underlyer_use_nbbo)
+        object.__setattr__(self, "dataframe_type", dataframe_type)
+        object.__setattr__(self, "backfill_window_days", backfill_window_days)
+        object.__setattr__(self, "fallback_window_days", fallback_window_days)
 
 
 def _iter_eod_date_chunks(
@@ -81,9 +134,11 @@ def fetch_option_history_eod(
     *,
     api_key: str | None = None,
     spec: ThetaDataDownloadSpec | None = None,
+    **download_filters: Any,
 ) -> pd.DataFrame:
     """Download normalized EOD option chains for a symbol over a date range."""
 
+    _reject_thetadata_download_filters(download_filters)
     download_spec = spec or ThetaDataDownloadSpec()
     frames: list[pd.DataFrame] = []
     for chunk_start, chunk_end in _iter_eod_date_chunks(start_date, end_date):
@@ -100,11 +155,7 @@ def fetch_option_history_eod(
     if not frames:
         return pd.DataFrame()
     combined = pd.concat(frames, ignore_index=True)
-    return normalize_thetadata_option_chain(
-        combined,
-        require_bid_ask=download_spec.require_bid_ask,
-        min_ask=download_spec.min_ask,
-    )
+    return normalize_thetadata_option_chain(combined)
 
 
 def _fetch_option_history_eod_openbb(
@@ -121,14 +172,14 @@ def _fetch_option_history_eod_openbb(
         provider="thetadata",
         start_date=start_date,
         end_date=end_date,
-        expiration=spec.expiration,
+        expiration="*",
         strike="*",
-        right=spec.right,
-        max_dte=None if spec.max_dte is None else int(spec.max_dte),
-        strike_range=None if spec.strike_range is None else int(spec.strike_range),
+        right="both",
+        max_dte=None,
+        strike_range=None,
         dataframe_type=spec.dataframe_type,
-        require_bid_ask=spec.require_bid_ask,
-        min_ask=spec.min_ask,
+        require_bid_ask=False,
+        min_ask=0.0,
         include_greeks=True,
         annual_dividend=spec.annual_dividend,
         rate_type=spec.rate_type,
@@ -399,7 +450,7 @@ def option_chain_snapshots_cached(
                 if not all(group[column].notna().any() for column in required):
                     continue
             out = group.reset_index(drop=True)
-            snapshots[normalized] = normalize_thetadata_option_chain(out, require_bid_ask=False)
+            snapshots[normalized] = normalize_thetadata_option_chain(out)
     return snapshots
 
 
@@ -479,20 +530,16 @@ def load_thetadata_option_snapshots(
     snapshot_dates: Sequence[date | str | pd.Timestamp],
     *,
     api_key: str | None = None,
-    max_dte: int = 60,
-    strike_range: int = 10,
     dataframe_type: str = "pandas",
     use_cache: bool = True,
     download_spec: ThetaDataDownloadSpec | None = None,
     download_missing: bool = True,
+    **download_filters: Any,
 ) -> dict[pd.Timestamp, pd.DataFrame]:
     """Load EOD option snapshots keyed by date, using ArcticDB as the cache/store."""
 
-    spec = download_spec or ThetaDataDownloadSpec(
-        max_dte=max_dte,
-        strike_range=strike_range,
-        dataframe_type=dataframe_type,
-    )
+    _reject_thetadata_download_filters(download_filters)
+    spec = download_spec or ThetaDataDownloadSpec(dataframe_type=dataframe_type)
     normalized_dates = [pd.Timestamp(value).normalize() for value in snapshot_dates]
     arctic_backend = open_backend(WarehouseConfig.from_env()) if use_cache else None
     snapshots: dict[pd.Timestamp, pd.DataFrame] = {}
@@ -536,9 +583,11 @@ def download_option_snapshots_for_range(
     api_key: str | None = None,
     spec: ThetaDataDownloadSpec | None = None,
     overwrite: bool = False,
+    **download_filters: Any,
 ) -> dict[str, Any]:
-    """Download and cache daily ThetaData EOD option chains in ArcticDB."""
+    """Download and cache full daily ThetaData EOD option chains in ArcticDB."""
 
+    _reject_thetadata_download_filters(download_filters)
     download_spec = spec or ThetaDataDownloadSpec()
     arctic_backend = open_backend(WarehouseConfig.from_env())
     start = pd.Timestamp(start_date).normalize()
@@ -759,9 +808,11 @@ def load_cached_snapshots_for_trade_window(
     api_key: str | None = None,
     spec: ThetaDataDownloadSpec | None = None,
     download_missing: bool = True,
+    **download_filters: Any,
 ) -> dict[pd.Timestamp, pd.DataFrame]:
     """Load per-day chains for a trade window, optionally downloading missing days."""
 
+    _reject_thetadata_download_filters(download_filters)
     start = pd.Timestamp(entry_date).normalize()
     end = pd.Timestamp(exit_date).normalize()
     dates = list(pd.date_range(start, end, freq="B"))
@@ -783,21 +834,34 @@ def load_cached_snapshots_for_trade_window(
     )
 
 
+def _reject_thetadata_download_filters(download_filters: Mapping[str, Any]) -> None:
+    if not download_filters:
+        return
+    keys = sorted(str(key) for key in download_filters)
+    known_filters = [key for key in keys if key in THETADATA_UNSUPPORTED_DOWNLOAD_FILTERS]
+    detail = ", ".join(known_filters or keys)
+    raise ValueError(
+        "ThetaData option downloads are full-chain-only in quant-warehouse. "
+        f"Remove provider-side query filter(s): {detail}. "
+        "Filter contracts only after reading the complete chain from the warehouse."
+    )
+
+
 def _download_spec_manifest(spec: ThetaDataDownloadSpec) -> dict[str, Any]:
     return {
         "endpoint": THETADATA_OPTION_HISTORY_ENDPOINT,
         "data_interval": spec.data_interval,
-        "max_dte": spec.max_dte,
-        "strike_range": spec.strike_range,
-        "expiration": spec.expiration,
-        "right": spec.right,
+        "expiration": "*",
+        "right": "both",
+        "max_dte": None,
+        "strike_range": None,
+        "require_bid_ask": False,
+        "min_ask": 0.0,
         "annual_dividend": spec.annual_dividend,
         "rate_type": spec.rate_type,
         "rate_value": spec.rate_value,
         "version": spec.version,
         "underlyer_use_nbbo": spec.underlyer_use_nbbo,
-        "require_bid_ask": spec.require_bid_ask,
-        "min_ask": spec.min_ask,
         "backfill_window_days": spec.backfill_window_days,
         "fallback_window_days": spec.fallback_window_days,
     }
@@ -815,7 +879,7 @@ def _add_quote_columns(frame: pd.DataFrame) -> pd.DataFrame:
 
 
 def _prepare_option_chain_for_arctic(frame: pd.DataFrame) -> pd.DataFrame:
-    normalized = normalize_thetadata_option_chain(frame, require_bid_ask=False)
+    normalized = normalize_thetadata_option_chain(frame)
     if normalized.empty:
         return normalized
     out = normalized.loc[:, ~normalized.columns.duplicated()].copy()
@@ -906,31 +970,8 @@ def _normalize_snapshot_dates(values: pd.Series) -> pd.Series:
     return pd.Series(converted).dt.tz_localize(None).dt.normalize()
 
 
-def _filter_quoteable_rows(
-    frame: pd.DataFrame,
-    *,
-    require_bid_ask: bool,
-    min_ask: float,
-) -> pd.DataFrame:
-    if frame.empty or not require_bid_ask:
-        return frame
-    if "bid" not in frame.columns or "ask" not in frame.columns:
-        raise ValueError("Daily EOD option chains must include bid and ask columns")
-
-    out = _add_quote_columns(frame)
-    bid = pd.to_numeric(out["bid"], errors="coerce")
-    ask = pd.to_numeric(out["ask"], errors="coerce")
-    quoteable = bid.notna() & ask.notna() & (bid > 0.0) & (ask >= float(min_ask)) & (ask >= bid)
-    return out.loc[quoteable].copy()
-
-
-def normalize_thetadata_option_chain(
-    df: pd.DataFrame,
-    *,
-    require_bid_ask: bool = True,
-    min_ask: float = 0.01,
-) -> pd.DataFrame:
-    """Normalize daily ThetaData EOD chains; keep rows with usable bid/ask quotes."""
+def normalize_thetadata_option_chain(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize daily ThetaData EOD chains."""
 
     if df is None or df.empty:
         return pd.DataFrame()
@@ -1016,7 +1057,7 @@ def normalize_thetadata_option_chain(
             + "_"
             + out["strike"].fillna(0).map(lambda v: f"{float(v):g}")
         )
-    out = _filter_quoteable_rows(out, require_bid_ask=require_bid_ask, min_ask=min_ask)
+    out = _add_quote_columns(out)
     if out.empty:
         return out
     out["data_interval"] = "eod"
