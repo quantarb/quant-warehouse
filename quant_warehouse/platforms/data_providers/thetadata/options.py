@@ -630,7 +630,7 @@ def download_option_snapshots_for_range(
             "spec": _download_spec_manifest(download_spec),
         }
 
-    snapshots, fetched_rows, _written_paths = _download_and_cache_snapshots(
+    downloaded_dates, fetched_rows, _written_paths = _download_and_cache_snapshots(
         symbol,
         missing_dates,
         api_key=api_key,
@@ -638,13 +638,13 @@ def download_option_snapshots_for_range(
         backend=arctic_backend,
         overwrite=overwrite,
     )
-    paths = [_arctic_ref(symbol)] if snapshots or cached_dates else []
+    paths = [_arctic_ref(symbol)] if downloaded_dates or cached_dates else []
 
     manifest = {
         "symbol": str(symbol).upper(),
         "start_date": start.date().isoformat(),
         "end_date": end.date().isoformat(),
-        "snapshot_days": len(cached_dates) + len(snapshots),
+        "snapshot_days": len(cached_dates) + len(downloaded_dates),
         "contracts_total": int(cached_row_count + fetched_rows),
         "cached_days": len(cached_dates),
         "existing_cached_days": len(existing_cached_dates),
@@ -722,8 +722,8 @@ def _download_and_cache_snapshots(
     spec: ThetaDataDownloadSpec,
     backend: ArcticBackend | None,
     overwrite: bool,
-) -> tuple[dict[pd.Timestamp, pd.DataFrame], int, list[str]]:
-    snapshots: dict[pd.Timestamp, pd.DataFrame] = {}
+) -> tuple[set[pd.Timestamp], int, list[str]]:
+    downloaded_dates: set[pd.Timestamp] = set()
     paths: list[str] = []
     fetched_rows = 0
     requested = {pd.Timestamp(ts).normalize() for ts in requested_dates}
@@ -741,27 +741,33 @@ def _download_and_cache_snapshots(
         if fetched.empty:
             continue
         fetched_rows += len(fetched)
+        chunk_frames: list[pd.DataFrame] = []
         for ts, frame in split_snapshots_by_date(fetched).items():
             if ts not in requested or frame.empty:
                 continue
-            snapshots[ts] = frame
+            downloaded_dates.add(ts)
+            chunk_frames.append(frame)
+        if backend is not None and chunk_frames:
+            combined = pd.concat(chunk_frames, ignore_index=True, sort=False)
+            paths.append(write_option_chain_arctic(symbol, combined, backend=backend, merge=True))
 
-    missing_dates = [ts for ts in requested_dates if ts not in snapshots]
+    missing_dates = [ts for ts in requested_dates if ts not in downloaded_dates]
     for ts in missing_dates:
         day_frame = fetch_option_history_eod(symbol, ts, ts, spec=spec)
         if day_frame.empty:
             continue
         fetched_rows += len(day_frame)
+        day_frames: list[pd.DataFrame] = []
         for day_ts, frame in split_snapshots_by_date(day_frame).items():
             if day_ts not in requested or frame.empty:
                 continue
-            snapshots[day_ts] = frame
+            downloaded_dates.add(day_ts)
+            day_frames.append(frame)
+        if backend is not None and day_frames:
+            combined = pd.concat(day_frames, ignore_index=True, sort=False)
+            paths.append(write_option_chain_arctic(symbol, combined, backend=backend, merge=True))
 
-    if backend is not None and snapshots:
-        combined = pd.concat(snapshots.values(), ignore_index=True, sort=False)
-        paths.append(write_option_chain_arctic(symbol, combined, backend=backend, merge=True))
-
-    return snapshots, fetched_rows, paths
+    return downloaded_dates, fetched_rows, list(dict.fromkeys(paths))
 
 
 def _fetch_option_history_with_window_fallback(
