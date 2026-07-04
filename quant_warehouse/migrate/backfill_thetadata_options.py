@@ -12,6 +12,8 @@ import pandas as pd
 
 from quant_warehouse.config import WarehouseConfig
 from quant_warehouse.platforms.data_providers.thetadata.options import (
+    THETADATA_OPTION_HISTORY_ENDPOINT,
+    THETADATA_RICH_OPTION_COLUMNS,
     ThetaDataDownloadSpec,
     download_option_snapshots_for_range,
     option_chain_range_cached,
@@ -20,10 +22,15 @@ from quant_warehouse.warehouse.api import Warehouse
 from quant_warehouse.warehouse.prices import list_arctic_price_underlyings
 
 ProgressLogger = Callable[[str], None] | None
-SymbolSource = Literal["arctic-fmp", "catalog"]
+SymbolSource = Literal["arctic-fmp", "catalog", "market-cap"]
 OPTION_SECTION = "options_eod"
 OPTION_PROVIDER = "thetadata"
 _NON_US_SUFFIXES = (".SZ", ".SS", ".HK", ".TO", ".L", ".PA", ".DE", ".AX", ".KS", ".TW", ".T")
+MARKET_CAP_TIERS: dict[str, float] = {
+    "1t": 1_000_000_000_000,
+    "100b": 100_000_000_000,
+    "10b": 10_000_000_000,
+}
 
 
 def _is_us_option_symbol(symbol: str) -> bool:
@@ -58,11 +65,40 @@ def list_arctic_fmp_underlyings(warehouse: Warehouse) -> list[str]:
     return list_arctic_price_underlyings(warehouse.prices.backend, provider="fmp")
 
 
+def list_market_cap_symbols(
+    warehouse: Warehouse,
+    *,
+    provider: str = "fmp",
+    min_market_cap: float | None = None,
+    max_market_cap: float | None = None,
+    require_prices: bool = True,
+    us_only: bool = True,
+) -> list[str]:
+    """Return profile symbols ordered by descending market cap."""
+
+    profiles = warehouse.catalog.query_symbol_profiles(
+        provider=str(provider).strip().lower(),
+        min_market_cap=min_market_cap,
+        max_market_cap=max_market_cap,
+        country="US" if us_only else None,
+        exclude_etf=True,
+        exclude_fund=True,
+    )
+    symbols = [profile.symbol for profile in profiles if str(profile.symbol).strip()]
+    if require_prices:
+        price_symbols = set(list_arctic_fmp_underlyings(warehouse))
+        symbols = [symbol for symbol in symbols if symbol in price_symbols]
+    return symbols
+
+
 def resolve_backfill_symbols(
     warehouse: Warehouse,
     *,
     source: SymbolSource = "arctic-fmp",
     symbols: Sequence[str] | None = None,
+    min_market_cap: float | None = None,
+    max_market_cap: float | None = None,
+    require_prices: bool = True,
     limit: int | None = None,
     offset: int = 0,
     us_only: bool = True,
@@ -73,6 +109,14 @@ def resolve_backfill_symbols(
         resolved = [str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()]
     elif source == "catalog":
         resolved = list_catalog_price_symbols(warehouse, providers=("fmp",))
+    elif source == "market-cap":
+        resolved = list_market_cap_symbols(
+            warehouse,
+            min_market_cap=min_market_cap,
+            max_market_cap=max_market_cap,
+            require_prices=require_prices,
+            us_only=us_only,
+        )
     else:
         resolved = list_arctic_fmp_underlyings(warehouse)
 
@@ -95,7 +139,12 @@ def _options_range_cached(
     start_date: pd.Timestamp,
     end_date: pd.Timestamp,
 ) -> bool:
-    return option_chain_range_cached(symbol, start_date, end_date)
+    return option_chain_range_cached(
+        symbol,
+        start_date,
+        end_date,
+        required_columns=THETADATA_RICH_OPTION_COLUMNS,
+    )
 
 
 def _upsert_options_catalog_state(
@@ -114,7 +163,15 @@ def _upsert_options_catalog_state(
         min_date=start_date,
         max_date=end_date,
         row_count=int(contracts_total),
-        columns_present=("bid", "ask", "mid", "snapshot_date", "contract_symbol", "data_interval"),
+        columns_present=(
+            "bid",
+            "ask",
+            "mid",
+            "snapshot_date",
+            "contract_symbol",
+            "data_interval",
+            *THETADATA_RICH_OPTION_COLUMNS,
+        ),
     )
 
 
@@ -126,12 +183,15 @@ def backfill_thetadata_options(
     source: SymbolSource = "arctic-fmp",
     start_date: str = "2024-01-01",
     end_date: str | None = None,
-    max_dte: int | None = 60,
-    strike_range: int | None = 10,
+    max_dte: int | None = None,
+    strike_range: int | None = None,
     require_bid_ask: bool = True,
     min_ask: float = 0.01,
     backfill_window_days: int = 7,
     fallback_window_days: int = 1,
+    min_market_cap: float | None = None,
+    max_market_cap: float | None = None,
+    require_prices: bool = True,
     limit: int | None = None,
     offset: int = 0,
     skip_existing: bool = True,
@@ -153,6 +213,9 @@ def backfill_thetadata_options(
         warehouse,
         source=source,
         symbols=symbols,
+        min_market_cap=min_market_cap,
+        max_market_cap=max_market_cap,
+        require_prices=require_prices,
         limit=limit,
         offset=offset,
         us_only=us_only,
@@ -245,19 +308,22 @@ def backfill_thetadata_options(
         "source": source,
         "start_date": start.date().isoformat(),
         "end_date": end.date().isoformat(),
+        "min_market_cap": min_market_cap,
+        "max_market_cap": max_market_cap,
+        "require_prices": require_prices,
         "symbols_requested": total,
         "symbols_completed": len(completed),
         "symbols_skipped": len(skipped),
         "symbols_failed": len(failed),
         "us_only": us_only,
         "download_spec": {
+            "endpoint": THETADATA_OPTION_HISTORY_ENDPOINT,
             "data_interval": download_spec.data_interval,
             "max_dte": download_spec.max_dte,
             "strike_range": download_spec.strike_range,
             "require_bid_ask": download_spec.require_bid_ask,
             "backfill_window_days": download_spec.backfill_window_days,
             "fallback_window_days": download_spec.fallback_window_days,
-            "use_direct_sdk": download_spec.use_direct_sdk,
         },
         "storage_backend": "arctic",
         "max_workers": workers,

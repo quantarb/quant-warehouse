@@ -31,6 +31,8 @@ def normalize_provider_dataset(base_library: str, provider: str) -> str:
     dataset = "_".join(parts)
     if dataset == "prices":
         return "equity_prices"
+    if dataset.startswith("prices_"):
+        return f"equity_{dataset}"
     if dataset.startswith("fundamental_"):
         return f"equity_{dataset}"
     if dataset == "options_eod":

@@ -11,7 +11,7 @@ from quant_warehouse.warehouse.backend import StorageBackend, open_backend
 from quant_warehouse.warehouse.equity_calendar import EquityCalendarStore
 from quant_warehouse.warehouse.etf import EtfStore
 from quant_warehouse.warehouse.fundamentals import FundamentalsStore
-from quant_warehouse.warehouse.prices import PricesStore
+from quant_warehouse.warehouse.prices import EQUITY_PRICE_ADJUSTMENT, PricesStore
 from quant_warehouse.warehouse.macro import MacroStore
 from quant_warehouse.warehouse.market_prices import MarketPricesStore
 from quant_warehouse.warehouse.profile import ProfileStore
@@ -76,6 +76,7 @@ class Warehouse:
         symbol = symbol.strip().upper()
         section_list = list(sections or DEFAULT_SECTIONS)
         provider_list = list(providers or DEFAULT_PROVIDERS)
+        price_adjustment = str(fetch_kwargs.pop("adjustment", EQUITY_PRICE_ADJUSTMENT))
         stats: dict[str, int] = {}
 
         price_sections = [s for s in section_list if s == "prices"]
@@ -85,7 +86,11 @@ class Warehouse:
 
         for section in price_sections:
             for provider in provider_list:
-                price_stats = self.prices.refresh(symbol, providers=[provider])
+                price_stats = self.prices.refresh(
+                    symbol,
+                    providers=[provider],
+                    adjustment=price_adjustment,
+                )
                 stats[f"{section}:{provider}"] = int(price_stats[provider]["rows"])
 
         for section in profile_sections:
@@ -139,6 +144,7 @@ class Warehouse:
         start_date: str | None = None,
         end_date: str | None = None,
         full_refresh: bool = False,
+        adjustment: str = EQUITY_PRICE_ADJUSTMENT,
     ) -> dict[str, dict[str, object]]:
         return self.prices.refresh(
             symbol,
@@ -146,6 +152,7 @@ class Warehouse:
             start_date=start_date,
             end_date=end_date,
             full_refresh=full_refresh,
+            adjustment=adjustment,
         )
 
     def refresh_fundamentals(
@@ -183,8 +190,15 @@ class Warehouse:
         provider: str = "yfinance",
         start: str | None = None,
         end: str | None = None,
+        adjustment: str = EQUITY_PRICE_ADJUSTMENT,
     ) -> pd.DataFrame:
-        return self.prices.read(symbol, provider=provider, start=start, end=end)
+        return self.prices.read(
+            symbol,
+            provider=provider,
+            start=start,
+            end=end,
+            adjustment=adjustment,
+        )
 
     def read_fundamentals(
         self,

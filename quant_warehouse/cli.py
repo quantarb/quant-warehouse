@@ -13,6 +13,7 @@ from quant_warehouse.migrate.backfill_fixes import (
 from quant_warehouse.migrate.backfill_fmp_all import backfill_fmp_all, write_backfill_log as write_fmp_all_log
 from quant_warehouse.migrate.backfill_missing_fmp import backfill_missing_fmp_historical, write_backfill_log
 from quant_warehouse.migrate.backfill_thetadata_options import (
+    MARKET_CAP_TIERS,
     backfill_thetadata_options,
     log_progress as log_thetadata_options_progress,
     write_backfill_log as write_thetadata_options_log,
@@ -72,6 +73,7 @@ def cmd_refresh_prices(args: argparse.Namespace) -> int:
         start_date=args.start_date,
         end_date=args.end_date,
         full_refresh=args.full_refresh,
+        adjustment=args.adjustment,
     )
     print(json.dumps({"symbol": args.symbol.upper(), "prices": stats}, indent=2))
     return 0
@@ -291,15 +293,24 @@ def cmd_backfill_fixes(args: argparse.Namespace) -> int:
 def cmd_backfill_thetadata_options(args: argparse.Namespace) -> int:
     log_path = Path(args.log).expanduser().resolve()
     symbols = _parse_csv(args.symbols) if args.symbols else None
+    min_market_cap = args.min_market_cap
+    source = args.source
+    if args.market_cap_tier:
+        min_market_cap = MARKET_CAP_TIERS[str(args.market_cap_tier).lower()]
+        if not symbols:
+            source = "market-cap"
     summary = backfill_thetadata_options(
         symbols=symbols,
-        source=args.source,
+        source=source,
         start_date=args.start_date,
         end_date=args.end_date or None,
-        max_dte=int(args.max_dte),
-        strike_range=int(args.strike_range),
+        max_dte=None if args.max_dte is None else int(args.max_dte),
+        strike_range=None if args.strike_range is None else int(args.strike_range),
         backfill_window_days=int(args.backfill_window_days),
         fallback_window_days=int(args.fallback_window_days),
+        min_market_cap=min_market_cap,
+        max_market_cap=args.max_market_cap,
+        require_prices=not args.allow_missing_prices,
         limit=args.limit,
         offset=int(args.offset),
         skip_existing=not args.overwrite,
@@ -352,6 +363,11 @@ def build_parser() -> argparse.ArgumentParser:
     refresh_prices.add_argument("--providers", default="fmp,yfinance,tiingo")
     refresh_prices.add_argument("--start-date", default=None)
     refresh_prices.add_argument("--end-date", default=None)
+    refresh_prices.add_argument(
+        "--adjustment",
+        choices=("splits_only", "splits_and_dividends", "unadjusted"),
+        default="splits_and_dividends",
+    )
     refresh_prices.add_argument("--full-refresh", action="store_true")
     refresh_prices.set_defaults(func=cmd_refresh_prices)
 
@@ -593,14 +609,37 @@ def build_parser() -> argparse.ArgumentParser:
     backfill_thetadata.add_argument(
         "--source",
         default="arctic-fmp",
-        choices=["arctic-fmp", "catalog"],
-        help="Symbol universe: Arctic prices library (FMP) or warehouse catalog metadata",
+        choices=["arctic-fmp", "catalog", "market-cap"],
+        help="Symbol universe: Arctic prices, catalog prices, or profile market cap ordered descending",
     )
     backfill_thetadata.add_argument("--symbols", default="", help="Optional comma-separated symbol override")
     backfill_thetadata.add_argument("--start-date", default="2024-01-01")
     backfill_thetadata.add_argument("--end-date", default="", help="Default: today (UTC)")
-    backfill_thetadata.add_argument("--max-dte", type=int, default=60)
-    backfill_thetadata.add_argument("--strike-range", type=int, default=10)
+    backfill_thetadata.add_argument(
+        "--max-dte",
+        type=int,
+        default=None,
+        help="Optional ThetaData max DTE filter. Default keeps the full returned chain.",
+    )
+    backfill_thetadata.add_argument(
+        "--strike-range",
+        type=int,
+        default=None,
+        help="Optional ThetaData strike-range filter. Default keeps the full returned chain.",
+    )
+    backfill_thetadata.add_argument(
+        "--market-cap-tier",
+        choices=sorted(MARKET_CAP_TIERS),
+        default="",
+        help="Shortcut for --source market-cap with minimum market cap: 1t, 100b, or 10b.",
+    )
+    backfill_thetadata.add_argument("--min-market-cap", type=float, default=None)
+    backfill_thetadata.add_argument("--max-market-cap", type=float, default=None)
+    backfill_thetadata.add_argument(
+        "--allow-missing-prices",
+        action="store_true",
+        help="Do not require matching FMP price history when using --source market-cap.",
+    )
     backfill_thetadata.add_argument(
         "--backfill-window-days",
         type=int,

@@ -48,6 +48,13 @@ def build_option_contract_features(
     for col in ("strike", "bid", "ask", "mid", "volume", "open_interest", *GREEK_COLUMNS, *IV_COLUMNS):
         if col in out.columns:
             out[col] = pd.to_numeric(out[col], errors="coerce")
+    if "underlying_price" in out.columns:
+        out["underlying_price"] = pd.to_numeric(out["underlying_price"], errors="coerce")
+        if underlying_price is None:
+            chain_spot = out["underlying_price"].replace([np.inf, -np.inf], np.nan).dropna()
+            chain_spot = chain_spot.loc[chain_spot > 0]
+            if not chain_spot.empty:
+                underlying_price = float(chain_spot.median())
 
     if "mid" not in out.columns or out["mid"].isna().all():
         if {"bid", "ask"}.issubset(out.columns):

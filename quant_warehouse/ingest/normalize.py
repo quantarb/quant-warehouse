@@ -30,15 +30,15 @@ STANDARD_PRICE_COLUMNS = frozenset(
     {"open", "high", "low", "close", "volume", "adj_open", "adj_high", "adj_low", "adj_close"}
 )
 PRICE_COLUMN_ALIASES: dict[str, tuple[str, ...]] = {
-    "open": ("open", "adj_open", "adjopen"),
-    "high": ("high", "adj_high", "adjhigh"),
-    "low": ("low", "adj_low", "adjlow"),
-    "close": ("close", "adj_close", "adjclose", "adj_close_price"),
+    "open": ("open",),
+    "high": ("high",),
+    "low": ("low",),
+    "close": ("close",),
     "volume": ("volume", "vol"),
     "adj_open": ("adj_open", "adjopen"),
     "adj_high": ("adj_high", "adjhigh"),
     "adj_low": ("adj_low", "adjlow"),
-    "adj_close": ("adj_close", "adjclose"),
+    "adj_close": ("adj_close", "adjclose", "adj_close_price"),
 }
 METADATA_COLUMNS = {
     "symbol",
@@ -366,6 +366,15 @@ def normalize_prices(df: pd.DataFrame, *, provider: str, min_date: str | None = 
             ordered_keep.append(col)
             seen.add(col)
     out = out[ordered_keep]
+
+    for raw_col, adjusted_col in (
+        ("open", "adj_open"),
+        ("high", "adj_high"),
+        ("low", "adj_low"),
+        ("close", "adj_close"),
+    ):
+        if raw_col not in out.columns and adjusted_col in out.columns:
+            out[raw_col] = out[adjusted_col]
 
     for col in out.columns:
         if col == index_col:

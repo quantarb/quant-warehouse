@@ -9,6 +9,7 @@ from quant_warehouse.migrate.backfill_thetadata_options import (
     _options_range_cached,
     list_arctic_fmp_underlyings,
     list_catalog_price_symbols,
+    list_market_cap_symbols,
     resolve_backfill_symbols,
 )
 from quant_warehouse.warehouse.api import Warehouse
@@ -74,6 +75,50 @@ def test_resolve_backfill_symbols_defaults_to_arctic_fmp(monkeypatch) -> None:
     assert resolve_backfill_symbols(wh) == ["AAPL", "MSFT"]
 
 
+def test_list_market_cap_symbols_orders_largest_first_and_requires_prices(tmp_path: Path, monkeypatch) -> None:
+    wh = Warehouse()
+    store = CatalogStore(tmp_path / "catalog.sqlite")
+    for symbol, market_cap in (("SMALL", 20_000_000_000), ("AAPL", 3_000_000_000_000), ("MSFT", 2_000_000_000_000)):
+        store.upsert_profile(
+            symbol=symbol,
+            provider="fmp",
+            source_provider="fmp_screener",
+            payload={
+                "symbol": symbol,
+                "name": symbol,
+                "market_cap": market_cap,
+                "exchange": "NASDAQ",
+                "country": "US",
+                "is_etf": False,
+                "is_fund": False,
+            },
+        )
+    monkeypatch.setattr(wh, "catalog", store)
+    monkeypatch.setattr(
+        "quant_warehouse.migrate.backfill_thetadata_options.list_arctic_fmp_underlyings",
+        lambda _wh: ["AAPL", "SMALL"],
+    )
+
+    assert list_market_cap_symbols(wh, min_market_cap=10_000_000_000) == ["AAPL", "SMALL"]
+
+
+def test_resolve_backfill_symbols_market_cap_source_applies_tier_filters(monkeypatch) -> None:
+    wh = Warehouse()
+    monkeypatch.setattr(
+        "quant_warehouse.migrate.backfill_thetadata_options.list_market_cap_symbols",
+        lambda _wh, **kwargs: ["AAPL", "MSFT", "NVDA"],
+    )
+
+    resolved = resolve_backfill_symbols(
+        wh,
+        source="market-cap",
+        min_market_cap=1_000_000_000_000,
+        limit=2,
+    )
+
+    assert resolved == ["AAPL", "MSFT"]
+
+
 def test_resolve_backfill_symbols_explicit_override() -> None:
     wh = Warehouse()
     assert resolve_backfill_symbols(wh, symbols=["aapl", "msft"]) == ["AAPL", "MSFT"]
@@ -88,7 +133,8 @@ def test_resolve_backfill_symbols_filters_non_us_by_default() -> None:
 def test_options_range_cached_delegates_to_arctic_range_cache(monkeypatch) -> None:
     calls: list[tuple[str, pd.Timestamp, pd.Timestamp]] = []
 
-    def _fake_range_cached(symbol, start_date, end_date):
+    def _fake_range_cached(symbol, start_date, end_date, **kwargs):
+        assert "required_columns" in kwargs
         calls.append((symbol, start_date, end_date))
         return pd.Timestamp(end_date).normalize() == pd.Timestamp("2025-01-06")
 
