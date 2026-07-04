@@ -8,6 +8,7 @@ from quant_warehouse.platforms.data_providers.thetadata.options import (
     ThetaDataDownloadSpec,
     _iter_eod_date_chunks,
     download_option_snapshots_for_range,
+    deduplicate_option_chain_arctic,
     fetch_option_history_eod,
     write_option_chain_arctic,
     read_option_chain_arctic,
@@ -113,6 +114,84 @@ def test_arctic_option_chain_roundtrip() -> None:
     loaded = read_option_chain_arctic("AAPL", start_date="2025-01-06", end_date="2025-01-06", backend=backend)
     assert len(loaded) == 1
     assert loaded["contract_symbol"].iloc[0] == "AAPL_put_20250124_230"
+
+
+def test_read_option_chain_arctic_deduplicates_existing_snapshot_contract_rows() -> None:
+    duplicate = pd.DataFrame(
+        [
+            {
+                "symbol": "AAPL",
+                "expiration": "2025-01-24",
+                "strike": 230.0,
+                "right": "PUT",
+                "created": "2025-01-06 17:21:40-05:00",
+                "bid": 0.66,
+                "ask": 0.81,
+            },
+            {
+                "symbol": "AAPL",
+                "expiration": "2025-01-24",
+                "strike": 230.0,
+                "right": "PUT",
+                "created": "2025-01-06 18:21:40-05:00",
+                "bid": 0.70,
+                "ask": 0.85,
+            },
+        ]
+    )
+    cached = normalize_thetadata_option_chain(duplicate)
+    cached.index = pd.DatetimeIndex(
+        [pd.Timestamp("2025-01-06"), pd.Timestamp("2025-01-06") + pd.Timedelta(nanoseconds=1)]
+    )
+    backend = _MemoryBackend(cached)
+
+    loaded = read_option_chain_arctic("AAPL", start_date="2025-01-06", end_date="2025-01-06", backend=backend)
+
+    assert len(loaded) == 1
+    assert loaded["contract_symbol"].iloc[0] == "AAPL_put_20250124_230"
+    assert loaded["bid"].iloc[0] == 0.70
+
+
+def test_deduplicate_option_chain_arctic_rewrites_existing_cached_duplicates() -> None:
+    duplicate = pd.DataFrame(
+        [
+            {
+                "symbol": "AAPL",
+                "expiration": "2025-01-24",
+                "strike": 230.0,
+                "right": "PUT",
+                "created": "2025-01-06 17:21:40-05:00",
+                "bid": 0.66,
+                "ask": 0.81,
+            },
+            {
+                "symbol": "AAPL",
+                "expiration": "2025-01-24",
+                "strike": 230.0,
+                "right": "PUT",
+                "created": "2025-01-06 18:21:40-05:00",
+                "bid": 0.70,
+                "ask": 0.85,
+            },
+        ]
+    )
+    cached = normalize_thetadata_option_chain(duplicate)
+    cached.index = pd.DatetimeIndex(
+        [pd.Timestamp("2025-01-06"), pd.Timestamp("2025-01-06") + pd.Timedelta(nanoseconds=1)]
+    )
+    backend = _MemoryBackend(cached)
+
+    dry_run = deduplicate_option_chain_arctic(["AAPL"], backend=backend)
+    assert dry_run.loc[0, "duplicate_rows"] == 1
+    assert bool(dry_run.loc[0, "rewritten"]) is False
+    assert len(backend.frame) == 2
+
+    rewritten = deduplicate_option_chain_arctic(["AAPL"], backend=backend, dry_run=False)
+
+    assert rewritten.loc[0, "duplicate_rows"] == 1
+    assert bool(rewritten.loc[0, "rewritten"]) is True
+    assert len(backend.frame) == 1
+    assert backend.writes[-1][3] is True
 
 
 def test_iter_eod_date_chunks_splits_long_ranges() -> None:

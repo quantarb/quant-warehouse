@@ -126,8 +126,10 @@ def backfill_thetadata_options(
     source: SymbolSource = "arctic-fmp",
     start_date: str = "2024-01-01",
     end_date: str | None = None,
-    max_dte: int = 60,
-    strike_range: int = 10,
+    max_dte: int | None = 60,
+    strike_range: int | None = 10,
+    require_bid_ask: bool = True,
+    min_ask: float = 0.01,
     backfill_window_days: int = 7,
     fallback_window_days: int = 1,
     limit: int | None = None,
@@ -158,6 +160,8 @@ def backfill_thetadata_options(
     download_spec = ThetaDataDownloadSpec(
         max_dte=max_dte,
         strike_range=strike_range,
+        require_bid_ask=require_bid_ask,
+        min_ask=min_ask,
         backfill_window_days=backfill_window_days,
         fallback_window_days=fallback_window_days,
     )

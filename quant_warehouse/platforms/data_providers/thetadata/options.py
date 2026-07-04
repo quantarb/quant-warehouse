@@ -32,8 +32,8 @@ class ThetaDataDownloadSpec:
     """Parameters for daily ThetaData EOD option chain downloads."""
 
     data_interval: Literal["eod"] = "eod"
-    max_dte: int = 60
-    strike_range: int = 10
+    max_dte: int | None = 60
+    strike_range: int | None = 10
     expiration: str = "*"
     right: str = "both"
     dataframe_type: str = "pandas"
@@ -106,8 +106,8 @@ def _fetch_option_history_eod_openbb(
         start_date=start_date,
         end_date=end_date,
         expiration=spec.expiration,
-        max_dte=int(spec.max_dte),
-        strike_range=int(spec.strike_range),
+        max_dte=None if spec.max_dte is None else int(spec.max_dte),
+        strike_range=None if spec.strike_range is None else int(spec.strike_range),
         right=spec.right,
         dataframe_type=spec.dataframe_type,
         require_bid_ask=spec.require_bid_ask,
@@ -139,8 +139,8 @@ def _fetch_option_history_eod_direct(
         expiration=spec.expiration,
         strike="*",
         right=spec.right,
-        max_dte=int(spec.max_dte),
-        strike_range=int(spec.strike_range),
+        max_dte=None if spec.max_dte is None else int(spec.max_dte),
+        strike_range=None if spec.strike_range is None else int(spec.strike_range),
     )
 
 
@@ -202,6 +202,7 @@ def read_option_chain_arctic(
     if end_date is not None:
         snapshot_dates = _normalize_snapshot_dates(out["snapshot_date"])
         out = out.loc[snapshot_dates <= pd.Timestamp(end_date).normalize()]
+    out = _deduplicate_option_chain_rows(out)
     if columns is not None:
         keep = [column for column in columns if column in out.columns]
         out = out.loc[:, keep]
@@ -276,6 +277,63 @@ def option_chain_coverage(
     return pd.DataFrame(rows).sort_values(["row_count", "symbol"], ascending=[False, True]).reset_index(drop=True)
 
 
+def deduplicate_option_chain_arctic(
+    symbols: Sequence[str] | None = None,
+    *,
+    dry_run: bool = True,
+    backend: ArcticBackend | None = None,
+    config: WarehouseConfig | None = None,
+) -> pd.DataFrame:
+    """Remove duplicate cached option-chain rows by (snapshot_date, contract_symbol).
+
+    Dry-run mode reports what would be rewritten without mutating Arctic. Set
+    ``dry_run=False`` to rewrite each affected symbol with duplicate rows
+    removed and previous versions pruned.
+    """
+
+    backend = backend or open_backend(config or WarehouseConfig.from_env())
+    library = provider_library(OPTIONS_THETADATA_EOD_LIBRARY, OPTIONS_THETADATA_PROVIDER)
+    if symbols is None:
+        symbols = sorted(str(symbol) for symbol in backend.list_symbols(library))
+    rows: list[dict[str, Any]] = []
+    for raw_symbol in symbols:
+        storage_symbol = option_chain_storage_symbol(raw_symbol)
+        frame = read_provider_frame(
+            backend,
+            base_library=OPTIONS_THETADATA_EOD_LIBRARY,
+            provider=OPTIONS_THETADATA_PROVIDER,
+            symbol=storage_symbol,
+        )
+        rows_before = 0 if frame is None or frame.empty else int(len(frame))
+        if frame is None or frame.empty:
+            rows.append(
+                {
+                    "symbol": storage_symbol,
+                    "rows_before": rows_before,
+                    "rows_after": 0,
+                    "duplicate_rows": 0,
+                    "rewritten": False,
+                }
+            )
+            continue
+        prepared = _prepare_option_chain_for_arctic(frame)
+        rows_after = int(len(prepared))
+        duplicate_rows = max(0, rows_before - rows_after)
+        rewritten = bool(duplicate_rows and not dry_run)
+        if rewritten:
+            backend.write(library, storage_symbol, prepared, prune_previous_versions=True)
+        rows.append(
+            {
+                "symbol": storage_symbol,
+                "rows_before": rows_before,
+                "rows_after": rows_after,
+                "duplicate_rows": duplicate_rows,
+                "rewritten": rewritten,
+            }
+        )
+    return pd.DataFrame(rows).sort_values(["duplicate_rows", "symbol"], ascending=[False, True]).reset_index(drop=True)
+
+
 def _option_chain_read_bounds(
     start_date: date | str | pd.Timestamp | None,
     end_date: date | str | pd.Timestamp | None,
@@ -293,6 +351,8 @@ def _option_chain_projected_columns(columns: Sequence[str] | None) -> list[str] 
     requested = [str(column) for column in columns]
     if "snapshot_date" not in requested:
         requested.append("snapshot_date")
+    if "contract_symbol" not in requested:
+        requested.append("contract_symbol")
     return requested
 
 
@@ -322,7 +382,7 @@ def option_chain_snapshots_cached(
         normalized = pd.Timestamp(ts).normalize()
         if normalized in requested:
             out = group.reset_index(drop=True)
-            snapshots[normalized] = normalize_thetadata_option_chain(out, require_bid_ask=True)
+            snapshots[normalized] = normalize_thetadata_option_chain(out, require_bid_ask=False)
     return snapshots
 
 
@@ -690,12 +750,13 @@ def _add_quote_columns(frame: pd.DataFrame) -> pd.DataFrame:
 
 
 def _prepare_option_chain_for_arctic(frame: pd.DataFrame) -> pd.DataFrame:
-    normalized = normalize_thetadata_option_chain(frame, require_bid_ask=True)
+    normalized = normalize_thetadata_option_chain(frame, require_bid_ask=False)
     if normalized.empty:
         return normalized
     out = normalized.loc[:, ~normalized.columns.duplicated()].copy()
     out["snapshot_date"] = _normalize_snapshot_dates(out["snapshot_date"])
     out = out.dropna(subset=["snapshot_date", "contract_symbol"])
+    out = _deduplicate_option_chain_rows(out)
     offsets = out.groupby("snapshot_date").cumcount()
     index = out["snapshot_date"] + pd.to_timedelta(offsets, unit="ns")
     out.index = pd.DatetimeIndex(index)
@@ -719,6 +780,28 @@ def _merge_option_chain_upsert(
     combined["snapshot_date"] = pd.to_datetime(combined["snapshot_date"], errors="coerce")
     combined = combined.dropna(subset=["snapshot_date"]).drop(columns=["timestamp"], errors="ignore")
     return _prepare_option_chain_for_arctic(combined)
+
+
+def _deduplicate_option_chain_rows(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame is None or frame.empty or "snapshot_date" not in frame.columns or "contract_symbol" not in frame.columns:
+        return pd.DataFrame() if frame is None else frame.copy()
+    out = frame.loc[:, ~frame.columns.duplicated()].copy()
+    out["snapshot_date"] = _normalize_snapshot_dates(out["snapshot_date"])
+    out = out.dropna(subset=["snapshot_date", "contract_symbol"])
+    if out.empty:
+        return out
+    out["_dedupe_order"] = range(len(out))
+    sort_cols = ["snapshot_date", "contract_symbol"]
+    if "created_at" in out.columns:
+        out["_created_at_sort"] = pd.to_datetime(out["created_at"], errors="coerce", utc=True).dt.tz_localize(None)
+        sort_cols.append("_created_at_sort")
+    sort_cols.append("_dedupe_order")
+    out = (
+        out.sort_values(sort_cols, na_position="first")
+        .drop_duplicates(subset=["snapshot_date", "contract_symbol"], keep="last")
+        .drop(columns=["_dedupe_order", "_created_at_sort"], errors="ignore")
+    )
+    return out
 
 
 def _sanitize_option_chain_for_arctic(frame: pd.DataFrame) -> pd.DataFrame:

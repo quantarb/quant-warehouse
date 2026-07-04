@@ -134,6 +134,78 @@ def _solve_one_side_numba(entry_prices, exit_prices, k, min_profit_pct):
     return result, n_trades
 
 
+@njit
+def _solve_one_side_all_k_numba(entry_prices, exit_prices, max_k, min_profit_pct):
+    """Numba DP solver that backtracks the best solution for every k <= max_k."""
+    n = len(entry_prices)
+
+    cash_val = np.zeros(max_k + 1, dtype=np.float64)
+    hold_val = np.full(max_k + 1, -np.inf, dtype=np.float64)
+    hold_entry_day = np.full(max_k + 1, -1, dtype=np.int32)
+    hold_entry_px = np.zeros(max_k + 1, dtype=np.float64)
+    cash_action = np.zeros((n, max_k + 1), dtype=np.int32)
+    cash_entry_day = np.zeros((n, max_k + 1), dtype=np.int32)
+
+    for i in range(n):
+        ep = entry_prices[i]
+        xp = exit_prices[i]
+
+        for t in range(1, max_k + 1):
+            hv = hold_val[t]
+            if hv > -np.inf:
+                entry_denom = hold_entry_px[t] if hold_entry_px[t] > 0.0 else -hold_entry_px[t]
+                pct = (xp - hold_entry_px[t]) / entry_denom if entry_denom > 0.0 else 0.0
+                if pct >= min_profit_pct:
+                    cand_cash = hv + xp
+                    if cand_cash > cash_val[t] + 1e-12:
+                        cash_val[t] = cand_cash
+                        cash_action[i, t] = 1
+                        cash_entry_day[i, t] = hold_entry_day[t]
+
+        for t in range(1, max_k + 1):
+            cand_hold = cash_val[t - 1] - ep
+            if cand_hold > hold_val[t]:
+                hold_val[t] = cand_hold
+                hold_entry_day[t] = i
+                hold_entry_px[t] = ep
+
+    trades_by_k = np.full((max_k + 1, max_k, 2), -1, dtype=np.int32)
+    counts = np.zeros(max_k + 1, dtype=np.int32)
+    for k in range(1, max_k + 1):
+        best_t = 0
+        best_val = 0.0
+        for t in range(k + 1):
+            if cash_val[t] > best_val + 1e-12:
+                best_val = cash_val[t]
+                best_t = t
+
+        trades_out = np.zeros((max_k, 2), dtype=np.int32)
+        n_trades = 0
+        t = best_t
+        i = n - 1
+        while t > 0 and i >= 0 and n_trades < max_k:
+            if cash_action[i, t] == 0:
+                i -= 1
+                continue
+
+            entry_idx = cash_entry_day[i, t]
+            if entry_idx < i:
+                trades_out[n_trades, 0] = entry_idx
+                trades_out[n_trades, 1] = i
+                n_trades += 1
+                t -= 1
+                i = entry_idx - 1
+            else:
+                i -= 1
+
+        counts[k] = n_trades
+        for idx in range(n_trades):
+            trades_by_k[k, idx, 0] = trades_out[n_trades - 1 - idx, 0]
+            trades_by_k[k, idx, 1] = trades_out[n_trades - 1 - idx, 1]
+
+    return trades_by_k, counts
+
+
 def solve_optimal_trades_generic(
     df: pd.DataFrame,
     k: int,
@@ -277,6 +349,90 @@ def solve_optimal_trades_generic(
                 profit=profit,
             )
         )
+    return out
+
+
+def solve_optimal_trades_all_k_generic(
+    df: pd.DataFrame,
+    ks: Sequence[int],
+    side: Side = "long",
+    entry_price_col: Optional[str] = None,
+    exit_price_col: Optional[str] = None,
+    min_profit_pct: float = 0.01,
+) -> dict[int, List[Trade]]:
+    normalized_ks = tuple(dict.fromkeys(int(k) for k in ks if int(k) > 0))
+    if not normalized_ks:
+        return {}
+    if df is None or len(df) < 2:
+        return {k: [] for k in normalized_ks}
+
+    max_k = max(normalized_ks)
+    entry_col, exit_col = _pick_price_cols(side, entry_price_col, exit_price_col)
+    col_map = {str(c).lower(): c for c in df.columns}
+
+    def _resolve_col(col: str) -> str:
+        key = str(col).lower()
+        if key in col_map:
+            return col_map[key]
+        raise ValueError(f"Missing column '{col}' (needed by solver)")
+
+    entry_col = _resolve_col(entry_col)
+    exit_col = _resolve_col(exit_col)
+
+    entry_prices = df[entry_col].astype(float).values
+    exit_prices = df[exit_col].astype(float).values
+    if side == "short":
+        ep = -entry_prices
+        xp = -exit_prices
+    else:
+        ep = entry_prices
+        xp = exit_prices
+
+    if not _HAS_NUMBA:
+        return {
+            k: solve_optimal_trades_generic(
+                df,
+                k=k,
+                side=side,
+                entry_price_col=entry_col,
+                exit_price_col=exit_col,
+                min_profit_pct=min_profit_pct,
+            )
+            for k in normalized_ks
+        }
+
+    trades_by_k, counts = _solve_one_side_all_k_numba(
+        ep.astype(np.float64),
+        xp.astype(np.float64),
+        max_k=max_k,
+        min_profit_pct=float(min_profit_pct),
+    )
+
+    out: dict[int, List[Trade]] = {}
+    for k in normalized_ks:
+        trades: List[Trade] = []
+        for idx in range(int(counts[k])):
+            entry_i = int(trades_by_k[k, idx, 0])
+            exit_i = int(trades_by_k[k, idx, 1])
+            if entry_i < 0 or exit_i < 0:
+                continue
+            raw_entry = float(entry_prices[entry_i])
+            raw_exit = float(exit_prices[exit_i])
+            profit_pct = _profit_pct(side, raw_entry, raw_exit)
+            if profit_pct < float(min_profit_pct):
+                continue
+            profit = raw_exit - raw_entry if side == "long" else raw_entry - raw_exit
+            trades.append(
+                Trade(
+                    side=side,
+                    entry_row=df.iloc[entry_i],
+                    exit_row=df.iloc[exit_i],
+                    entry_price=raw_entry,
+                    exit_price=raw_exit,
+                    profit=profit,
+                )
+            )
+        out[k] = trades
     return out
 
 
@@ -484,20 +640,20 @@ def solve_side_trades_by_frequency_batched_multi_k(
     if not task_frames:
         return results
 
-    for k in normalized_ks:
-        result_for_k = results.setdefault(k, {symbol: [] for symbol in symbols})
-        for task_idx, symbol in enumerate(task_symbols):
-            group = task_frames[task_idx]
-            side = task_sides[task_idx]
-            entry_col, exit_col = task_columns[task_idx]
-            trades = solve_optimal_trades_generic(
-                group,
-                k=int(k),
-                side=side,
-                min_profit_pct=min_profit_pct,
-                entry_price_col=entry_col,
-                exit_price_col=exit_col,
-            )
+    for task_idx, symbol in enumerate(task_symbols):
+        group = task_frames[task_idx]
+        side = task_sides[task_idx]
+        entry_col, exit_col = task_columns[task_idx]
+        trades_by_k = solve_optimal_trades_all_k_generic(
+            group,
+            ks=normalized_ks,
+            side=side,
+            min_profit_pct=min_profit_pct,
+            entry_price_col=entry_col,
+            exit_price_col=exit_col,
+        )
+        for k, trades in trades_by_k.items():
+            result_for_k = results.setdefault(int(k), {symbol: [] for symbol in symbols})
             for trade in trades:
                 result_for_k.setdefault(symbol, []).append(
                     {
