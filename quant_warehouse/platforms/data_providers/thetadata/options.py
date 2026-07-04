@@ -51,8 +51,8 @@ class ThetaDataDownloadSpec:
     version: str | None = "latest"
     underlyer_use_nbbo: bool = False
     dataframe_type: str = "pandas"
-    require_bid_ask: bool = True
-    min_ask: float = 0.01
+    require_bid_ask: bool = False
+    min_ask: float = 0.0
     backfill_window_days: int = THETADATA_BACKFILL_WINDOW_DAYS
     fallback_window_days: int = THETADATA_FALLBACK_WINDOW_DAYS
 
