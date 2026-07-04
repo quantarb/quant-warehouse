@@ -68,7 +68,7 @@ def test_option_ranker_feature_columns_prefers_available_greeks() -> None:
     assert "equity_signal_score" not in cols
 
 
-def test_build_option_contract_features_computes_missing_black_scholes_greeks() -> None:
+def test_build_option_contract_features_does_not_impute_missing_vendor_greeks() -> None:
     chain = pd.DataFrame(
         {
             "underlying_symbol": ["AAPL"],
@@ -83,17 +83,18 @@ def test_build_option_contract_features_computes_missing_black_scholes_greeks() 
         }
     )
 
-    result = build_option_contract_features(chain, underlying_price=100.0)
+    result = build_option_contract_features(
+        chain,
+        underlying_price=100.0,
+        compute_model_greeks=True,
+    )
     row = result.df.iloc[0]
 
-    assert row["iv"] == pytest.approx(0.20, abs=1e-3)
-    assert row["delta"] == pytest.approx(0.5114, abs=1e-3)
-    assert row["gamma"] == pytest.approx(0.0695, abs=1e-3)
-    assert row["theta"] == pytest.approx(-0.0381, abs=1e-3)
-    assert row["vega"] == pytest.approx(11.4326, abs=1e-3)
-    assert row["rho"] == pytest.approx(4.0156, abs=1e-3)
-    assert row["iv_model_source"] == "black_scholes_implied"
-    assert row["greeks_model_source"] == "black_scholes"
-    assert "greeks" in result.family_cols
-    assert "iv_surface" in result.family_cols
-    assert "delta" in option_ranker_feature_columns(result.df)
+    assert "iv" not in result.df.columns
+    assert "iv_model_source" not in result.df.columns
+    assert "greeks_model_source" not in result.df.columns
+    assert "greeks" not in result.family_cols
+    assert "iv_surface" not in result.family_cols
+    assert "delta" not in option_ranker_feature_columns(result.df)
+    assert row["dte"] == 30
+    assert row["spread_pct"] == pytest.approx((2.3743012561 - 2.20) / ((2.20 + 2.3743012561) / 2.0))
