@@ -28,6 +28,25 @@ THETADATA_RICH_OPTION_COLUMNS: tuple[str, ...] = (
     "rho",
     "iv",
 )
+THETADATA_EOD_OPTION_REQUIRED_COLUMNS: tuple[str, ...] = (
+    "snapshot_date",
+    "underlying_symbol",
+    "contract_symbol",
+    "expiration",
+    "strike",
+    "option_type",
+    "bid",
+    "ask",
+    "mid",
+)
+THETADATA_EOD_OPTION_OPTIONAL_COLUMNS: tuple[str, ...] = (
+    "volume",
+    "open_interest",
+    *THETADATA_RICH_OPTION_COLUMNS,
+)
+THETADATA_EOD_OPTION_CONTRACT_COLUMNS: tuple[str, ...] = tuple(
+    dict.fromkeys([*THETADATA_EOD_OPTION_REQUIRED_COLUMNS, *THETADATA_EOD_OPTION_OPTIONAL_COLUMNS])
+)
 THETADATA_UNSUPPORTED_DOWNLOAD_FILTERS: tuple[str, ...] = (
     "dte",
     "min_dte",
@@ -270,6 +289,101 @@ def read_option_chain_arctic(
     return out.sort_index()
 
 
+def read_thetadata_eod_option_chain(
+    symbol: str,
+    *,
+    start_date: date | str | pd.Timestamp | None = None,
+    end_date: date | str | pd.Timestamp | None = None,
+    columns: Sequence[str] | None = None,
+    require_rich_columns: bool = False,
+    fallback_legacy: bool = False,
+    backend: ArcticBackend | None = None,
+    config: WarehouseConfig | None = None,
+) -> pd.DataFrame:
+    """Read a normalized ThetaData EOD option chain from warehouse storage.
+
+    This is the provider-specific contract consumed by options research code.
+    It guarantees one row per ``(snapshot_date, contract_symbol)`` after
+    warehouse upsert/deduplication, normalizes ThetaData column aliases, and
+    optionally requires the richer greeks endpoint fields.
+    """
+
+    requested_columns = tuple(str(column) for column in columns) if columns is not None else None
+    read_columns = _thetadata_eod_contract_read_columns(requested_columns, require_rich_columns=require_rich_columns)
+    frame = read_option_chain_arctic(
+        symbol,
+        start_date=start_date,
+        end_date=end_date,
+        columns=read_columns,
+        fallback_legacy=fallback_legacy,
+        backend=backend,
+        config=config,
+    )
+    out = validate_thetadata_eod_option_chain_contract(frame, require_rich_columns=require_rich_columns)
+    if requested_columns is not None:
+        for column in requested_columns:
+            if column not in out.columns:
+                out[column] = pd.NA
+        out = out.loc[:, list(requested_columns)]
+    return out
+
+
+def validate_thetadata_eod_option_chain_contract(
+    frame: pd.DataFrame,
+    *,
+    require_rich_columns: bool = False,
+) -> pd.DataFrame:
+    """Validate and normalize the ThetaData EOD option-chain read contract."""
+
+    if frame is None or frame.empty:
+        return pd.DataFrame()
+    try:
+        out = normalize_thetadata_option_chain(frame)
+    except KeyError as exc:
+        raise ValueError(f"ThetaData EOD option chain is missing required column: {exc}") from exc
+    if out.empty:
+        return out
+    out = out.loc[:, ~out.columns.duplicated()].copy()
+    missing_required = [column for column in THETADATA_EOD_OPTION_REQUIRED_COLUMNS if column not in out.columns]
+    if missing_required:
+        missing = ", ".join(missing_required)
+        raise ValueError(f"ThetaData EOD option chain is missing required columns: {missing}")
+    for column in THETADATA_EOD_OPTION_CONTRACT_COLUMNS:
+        if column not in out.columns:
+            out[column] = pd.NA
+    out["snapshot_date"] = _normalize_snapshot_dates(out["snapshot_date"])
+    out["expiration"] = pd.to_datetime(out["expiration"], errors="coerce").dt.normalize()
+    out["underlying_symbol"] = out["underlying_symbol"].astype(str).str.upper()
+    out["contract_symbol"] = out["contract_symbol"].astype(str)
+    out["option_type"] = (
+        out["option_type"]
+        .astype(str)
+        .str.strip()
+        .str.lower()
+        .replace({"c": "call", "p": "put"})
+    )
+    out["strike"] = pd.to_numeric(out["strike"], errors="coerce")
+    for column in ("bid", "ask", "mid", *THETADATA_EOD_OPTION_OPTIONAL_COLUMNS):
+        out[column] = pd.to_numeric(out[column], errors="coerce")
+    out["data_interval"] = "eod"
+    out = out.dropna(subset=["snapshot_date", "contract_symbol", "expiration", "strike"])
+    out = _deduplicate_option_chain_rows(out)
+    duplicate_mask = out.duplicated(subset=["snapshot_date", "contract_symbol"], keep=False)
+    if bool(duplicate_mask.any()):
+        duplicates = out.loc[duplicate_mask, ["snapshot_date", "contract_symbol"]].head(5).to_dict("records")
+        raise ValueError(f"ThetaData EOD option chain has duplicate snapshot/contract rows after normalization: {duplicates}")
+    if require_rich_columns:
+        missing_rich = [
+            column
+            for column in THETADATA_RICH_OPTION_COLUMNS
+            if column not in out.columns or not bool(out[column].notna().any())
+        ]
+        if missing_rich:
+            missing = ", ".join(missing_rich)
+            raise ValueError(f"ThetaData EOD option chain is missing required rich endpoint columns: {missing}")
+    return out.sort_values(["snapshot_date", "contract_symbol"]).reset_index(drop=True)
+
+
 def write_option_chain_arctic(
     symbol: str,
     frame: pd.DataFrame,
@@ -415,6 +529,19 @@ def _option_chain_projected_columns(columns: Sequence[str] | None) -> list[str] 
     if "contract_symbol" not in requested:
         requested.append("contract_symbol")
     return requested
+
+
+def _thetadata_eod_contract_read_columns(
+    columns: Sequence[str] | None,
+    *,
+    require_rich_columns: bool,
+) -> list[str] | None:
+    if columns is None:
+        return None
+    required = list(THETADATA_EOD_OPTION_REQUIRED_COLUMNS)
+    if require_rich_columns:
+        required.extend(THETADATA_RICH_OPTION_COLUMNS)
+    return list(dict.fromkeys([*columns, *required]))
 
 
 def option_chain_snapshots_cached(

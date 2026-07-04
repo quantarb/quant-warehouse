@@ -5,6 +5,13 @@ import pandas as pd
 from quant_warehouse.catalog.store import CatalogStore
 from quant_warehouse.config import WarehouseConfig
 from quant_warehouse.warehouse.macro import MacroStore
+from quant_warehouse.warehouse.sections import (
+    MACRO_CALENDAR_LIBRARY,
+    MACRO_ECONOMIC_LIBRARY,
+    MACRO_RISK_PREMIUM_LIBRARY,
+    MACRO_TREASURY_LIBRARY,
+)
+from quant_warehouse.warehouse.storage import provider_library
 
 
 class FakeBackend:
@@ -31,8 +38,8 @@ def test_read_panel_joins_economic_and_treasury_series(tmp_path):
 
     economic = pd.DataFrame({"value": [1.0, 2.0]}, index=pd.to_datetime(["2024-01-01", "2024-02-01"]))
     treasury = pd.DataFrame({"value": [4.0, 4.1]}, index=pd.to_datetime(["2024-01-01", "2024-02-01"]))
-    backend.write("macro_economic", "GDP__fmp", economic)
-    backend.write("macro_treasury", "MACRO__UST_YEAR10__fmp", treasury)
+    backend.write(provider_library(MACRO_ECONOMIC_LIBRARY, "fmp"), "GDP__fmp", economic)
+    backend.write(provider_library(MACRO_TREASURY_LIBRARY, "fmp"), "MACRO__UST_YEAR10__fmp", treasury)
     store._upsert_catalog_state(symbol="GDP", section="macro_economic", provider="fmp", frame=economic)
     store._upsert_catalog_state(
         symbol="macro__ust_year10",
@@ -71,8 +78,8 @@ def test_read_risk_premium_and_calendar(tmp_path):
         index=pd.to_datetime(["2024-06-01"]),
     )
     calendar.index.name = "date"
-    backend.write("macro_risk_premium", "RISK_PREMIUM__fmp", risk)
-    backend.write("macro_calendar", "MACRO_CALENDAR__fmp", calendar)
+    backend.write(provider_library(MACRO_RISK_PREMIUM_LIBRARY, "fmp"), "RISK_PREMIUM__fmp", risk)
+    backend.write(provider_library(MACRO_CALENDAR_LIBRARY, "fmp"), "MACRO_CALENDAR__fmp", calendar)
 
     assert len(store.read_risk_premium(provider="fmp")) == 1
     assert len(store.read_calendar(provider="fmp")) == 1

@@ -14,6 +14,7 @@ from quant_warehouse.platforms.data_providers.thetadata.options import (
     option_chain_cached_date_summary,
     write_option_chain_arctic,
     read_option_chain_arctic,
+    read_thetadata_eod_option_chain,
     normalize_thetadata_option_chain,
     split_snapshots_by_date,
     load_thetadata_option_snapshots,
@@ -168,6 +169,64 @@ def test_read_option_chain_arctic_deduplicates_existing_snapshot_contract_rows()
     assert len(loaded) == 1
     assert loaded["contract_symbol"].iloc[0] == "AAPL_put_20250124_230"
     assert loaded["bid"].iloc[0] == 0.70
+
+
+def test_read_thetadata_eod_option_chain_enforces_contract_and_projects_columns() -> None:
+    duplicate = pd.DataFrame(
+        [
+            {
+                "symbol": "AAPL",
+                "expiration": "2025-01-24",
+                "strike": 230.0,
+                "right": "PUT",
+                "created": "2025-01-06 17:21:40-05:00",
+                "bid": 0.66,
+                "ask": 0.81,
+            },
+            {
+                "symbol": "AAPL",
+                "expiration": "2025-01-24",
+                "strike": 230.0,
+                "right": "PUT",
+                "created": "2025-01-06 18:21:40-05:00",
+                "bid": 0.70,
+                "ask": 0.85,
+            },
+        ]
+    )
+    cached = _with_rich_option_fields(normalize_thetadata_option_chain(duplicate))
+    cached.index = pd.DatetimeIndex(
+        [pd.Timestamp("2025-01-06"), pd.Timestamp("2025-01-06") + pd.Timedelta(nanoseconds=1)]
+    )
+    backend = _MemoryBackend(cached)
+
+    loaded = read_thetadata_eod_option_chain(
+        "AAPL",
+        start_date="2025-01-06",
+        end_date="2025-01-06",
+        columns=["snapshot_date", "contract_symbol", "bid"],
+        require_rich_columns=True,
+        backend=backend,
+    )
+
+    assert list(loaded.columns) == ["snapshot_date", "contract_symbol", "bid"]
+    assert len(loaded) == 1
+    assert loaded["contract_symbol"].iloc[0] == "AAPL_put_20250124_230"
+    assert loaded["bid"].iloc[0] == 0.70
+
+
+def test_read_thetadata_eod_option_chain_requires_rich_endpoint_columns_when_requested() -> None:
+    quote_only = normalize_thetadata_option_chain(_raw_frame().iloc[[0]])
+    backend = _MemoryBackend(quote_only)
+
+    with pytest.raises(ValueError, match="underlying_price"):
+        read_thetadata_eod_option_chain(
+            "AAPL",
+            start_date="2025-01-06",
+            end_date="2025-01-06",
+            require_rich_columns=True,
+            backend=backend,
+        )
 
 
 def test_deduplicate_option_chain_arctic_rewrites_existing_cached_duplicates() -> None:

@@ -10,6 +10,7 @@ from quant_warehouse.platforms.data_providers.thetadata.options import (
     option_chain_range_cached,
     option_chain_snapshots_cached,
     read_option_chain_arctic,
+    read_thetadata_eod_option_chain,
     write_option_chain_arctic,
 )
 from quant_warehouse.platforms.data_providers.thetadata.target_engineering.option_dataset import (
@@ -54,6 +55,7 @@ __all__ = [
     "option_chain_range_cached",
     "option_chain_snapshots_cached",
     "read_option_chain_arctic",
+    "read_thetadata_eod_option_chain",
     "save_option_ml_dataset",
     "solve_long_only_mean_variance_weights",
     "solve_mean_variance_weights",
