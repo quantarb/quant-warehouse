@@ -748,10 +748,7 @@ def _download_and_cache_snapshots(
 
     missing_dates = [ts for ts in requested_dates if ts not in snapshots]
     for ts in missing_dates:
-        try:
-            day_frame = fetch_option_history_eod(symbol, ts, ts, spec=spec)
-        except Exception:
-            continue
+        day_frame = fetch_option_history_eod(symbol, ts, ts, spec=spec)
         if day_frame.empty:
             continue
         fetched_rows += len(day_frame)
@@ -777,27 +774,32 @@ def _fetch_option_history_with_window_fallback(
 ) -> pd.DataFrame:
     try:
         return fetch_option_history_eod(symbol, start, end, spec=spec)
-    except Exception:
-        pass
+    except Exception as initial_exc:
+        if int(fallback_window_days) <= 1 or pd.Timestamp(start).normalize() >= pd.Timestamp(end).normalize():
+            raise
 
-    if int(fallback_window_days) <= 1 or pd.Timestamp(start).normalize() >= pd.Timestamp(end).normalize():
-        return pd.DataFrame()
+        frames: list[pd.DataFrame] = []
+        errors: list[Exception] = []
+        dates = [ts.normalize() for ts in pd.date_range(start, end, freq="B")]
+        for chunk_start, chunk_end in _iter_bounded_business_date_ranges(
+            dates,
+            max_calendar_days=int(fallback_window_days),
+        ):
+            try:
+                frame = fetch_option_history_eod(symbol, chunk_start, chunk_end, spec=spec)
+            except Exception as exc:
+                errors.append(exc)
+                continue
+            if not frame.empty:
+                frames.append(frame)
 
-    frames: list[pd.DataFrame] = []
-    dates = [ts.normalize() for ts in pd.date_range(start, end, freq="B")]
-    for chunk_start, chunk_end in _iter_bounded_business_date_ranges(
-        dates,
-        max_calendar_days=int(fallback_window_days),
-    ):
-        try:
-            frame = fetch_option_history_eod(symbol, chunk_start, chunk_end, spec=spec)
-        except Exception:
-            continue
-        if not frame.empty:
-            frames.append(frame)
-    if not frames:
-        return pd.DataFrame()
-    return pd.concat(frames, ignore_index=True, sort=False)
+        if errors:
+            raise RuntimeError(
+                f"ThetaData fallback failed for {symbol} {pd.Timestamp(start).date()} to {pd.Timestamp(end).date()}"
+            ) from errors[0]
+        if not frames:
+            return pd.DataFrame()
+        return pd.concat(frames, ignore_index=True, sort=False)
 
 
 def load_cached_snapshots_for_trade_window(

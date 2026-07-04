@@ -552,3 +552,27 @@ def test_download_option_snapshots_for_range_falls_back_after_large_request_erro
     assert calls[0] == (pd.Timestamp("2025-01-02"), pd.Timestamp("2025-01-24"))
     assert len(calls) > 1
     assert manifest["fetched_rows"] > 0
+
+
+def test_download_option_snapshots_for_range_does_not_swallow_provider_errors(monkeypatch) -> None:
+    backend = _MemoryBackend()
+
+    def _fake_fetch(*args, **kwargs):
+        raise RuntimeError("missing credential")
+
+    monkeypatch.setattr(
+        "quant_warehouse.platforms.data_providers.thetadata.options.fetch_option_history_eod",
+        _fake_fetch,
+    )
+    monkeypatch.setattr(
+        "quant_warehouse.platforms.data_providers.thetadata.options.open_backend",
+        lambda *args, **kwargs: backend,
+    )
+
+    with pytest.raises(RuntimeError, match="missing credential"):
+        download_option_snapshots_for_range(
+            "AAPL",
+            "2025-01-06",
+            "2025-01-06",
+            spec=ThetaDataDownloadSpec(backfill_window_days=180, fallback_window_days=7),
+        )
