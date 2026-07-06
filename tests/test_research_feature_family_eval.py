@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
 import pandas as pd
 
 from quant_warehouse.research_tools.feature_family_eval import (
+    FamilyEvaluationConfig,
+    _add_cross_symbol_context_features,
+    _add_macro_context_features,
+    _add_time_calendar_features,
     _is_supported_equity_record,
     cap_features_by_quality,
     evaluate_feature_families,
@@ -112,3 +118,63 @@ def test_supported_equity_record_rejects_pooled_vehicle_payloads() -> None:
     assert _is_supported_equity_record("VFIAX", {"quote_type": "MUTUALFUND"}) == (False, "asset_class: fund")
     assert _is_supported_equity_record("ABALX", {"is_fund": False}) == (False, "asset_class: fund_symbol_pattern")
     assert _is_supported_equity_record("AAPL", {"is_fund": False, "is_etf": False}) == (True, "ok")
+
+
+def test_context_feature_families_are_added_without_vendor_calls() -> None:
+    dates = pd.date_range("2024-01-01", periods=8, freq="D")
+    rows = []
+    for symbol_idx, symbol in enumerate(["AAA", "BBB", "CCC"]):
+        for date_idx, date in enumerate(dates):
+            rows.append(
+                {
+                    "date": date,
+                    "symbol": symbol,
+                    "close": 100.0 + symbol_idx * 10.0 + date_idx,
+                    "fmp_daily_mcap_multiple__mcap_to_net_income": 15.0 + symbol_idx,
+                    "fmp_daily_mcap_multiple__mcap_to_revenue": 4.0 + symbol_idx,
+                }
+            )
+    panel = pd.DataFrame(rows)
+
+    class FakeWarehouse:
+        def read_macro_panel(self, series_codes, *, provider, start=None, end=None):
+            index = pd.date_range("2023-12-29", periods=12, freq="D")
+            data = {
+                "GDP": np.linspace(100.0, 111.0, len(index)),
+                "macro__ust_year10": np.linspace(4.0, 4.2, len(index)),
+                "macro__ust_year2": np.linspace(3.7, 3.9, len(index)),
+                "macro__ust_month3": np.linspace(3.4, 3.6, len(index)),
+            }
+            return pd.DataFrame(
+                {code: data[code] for code in series_codes if code in data},
+                index=index,
+            )
+
+        def read_profile(self, symbol, *, provider):
+            groups = {
+                "AAA": ("Technology", "Software"),
+                "BBB": ("Technology", "Hardware"),
+                "CCC": ("Energy", "Oil & Gas"),
+            }
+            sector, industry = groups[str(symbol)]
+            return SimpleNamespace(sector=sector, industry=industry)
+
+    specs = []
+    specs.extend(_add_time_calendar_features(panel))
+    specs.extend(_add_macro_context_features(FakeWarehouse(), panel, FamilyEvaluationConfig()))
+    specs.extend(_add_cross_symbol_context_features(FakeWarehouse(), panel, FamilyEvaluationConfig()))
+
+    families = {spec.family for spec in specs}
+    assert {
+        "time_calendar",
+        "economic_indicators",
+        "treasury_rates",
+        "sector_performance",
+        "industry_performance",
+        "sector_pe",
+        "industry_pe",
+    }.issubset(families)
+    for family in families:
+        feature_cols = [spec.feature for spec in specs if spec.family == family]
+        assert feature_cols
+        assert panel[feature_cols].notna().any().any()

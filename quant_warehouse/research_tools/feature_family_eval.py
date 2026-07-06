@@ -8,8 +8,10 @@ import warnings
 import numpy as np
 import pandas as pd
 
+from quant_warehouse.ingest.macro_fetch import treasury_series_code
 from quant_warehouse.ingest.screener_fetch import ScreenerQuery, fetch_equity_screener
 from quant_warehouse.warehouse.api import Warehouse
+from quant_warehouse.warehouse.sections import DEFAULT_ECONOMIC_SERIES
 
 
 FMP_REQUIRED_FUNDAMENTAL_SECTIONS = (
@@ -23,6 +25,32 @@ FMP_REQUIRED_FUNDAMENTAL_SECTIONS = (
     "income_growth",
     "balance_growth",
     "cash_growth",
+)
+
+TREASURY_RATE_COLUMNS = (
+    "month1",
+    "month2",
+    "month3",
+    "month6",
+    "year1",
+    "year2",
+    "year3",
+    "year5",
+    "year7",
+    "year10",
+    "year20",
+    "year30",
+)
+
+PERFORMANCE_HORIZONS = (1, 5, 20, 60, 120, 252)
+
+GROUP_PE_FEATURES = (
+    "mcap_to_net_income",
+    "mcap_to_ebit",
+    "mcap_to_ebitda",
+    "mcap_to_revenue",
+    "mcap_to_free_cash_flow",
+    "mcap_to_book_equity",
 )
 
 @dataclass(frozen=True)
@@ -235,6 +263,9 @@ def build_fundamental_feature_panel(
     if not frames:
         raise RuntimeError("No feature frames were built for the requested symbols.")
     panel = pd.concat(frames, ignore_index=True).sort_values(["date", "symbol"]).reset_index(drop=True)
+    all_specs.extend(_add_time_calendar_features(panel))
+    all_specs.extend(_add_macro_context_features(wh, panel, config))
+    all_specs.extend(_add_cross_symbol_context_features(wh, panel, config))
     metadata = (
         pd.DataFrame([spec.__dict__ for spec in all_specs])
         .drop_duplicates()
@@ -488,6 +519,330 @@ def _add_feature(
     feature = f"{family}__{name}"
     feature_frames[feature] = values
     specs.append(FeatureSpec(feature, family, source, source_column, expected_direction))
+
+
+def _add_panel_feature(
+    panel: pd.DataFrame,
+    specs: list[FeatureSpec],
+    name: str,
+    values: pd.Series | np.ndarray,
+    *,
+    family: str,
+    source: str,
+    source_column: str,
+    expected_direction: str,
+) -> None:
+    series = pd.Series(values, index=panel.index, dtype="float64").replace([np.inf, -np.inf], np.nan)
+    if series.notna().sum() == 0:
+        return
+    feature = f"{family}__{name}"
+    panel[feature] = series
+    specs.append(FeatureSpec(feature, family, source, source_column, expected_direction))
+
+
+def _add_time_calendar_features(panel: pd.DataFrame) -> list[FeatureSpec]:
+    specs: list[FeatureSpec] = []
+    dates = pd.to_datetime(panel["date"], errors="coerce")
+    day_of_year = dates.dt.dayofyear.astype("float64")
+    days_in_year = dates.dt.is_leap_year.map({True: 366.0, False: 365.0}).astype("float64")
+    month = dates.dt.month.astype("float64")
+    day_of_week = dates.dt.dayofweek.astype("float64")
+    week = dates.dt.isocalendar().week.astype("float64")
+    calendar_values = {
+        "day_of_week": day_of_week,
+        "day_of_month": dates.dt.day.astype("float64"),
+        "day_of_year": day_of_year,
+        "week_of_year": week,
+        "month": month,
+        "quarter": dates.dt.quarter.astype("float64"),
+        "is_month_start": dates.dt.is_month_start.astype("float64"),
+        "is_month_end": dates.dt.is_month_end.astype("float64"),
+        "is_quarter_start": dates.dt.is_quarter_start.astype("float64"),
+        "is_quarter_end": dates.dt.is_quarter_end.astype("float64"),
+        "month_sin": np.sin(2.0 * np.pi * month / 12.0),
+        "month_cos": np.cos(2.0 * np.pi * month / 12.0),
+        "day_of_week_sin": np.sin(2.0 * np.pi * day_of_week / 7.0),
+        "day_of_week_cos": np.cos(2.0 * np.pi * day_of_week / 7.0),
+        "day_of_year_sin": np.sin(2.0 * np.pi * day_of_year / days_in_year),
+        "day_of_year_cos": np.cos(2.0 * np.pi * day_of_year / days_in_year),
+    }
+    for name, values in calendar_values.items():
+        _add_panel_feature(
+            panel,
+            specs,
+            name,
+            values,
+            family="time_calendar",
+            source="fmp",
+            source_column=f"date.{name}",
+            expected_direction="higher_is_better",
+        )
+    return specs
+
+
+def _add_macro_context_features(
+    warehouse: Warehouse,
+    panel: pd.DataFrame,
+    config: FamilyEvaluationConfig,
+) -> list[FeatureSpec]:
+    specs: list[FeatureSpec] = []
+    _add_economic_indicator_features(warehouse, panel, config, specs)
+    _add_treasury_rate_features(warehouse, panel, config, specs)
+    return specs
+
+
+def _add_economic_indicator_features(
+    warehouse: Warehouse,
+    panel: pd.DataFrame,
+    config: FamilyEvaluationConfig,
+    specs: list[FeatureSpec],
+) -> None:
+    macro = _read_macro_panel(
+        warehouse,
+        DEFAULT_ECONOMIC_SERIES,
+        provider=config.provider,
+        start=config.start_date,
+        end=config.end_date,
+    )
+    if macro.empty:
+        return
+    for code in [column for column in DEFAULT_ECONOMIC_SERIES if column in macro.columns]:
+        series = pd.to_numeric(macro[code], errors="coerce").replace([np.inf, -np.inf], np.nan)
+        transformations = {
+            "level": series,
+            "change_1obs": series.diff(1),
+            "change_4obs": series.diff(4),
+            "pct_change_4obs": series.pct_change(4),
+        }
+        for suffix, values in transformations.items():
+            _add_panel_feature(
+                panel,
+                specs,
+                f"{_feature_token(code)}_{suffix}",
+                _align_context_series_to_panel(panel, values),
+                family="economic_indicators",
+                source="fmp",
+                source_column=f"macro_economic.{code}.{suffix}",
+                expected_direction="higher_is_better",
+            )
+
+
+def _add_treasury_rate_features(
+    warehouse: Warehouse,
+    panel: pd.DataFrame,
+    config: FamilyEvaluationConfig,
+    specs: list[FeatureSpec],
+) -> None:
+    codes = tuple(treasury_series_code(column) for column in TREASURY_RATE_COLUMNS)
+    macro = _read_macro_panel(
+        warehouse,
+        codes,
+        provider=config.provider,
+        start=config.start_date,
+        end=config.end_date,
+    )
+    if macro.empty:
+        return
+    for code in [column for column in codes if column in macro.columns]:
+        series = pd.to_numeric(macro[code], errors="coerce").replace([np.inf, -np.inf], np.nan)
+        name = _feature_token(code.removeprefix("macro__ust_"))
+        _add_panel_feature(
+            panel,
+            specs,
+            name,
+            _align_context_series_to_panel(panel, series),
+            family="treasury_rates",
+            source="fmp",
+            source_column=f"macro_treasury.{code}",
+            expected_direction="higher_is_better",
+        )
+        _add_panel_feature(
+            panel,
+            specs,
+            f"{name}_change_21d",
+            _align_context_series_to_panel(panel, series.diff(21)),
+            family="treasury_rates",
+            source="fmp",
+            source_column=f"macro_treasury.{code}.change_21d",
+            expected_direction="higher_is_better",
+        )
+
+    spreads = {
+        "year10_minus_year2": ("macro__ust_year10", "macro__ust_year2"),
+        "year10_minus_month3": ("macro__ust_year10", "macro__ust_month3"),
+        "year30_minus_year10": ("macro__ust_year30", "macro__ust_year10"),
+        "year5_minus_year2": ("macro__ust_year5", "macro__ust_year2"),
+    }
+    for name, (left, right) in spreads.items():
+        if left not in macro.columns or right not in macro.columns:
+            continue
+        values = pd.to_numeric(macro[left], errors="coerce") - pd.to_numeric(macro[right], errors="coerce")
+        _add_panel_feature(
+            panel,
+            specs,
+            name,
+            _align_context_series_to_panel(panel, values),
+            family="treasury_rates",
+            source="fmp",
+            source_column=f"macro_treasury.{left}-{right}",
+            expected_direction="higher_is_better",
+        )
+
+
+def _read_macro_panel(
+    warehouse: Warehouse,
+    series_codes: Iterable[str],
+    *,
+    provider: str,
+    start: str | None,
+    end: str | None,
+) -> pd.DataFrame:
+    try:
+        frame = warehouse.read_macro_panel(tuple(series_codes), provider=provider, start=start, end=end)
+    except Exception:
+        return pd.DataFrame()
+    if frame is None or frame.empty:
+        return pd.DataFrame()
+    out = frame.copy()
+    out.index = pd.DatetimeIndex(pd.to_datetime(out.index, errors="coerce")).normalize()
+    out = out.loc[out.index.notna()].sort_index()
+    out = out.loc[~out.index.duplicated(keep="last")]
+    return out.apply(pd.to_numeric, errors="coerce").replace([np.inf, -np.inf], np.nan)
+
+
+def _align_context_series_to_panel(panel: pd.DataFrame, series: pd.Series) -> pd.Series:
+    if series is None or series.empty:
+        return pd.Series(np.nan, index=panel.index, dtype="float64")
+    context = pd.to_numeric(series, errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+    if context.empty:
+        return pd.Series(np.nan, index=panel.index, dtype="float64")
+    context.index = pd.DatetimeIndex(pd.to_datetime(context.index, errors="coerce")).normalize()
+    context = context.loc[context.index.notna()].sort_index()
+    context = context.loc[~context.index.duplicated(keep="last")]
+    dates = pd.to_datetime(panel["date"], errors="coerce").dt.normalize()
+    unique_dates = pd.DatetimeIndex(sorted(dates.dropna().unique()))
+    aligned = context.reindex(unique_dates, method="ffill")
+    return dates.map(aligned).astype("float64")
+
+
+def _add_cross_symbol_context_features(
+    warehouse: Warehouse,
+    panel: pd.DataFrame,
+    config: FamilyEvaluationConfig,
+) -> list[FeatureSpec]:
+    specs: list[FeatureSpec] = []
+    sector_map, industry_map = _symbol_group_maps(warehouse, panel["symbol"].dropna().unique(), config.provider)
+    _add_group_performance_features(panel, sector_map, family="sector_performance", group_name="sector", specs=specs)
+    _add_group_performance_features(panel, industry_map, family="industry_performance", group_name="industry", specs=specs)
+    _add_group_pe_features(panel, sector_map, family="sector_pe", group_name="sector", specs=specs)
+    _add_group_pe_features(panel, industry_map, family="industry_pe", group_name="industry", specs=specs)
+    return specs
+
+
+def _symbol_group_maps(
+    warehouse: Warehouse,
+    symbols: Iterable[str],
+    provider: str,
+) -> tuple[dict[str, str], dict[str, str]]:
+    sector_map: dict[str, str] = {}
+    industry_map: dict[str, str] = {}
+    for symbol in symbols:
+        symbol_text = str(symbol).strip().upper()
+        if not symbol_text:
+            continue
+        try:
+            profile = warehouse.read_profile(symbol_text, provider=provider)
+        except Exception:
+            profile = None
+        if profile is None:
+            continue
+        sector = _clean_group_name(profile.sector)
+        industry = _clean_group_name(profile.industry)
+        if sector:
+            sector_map[symbol_text] = sector
+        if industry:
+            industry_map[symbol_text] = industry
+    return sector_map, industry_map
+
+
+def _add_group_performance_features(
+    panel: pd.DataFrame,
+    group_map: dict[str, str],
+    *,
+    family: str,
+    group_name: str,
+    specs: list[FeatureSpec],
+) -> None:
+    if not group_map or "close" not in panel.columns:
+        return
+    close = panel.pivot(index="date", columns="symbol", values="close").sort_index()
+    panel_index = pd.MultiIndex.from_frame(panel[["date", "symbol"]])
+    for horizon in PERFORMANCE_HORIZONS:
+        returns = close.pct_change(horizon)
+        long = returns.stack(dropna=False).rename("return").reset_index()
+        long[group_name] = long["symbol"].map(group_map)
+        long = long.loc[long[group_name].notna()]
+        if long.empty:
+            continue
+        long["group_return"] = long.groupby(["date", group_name])["return"].transform("mean")
+        values = long.set_index(["date", "symbol"])["group_return"].reindex(panel_index)
+        _add_panel_feature(
+            panel,
+            specs,
+            f"return_{horizon}d",
+            values.to_numpy(dtype="float64"),
+            family=family,
+            source="fmp",
+            source_column=f"prices.close.{group_name}.return_{horizon}d",
+            expected_direction="higher_is_better",
+        )
+
+
+def _add_group_pe_features(
+    panel: pd.DataFrame,
+    group_map: dict[str, str],
+    *,
+    family: str,
+    group_name: str,
+    specs: list[FeatureSpec],
+) -> None:
+    if not group_map:
+        return
+    panel_index = pd.MultiIndex.from_frame(panel[["date", "symbol"]])
+    for metric in GROUP_PE_FEATURES:
+        source_feature = f"fmp_daily_mcap_multiple__{metric}"
+        if source_feature not in panel.columns:
+            continue
+        values = panel[["date", "symbol", source_feature]].copy()
+        values[group_name] = values["symbol"].map(group_map)
+        values = values.loc[values[group_name].notna()]
+        if values.empty:
+            continue
+        values["group_median"] = values.groupby(["date", group_name])[source_feature].transform("median")
+        aligned = values.set_index(["date", "symbol"])["group_median"].reindex(panel_index)
+        _add_panel_feature(
+            panel,
+            specs,
+            f"{metric}_median",
+            aligned.to_numpy(dtype="float64"),
+            family=family,
+            source="fmp",
+            source_column=f"{source_feature}.{group_name}.median",
+            expected_direction="lower_is_better",
+        )
+
+
+def _clean_group_name(value: object) -> str | None:
+    text = str(value or "").strip()
+    if not text or text.lower() in {"none", "nan", "null"}:
+        return None
+    return text
+
+
+def _feature_token(value: object) -> str:
+    text = str(value or "").strip()
+    chars = [char.lower() if char.isalnum() else "_" for char in text]
+    return "_".join("".join(chars).split("_")).strip("_")
 
 
 def _build_symbol_fundamental_panel(
