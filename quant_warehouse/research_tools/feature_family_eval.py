@@ -612,7 +612,7 @@ def _add_economic_indicator_features(
             "level": series,
             "change_1obs": series.diff(1),
             "change_4obs": series.diff(4),
-            "pct_change_4obs": series.pct_change(4),
+            "pct_change_4obs": series.pct_change(4, fill_method=None),
         }
         for suffix, values in transformations.items():
             _add_panel_feature(
@@ -778,8 +778,8 @@ def _add_group_performance_features(
     close = panel.pivot(index="date", columns="symbol", values="close").sort_index()
     panel_index = pd.MultiIndex.from_frame(panel[["date", "symbol"]])
     for horizon in PERFORMANCE_HORIZONS:
-        returns = close.pct_change(horizon)
-        long = returns.stack(dropna=False).rename("return").reset_index()
+        returns = close.pct_change(horizon, fill_method=None)
+        long = returns.stack(future_stack=True).rename("return").reset_index()
         long[group_name] = long["symbol"].map(group_map)
         long = long.loc[long[group_name].notna()]
         if long.empty:

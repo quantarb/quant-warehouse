@@ -153,6 +153,7 @@ def test_build_option_mean_variance_labels_score_rank_selection() -> None:
 def test_event_pair_mirror_lookup() -> None:
     assert get_mirror_event_type("congress", "congress_buy") == "congress_sell"
     assert get_mirror_event_type("analyst_rating", "analyst_downgrade") == "analyst_upgrade"
+    assert get_mirror_event_type("analyst_estimate", "analyst_estimate_raise") == "analyst_estimate_cut"
     assert get_event_side("institutional", "institutional_add") == 1
     assert get_event_side("institutional", "institutional_reduce") == -1
 
@@ -251,6 +252,32 @@ def test_build_event_pairs_from_existing_historical_sections() -> None:
         "warehouse:ownership_insider_trading",
         "warehouse:ownership_insider_trading",
     ]
+
+
+def test_build_analyst_estimate_event_pairs_from_existing_historical_sections() -> None:
+    fundamentals = _FakeFundamentals(
+        {
+            "estimates_historical": pd.DataFrame(
+                {
+                    "symbol": ["AAPL", "AAPL", "AAPL"],
+                    "date": ["2024-01-02", "2024-01-03", "2024-01-04"],
+                    "fiscal_date_ending": ["2024-03-31", "2024-03-31", "2024-03-31"],
+                    "eps_estimate": [1.00, 1.10, 0.95],
+                    "analyst_name": ["Firm A", "Firm A", "Firm A"],
+                }
+            )
+        }
+    )
+
+    events = build_event_pairs_from_historical_data(
+        "AAPL",
+        fundamentals=fundamentals,
+        event_families=("analyst_estimate",),
+    )
+
+    assert list(events["event_family"]) == ["analyst_estimate", "analyst_estimate"]
+    assert list(events["event_type"]) == ["analyst_estimate_raise", "analyst_estimate_cut"]
+    assert list(events["source"]) == ["warehouse:estimates_historical", "warehouse:estimates_historical"]
 
 
 def test_build_event_pairs_preserves_congress_chamber_and_analyst_firm() -> None:

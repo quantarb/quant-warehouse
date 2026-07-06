@@ -4,6 +4,7 @@ import warnings
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from quant_warehouse.research_tools.target_family_eval import (
     BinaryTargetConfig,
@@ -64,6 +65,57 @@ def test_build_event_target_panel_aligns_events_same_day_only() -> None:
     )
     assert target_panel.loc[target_panel["date"].eq(pd.Timestamp("2024-01-02")), "target_event_on__congress_buy"].item() == 0
     assert target_panel.loc[target_panel["date"].eq(pd.Timestamp("2024-01-03")), "target_event_on__congress_buy"].item() == 1
+
+
+def test_build_event_target_panel_supports_canonical_event_families() -> None:
+    feature_panel = pd.DataFrame(
+        {
+            "symbol": ["A"] * 4,
+            "date": pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05"]),
+            "feature": [1.0, 2.0, 3.0, 4.0],
+        }
+    )
+    events = pd.DataFrame(
+        {
+            "symbol": ["A", "A", "A", "A"],
+            "event_date": pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05"]),
+            "event_family": ["analyst_estimate", "analyst_rating", "insider", "earnings"],
+            "event_type": ["analyst_estimate_raise", "analyst_downgrade", "insider_buy", "earnings_miss"],
+            "event_side": [1, -1, 1, -1],
+            "mirror_event_type": ["analyst_estimate_cut", "analyst_upgrade", "insider_sell", "earnings_beat"],
+        }
+    )
+    config = BinaryTargetConfig(event_families=("analyst_estimate", "analyst_rating", "insider", "earnings"))
+
+    target_panel, metadata = build_event_target_panel(feature_panel, events, config)
+
+    assert set(metadata["target"]) == {
+        "target_event_on__analyst_estimate_raise",
+        "target_event_on__analyst_estimate_cut",
+        "target_event_on__analyst_upgrade",
+        "target_event_on__analyst_downgrade",
+        "target_event_on__insider_buy",
+        "target_event_on__insider_sell",
+        "target_event_on__earnings_beat",
+        "target_event_on__earnings_miss",
+    }
+    assert int(target_panel["target_event_on__analyst_estimate_raise"].sum()) == 1
+    assert int(target_panel["target_event_on__analyst_downgrade"].sum()) == 1
+    assert int(target_panel["target_event_on__insider_buy"].sum()) == 1
+    assert int(target_panel["target_event_on__earnings_miss"].sum()) == 1
+
+
+def test_old_feature_family_names_are_not_event_family_aliases() -> None:
+    feature_panel = pd.DataFrame(
+        {"symbol": ["A"], "date": [pd.Timestamp("2024-01-01")], "feature": [1.0]}
+    )
+
+    with pytest.raises(ValueError, match="Unsupported event families"):
+        build_event_target_panel(
+            feature_panel,
+            pd.DataFrame(),
+            BinaryTargetConfig(event_families=("analyst_estimates",)),
+        )
 
 
 def test_concat_event_frames_ignores_all_na_columns_without_future_warning() -> None:

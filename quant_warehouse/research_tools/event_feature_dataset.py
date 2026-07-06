@@ -49,6 +49,17 @@ FMP_EVENT_CONTEXT_FEATURE_FAMILIES: dict[str, tuple[str, tuple[str, ...]]] = {
             "disclosure_lag_days",
         ),
     ),
+    "analyst_estimate": (
+        "fmp_analyst_estimate_event_context",
+        (
+            "actor_name",
+            "actor_firm",
+            "actor_role",
+            "reported_date",
+            "disclosure_lag_days",
+            "strength",
+        ),
+    ),
     "price_target": (
         "fmp_price_target_event_context",
         (
@@ -121,15 +132,18 @@ def event_pair_task_specs(
     available = set(str(target) for target in available_targets)
     specs: list[dict[str, object]] = []
     for family in target_config.event_families:
-        pair = EVENT_PAIR_TAXONOMY[str(family)]
+        family_key = str(family).strip().lower()
+        if family_key not in EVENT_PAIR_TAXONOMY:
+            raise ValueError(f"Unsupported event family: {family!r}")
+        pair = EVENT_PAIR_TAXONOMY[family_key]
         positive_col = f"target_event_on__{pair['positive']}"
         negative_col = f"target_event_on__{pair['negative']}"
         if positive_col not in available or negative_col not in available:
             continue
         specs.append(
             {
-                "target_task": f"event_pair__{family}",
-                "task_id": sanitize_task_name(f"event_pair__{family}"),
+                "target_task": f"event_pair__{family_key}",
+                "task_id": sanitize_task_name(f"event_pair__{family_key}"),
                 "positive_col": positive_col,
                 "negative_col": negative_col,
                 "positive_label": pair["positive"],

@@ -34,6 +34,7 @@ class BinaryTargetConfig:
         "congress_buy",
         "insider_buy",
         "analyst_upgrade",
+        "analyst_estimate_raise",
         "price_target_raise",
         "earnings_beat",
     )

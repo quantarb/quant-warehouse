@@ -27,6 +27,7 @@ from quant_warehouse.platforms.data_providers.fmp.target_engineering.event_pairs
     raw_records,
     split_event_type,
     split_ratio,
+    value_revision_event_type,
 )
 from quant_warehouse.platforms.data_providers.fmp.target_engineering.event_pairs.event_pair_schema import EVENT_PAIR_COLUMNS
 from quant_warehouse.platforms.data_providers.fmp.target_engineering.event_pairs.event_pair_taxonomy import EVENT_PAIR_TAXONOMY
@@ -40,6 +41,7 @@ EVENT_PAIR_SECTION = "event_pairs"
 
 _SUPPORTED_FAMILIES = tuple(EVENT_PAIR_TAXONOMY)
 _HISTORICAL_SECTIONS: dict[str, tuple[str, ...]] = {
+    "analyst_estimate": ("estimates_historical", "estimates_consensus", "estimates_forward_eps", "estimates_forward_ebitda"),
     "analyst_rating": ("estimates_price_target",),
     "capital_action": ("cash",),
     "insider": ("ownership_insider_trading",),
@@ -309,6 +311,14 @@ def _build_family_from_historical(
     if family == "analyst_rating":
         frame = fundamentals.read(symbol, section="estimates_price_target", provider=provider, start=start_date, end=end_date)
         return _build_analyst_rating(symbol, frame, start_date=start_date, end_date=end_date)
+    if family == "analyst_estimate":
+        frames = []
+        for section in _HISTORICAL_SECTIONS["analyst_estimate"]:
+            frame = fundamentals.read(symbol, section=section, provider=provider, start=start_date, end=end_date)
+            built = _build_analyst_estimate(symbol, frame, source_section=section, start_date=start_date, end_date=end_date)
+            if not built.empty:
+                frames.append(built)
+        return _concat_event_pair_frames(frames)
     if family == "capital_action":
         frame = fundamentals.read(symbol, section="cash", provider=provider, start=start_date, end=end_date)
         return _build_capital_action(symbol, frame, start_date=start_date, end_date=end_date)
@@ -368,6 +378,123 @@ def _build_analyst_rating(symbol: str, frame: pd.DataFrame, *, start_date: str |
     frame["reported_date"] = first_present_column(frame, ("publishedDate", "published_date", "date", "gradingDate", "grading_date"))
     frame["raw_json"] = raw_records(frame)
     return normalize_family_frame(frame, event_family="analyst_rating", source="warehouse:estimates_price_target")
+
+
+def _build_analyst_estimate(
+    symbol: str,
+    frame: pd.DataFrame,
+    *,
+    source_section: str,
+    start_date: str | None,
+    end_date: str | None,
+) -> pd.DataFrame:
+    frame = _prepare_historical_frame(symbol, frame)
+    if frame.empty:
+        return pd.DataFrame(columns=EVENT_PAIR_COLUMNS)
+    frame = filter_dates(frame, start_date=start_date, end_date=end_date)
+    if frame.empty:
+        return pd.DataFrame(columns=EVENT_PAIR_COLUMNS)
+    frame["event_date"] = first_present_column(
+        frame,
+        (
+            "publishedDate",
+            "published_date",
+            "updatedDate",
+            "updated_date",
+            "date",
+            "as_of",
+            "period_ending",
+            "periodEnding",
+            "fiscalDateEnding",
+            "fiscal_date_ending",
+        ),
+    )
+    frame["estimate_value"] = first_numeric_column(
+        frame,
+        (
+            "epsEstimated",
+            "eps_estimated",
+            "estimatedEps",
+            "estimated_eps",
+            "epsEstimate",
+            "eps_estimate",
+            "epsConsensus",
+            "eps_consensus",
+            "revenueEstimated",
+            "revenue_estimated",
+            "estimatedRevenue",
+            "estimated_revenue",
+            "revenueEstimate",
+            "revenue_estimate",
+            "revenueConsensus",
+            "revenue_consensus",
+            "ebitdaEstimated",
+            "ebitda_estimated",
+            "estimatedEbitda",
+            "estimated_ebitda",
+            "ebitdaEstimate",
+            "ebitda_estimate",
+        ),
+    )
+    if frame["estimate_value"].isna().all():
+        numeric = frame.select_dtypes(include=["number"]).drop(
+            columns=[column for column in ("calendar_year", "year", "fiscal_year") if column in frame.columns],
+            errors="ignore",
+        )
+        if numeric.empty:
+            return pd.DataFrame(columns=EVENT_PAIR_COLUMNS)
+        frame["estimate_value"] = pd.to_numeric(numeric.iloc[:, 0], errors="coerce")
+    frame = frame.dropna(subset=["event_date", "estimate_value"]).copy()
+    if frame.empty:
+        return pd.DataFrame(columns=EVENT_PAIR_COLUMNS)
+    metric = first_present_column(frame, ("metric", "estimate_type", "estimateType", "period", "fiscalPeriod", "fiscal_period")).fillna(source_section)
+    period = first_present_column(
+        frame,
+        (
+            "fiscalDateEnding",
+            "fiscal_date_ending",
+            "period_ending",
+            "periodEnding",
+            "fiscalPeriodEnding",
+            "fiscal_period_ending",
+            "calendarYear",
+            "calendar_year",
+            "year",
+        ),
+    ).fillna("unknown_period")
+    analyst_actor = first_present_column(
+        frame,
+        ("analystName", "analyst_name", "analystFirm", "analyst_firm", "analystCompany", "analyst_company", "publisher"),
+    ).fillna("consensus")
+    frame["_group_key"] = (
+        metric.astype(str).str.lower()
+        + "|"
+        + period.astype(str).str.lower()
+        + "|"
+        + analyst_actor.astype(str).str.lower()
+    )
+    frame = frame.sort_values(["_group_key", "event_date"])
+    frame["previous_estimate_value"] = frame.groupby("_group_key")["estimate_value"].shift(1)
+    frame["event_type"] = frame.apply(
+        lambda row: value_revision_event_type(
+            row.get("estimate_value"),
+            row.get("previous_estimate_value"),
+            positive="analyst_estimate_raise",
+            negative="analyst_estimate_cut",
+        ),
+        axis=1,
+    )
+    frame = frame.dropna(subset=["event_type"]).copy()
+    if frame.empty:
+        return pd.DataFrame(columns=EVENT_PAIR_COLUMNS)
+    frame["actor_type"] = "analyst"
+    frame["actor_name"] = analyst_actor.loc[frame.index]
+    frame["actor_firm"] = analyst_actor.loc[frame.index]
+    frame["actor_role"] = "analyst"
+    frame["strength"] = frame["estimate_value"]
+    frame["reported_date"] = first_present_column(frame, ("publishedDate", "published_date", "updatedDate", "updated_date", "date", "as_of"))
+    frame["raw_json"] = raw_records(frame)
+    return normalize_family_frame(frame, event_family="analyst_estimate", source=f"warehouse:{source_section}")
 
 
 def _build_capital_action(symbol: str, frame: pd.DataFrame, *, start_date: str | None, end_date: str | None) -> pd.DataFrame:
@@ -629,7 +756,7 @@ def _filter_calendar_symbol(frame: pd.DataFrame, symbol: str) -> pd.DataFrame:
 
 
 def _normalize_families(event_families: Sequence[str]) -> tuple[str, ...]:
-    families = tuple(str(family).strip().lower() for family in event_families if str(family).strip())
+    families = tuple(dict.fromkeys(str(family).strip().lower() for family in event_families if str(family).strip()))
     unknown = [family for family in families if family not in EVENT_PAIR_TAXONOMY]
     if unknown:
         raise ValueError(f"Unsupported event pair families: {unknown}")

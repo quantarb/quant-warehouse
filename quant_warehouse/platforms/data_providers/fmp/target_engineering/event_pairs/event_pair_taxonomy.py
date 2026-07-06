@@ -13,6 +13,10 @@ EVENT_PAIR_TAXONOMY = {
         "positive": "analyst_upgrade",
         "negative": "analyst_downgrade",
     },
+    "analyst_estimate": {
+        "positive": "analyst_estimate_raise",
+        "negative": "analyst_estimate_cut",
+    },
     "price_target": {
         "positive": "price_target_raise",
         "negative": "price_target_cut",
