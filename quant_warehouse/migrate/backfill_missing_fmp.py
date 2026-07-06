@@ -54,6 +54,8 @@ def backfill_missing_fmp_historical(
     include_prices: bool = True,
     force_macro: bool = False,
     macro_start_date: str = MIN_HISTORICAL_DATE,
+    equity_symbols: Sequence[str] | None = None,
+    etf_symbols: Sequence[str] | None = None,
     max_equity_symbols: int | None = None,
     max_etf_symbols: int | None = None,
     staleness_days: int = 90,
@@ -117,7 +119,11 @@ def backfill_missing_fmp_historical(
     else:
         summary["macro"] = {"status": "skipped_complete"}
 
-    equity_symbols = _catalog_symbols(cfg.catalog_path, section="prices", provider=equity_provider)
+    equity_symbols = (
+        list(dict.fromkeys(str(symbol).strip().upper() for symbol in equity_symbols if str(symbol).strip()))
+        if equity_symbols is not None
+        else _catalog_symbols(cfg.catalog_path, section="prices", provider=equity_provider)
+    )
     if max_equity_symbols is not None:
         equity_symbols = equity_symbols[: max(0, int(max_equity_symbols))]
 
@@ -158,7 +164,11 @@ def backfill_missing_fmp_historical(
     )
     summary["equity"] = _summarize_results(equity_results)
 
-    etf_symbols = _catalog_symbols(cfg.catalog_path, section="etf_prices", provider=etf_provider)
+    etf_symbols = (
+        list(dict.fromkeys(str(symbol).strip().upper() for symbol in etf_symbols if str(symbol).strip()))
+        if etf_symbols is not None
+        else _catalog_symbols(cfg.catalog_path, section="etf_prices", provider=etf_provider)
+    )
     if max_etf_symbols is not None:
         etf_symbols = etf_symbols[: max(0, int(max_etf_symbols))]
 
