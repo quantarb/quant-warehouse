@@ -10,6 +10,12 @@ import pandas as pd
 
 from quant_warehouse.config import WarehouseConfig
 from quant_warehouse.refresh.planner import macro_backfill_needs_update
+from quant_warehouse.refresh.planner import (
+    backfill_fundamental_needs_update,
+    expected_latest_price_date,
+    price_backfill_needs_update,
+    symbol_has_fresh_prices,
+)
 from quant_warehouse.refresh.universe import (
     refresh_universe_fundamentals,
     refresh_universe_macro,
@@ -27,6 +33,15 @@ from quant_warehouse.warehouse.sections import (
 ProgressLogger = Callable[[str], None] | None
 
 
+def _symbol_log_text(symbols: Sequence[str], *, max_symbols: int = 100) -> str:
+    cleaned = [str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()]
+    if not cleaned:
+        return "(none)"
+    if len(cleaned) <= max_symbols:
+        return ", ".join(cleaned)
+    return ", ".join(cleaned[:max_symbols]) + f", ... (+{len(cleaned) - max_symbols} more)"
+
+
 def _catalog_symbols(catalog_path: Path, *, section: str, provider: str) -> list[str]:
     with sqlite3.connect(catalog_path) as conn:
         rows = conn.execute(
@@ -39,6 +54,68 @@ def _catalog_symbols(catalog_path: Path, *, section: str, provider: str) -> list
             (section, provider),
         ).fetchall()
     return [str(row[0]).strip().upper() for row in rows if row and row[0]]
+
+
+def _symbols_needing_price_refresh(
+    warehouse: Warehouse,
+    symbols: Sequence[str],
+    *,
+    provider: str,
+    section: str,
+    skip_recent_hours: float,
+    is_etf: bool = False,
+) -> list[str]:
+    target_end = expected_latest_price_date()
+    out: list[str] = []
+    for symbol in symbols:
+        if symbol_has_fresh_prices(
+            warehouse.catalog,
+            symbol,
+            [provider],
+            target_end_date=target_end,
+            section=section,
+        ):
+            continue
+        needs_refresh, _reason = price_backfill_needs_update(
+            warehouse.catalog,
+            symbol,
+            provider,
+            target_end_date=target_end,
+            skip_recent_hours=skip_recent_hours,
+            section=section,
+            is_etf=is_etf,
+        )
+        if needs_refresh:
+            out.append(symbol)
+    return out
+
+
+def _symbols_needing_fundamental_refresh(
+    warehouse: Warehouse,
+    symbols: Sequence[str],
+    *,
+    provider: str,
+    sections: Sequence[str],
+    staleness_days: int,
+    skip_recent_hours: float,
+    is_etf: bool = False,
+) -> list[str]:
+    out: list[str] = []
+    for symbol in symbols:
+        for section in sections:
+            needs_refresh, _reason = backfill_fundamental_needs_update(
+                warehouse.catalog,
+                symbol,
+                section,
+                provider,
+                staleness_days=staleness_days,
+                skip_recent_hours=skip_recent_hours,
+                is_etf=is_etf,
+            )
+            if needs_refresh:
+                out.append(symbol)
+                break
+    return out
 
 
 def backfill_missing_fmp_historical(
@@ -126,16 +203,31 @@ def backfill_missing_fmp_historical(
     )
     if max_equity_symbols is not None:
         equity_symbols = equity_symbols[: max(0, int(max_equity_symbols))]
+    summary["equity_symbols"] = list(equity_symbols)
+    if callable(progress_logger):
+        progress_logger(
+            f"Backfill: scoped equity symbols ({len(equity_symbols):,}): "
+            f"{_symbol_log_text(equity_symbols)}"
+        )
 
     if include_prices:
+        equity_price_symbols = _symbols_needing_price_refresh(
+            warehouse,
+            equity_symbols,
+            provider=equity_provider,
+            section="prices",
+            skip_recent_hours=skip_recent_hours,
+            is_etf=False,
+        )
         if callable(progress_logger):
             progress_logger(
-                f"Backfill: refreshing equity prices for {len(equity_symbols):,} symbols via FMP"
+                f"Backfill: refreshing equity prices for {len(equity_price_symbols):,} stale symbols "
+                f"({len(equity_symbols):,} scoped) via FMP"
             )
         summary["equity_prices"] = _summarize_results(
             refresh_universe_prices(
                 warehouse,
-                equity_symbols,
+                equity_price_symbols,
                 providers=[equity_provider],
                 backfill_skip=True,
                 price_start_date=MIN_HISTORICAL_DATE,
@@ -145,14 +237,24 @@ def backfill_missing_fmp_historical(
             )
         )
 
+    equity_refresh_symbols = _symbols_needing_fundamental_refresh(
+        warehouse,
+        equity_symbols,
+        provider=equity_provider,
+        sections=section_list,
+        staleness_days=staleness_days,
+        skip_recent_hours=skip_recent_hours,
+        is_etf=False,
+    )
     if callable(progress_logger):
         progress_logger(
-            f"Backfill: refreshing equity fundamentals for {len(equity_symbols):,} symbols | "
+            f"Backfill: refreshing equity fundamentals for {len(equity_refresh_symbols):,} stale symbols "
+            f"({len(equity_symbols):,} scoped) | "
             f"sections={','.join(section_list)} | preferred_period={normalized_period}"
         )
     equity_results = refresh_universe_fundamentals(
         warehouse,
-        equity_symbols,
+        equity_refresh_symbols,
         sections=section_list,
         providers=[equity_provider],
         period=normalized_period,
@@ -171,18 +273,33 @@ def backfill_missing_fmp_historical(
     )
     if max_etf_symbols is not None:
         etf_symbols = etf_symbols[: max(0, int(max_etf_symbols))]
+    summary["etf_symbols"] = list(etf_symbols)
+    if callable(progress_logger):
+        progress_logger(
+            f"Backfill: scoped ETF symbols ({len(etf_symbols):,}): "
+            f"{_symbol_log_text(etf_symbols)}"
+        )
 
     if include_prices and etf_symbols:
+        etf_price_symbols = _symbols_needing_price_refresh(
+            warehouse,
+            etf_symbols,
+            provider=etf_provider,
+            section="etf_prices",
+            skip_recent_hours=skip_recent_hours,
+            is_etf=True,
+        )
         if callable(progress_logger):
             progress_logger(
-                f"Backfill: refreshing ETF prices for {len(etf_symbols):,} symbols via FMP"
+                f"Backfill: refreshing ETF prices for {len(etf_price_symbols):,} stale symbols "
+                f"({len(etf_symbols):,} scoped) via FMP"
             )
         summary["etf_prices"] = _summarize_results(
             refresh_universe_prices(
                 warehouse,
-                etf_symbols,
+                etf_price_symbols,
                 providers=[etf_provider],
-                etf_symbols=set(etf_symbols),
+                etf_symbols=set(etf_price_symbols),
                 backfill_skip=True,
                 price_start_date=MIN_HISTORICAL_DATE,
                 skip_recent_hours=skip_recent_hours,

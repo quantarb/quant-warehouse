@@ -5,7 +5,7 @@ from typing import Any
 
 import pandas as pd
 
-from quant_warehouse.ingest.credentials import configure_openbb_credentials
+from quant_warehouse.ingest.credentials import configure_openbb_credentials, resolve_fmp_api_key
 from quant_warehouse.ingest.normalize import clip_to_min_historical_date
 from quant_warehouse.warehouse.sections import MIN_HISTORICAL_DATE
 
@@ -50,8 +50,41 @@ def fetch_economic_indicator_series(
         kwargs["start_date"] = str(start_date)[:10]
     if end_date:
         kwargs["end_date"] = str(end_date)[:10]
-    result = obb.economy.indicators(**kwargs)
-    return _records_to_frame(result.to_df())
+    try:
+        result = obb.economy.indicators(**kwargs)
+        return _records_to_frame(result.to_df())
+    except Exception:
+        return _fetch_fmp_economic_indicator_series_direct(
+            str(name).strip(),
+            start_date=start_date,
+            end_date=end_date,
+        )
+
+
+def _fetch_fmp_economic_indicator_series_direct(
+    name: str,
+    *,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> pd.DataFrame:
+    import requests
+
+    params: dict[str, str] = {
+        "apikey": resolve_fmp_api_key(required=True),
+        "name": str(name).strip(),
+    }
+    if start_date:
+        params["from"] = str(start_date)[:10]
+    if end_date:
+        params["to"] = str(end_date)[:10]
+    response = requests.get(
+        "https://financialmodelingprep.com/stable/economic-indicators",
+        params=params,
+        timeout=(5, 30),
+    )
+    response.raise_for_status()
+    records = response.json()
+    return _records_to_frame(records)
 
 
 def _normalize_treasury_column_name(column: str) -> str:

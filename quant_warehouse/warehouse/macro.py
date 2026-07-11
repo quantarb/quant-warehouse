@@ -409,7 +409,10 @@ class MacroStore:
         column = "value" if "value" in sliced.columns else sliced.columns[0]
         series = pd.to_numeric(sliced[column], errors="coerce")
         series.index = pd.DatetimeIndex(sliced.index).normalize()
-        return series.dropna()
+        series = series.dropna()
+        if series.index.has_duplicates:
+            series = series.groupby(level=0).last()
+        return series
 
     def read_panel(
         self,

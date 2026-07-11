@@ -53,6 +53,29 @@ def test_read_panel_joins_economic_and_treasury_series(tmp_path):
     assert len(panel) == 2
 
 
+def test_read_panel_collapses_duplicate_macro_dates(tmp_path):
+    home = tmp_path / "qw"
+    config = WarehouseConfig(
+        home=home,
+        arctic_uri=f"lmdb://{home / 'arctic'}",
+        catalog_path=home / "catalog.sqlite",
+    )
+    backend = FakeBackend()
+    catalog = CatalogStore(config.catalog_path)
+    store = MacroStore(config=config, backend=backend, catalog=catalog)
+
+    economic = pd.DataFrame(
+        {"value": [1.0, 2.0, 3.0]},
+        index=pd.to_datetime(["2024-01-01 08:00", "2024-01-01 16:00", "2024-02-01 00:00"]),
+    )
+    backend.write(provider_library(MACRO_ECONOMIC_LIBRARY, "fmp"), "GDP__fmp", economic)
+
+    panel = store.read_panel(["GDP"], provider="fmp")
+
+    assert list(panel.index) == list(pd.to_datetime(["2024-01-01", "2024-02-01"]))
+    assert panel.loc[pd.Timestamp("2024-01-01"), "GDP"] == 2.0
+
+
 def test_read_risk_premium_and_calendar(tmp_path):
     home = tmp_path / "qw"
     config = WarehouseConfig(

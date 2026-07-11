@@ -270,6 +270,34 @@ def test_macro_refresh_flags_incomplete_early_history():
     assert reason == "incomplete_early_history"
 
 
+def test_macro_refresh_skips_recent_incomplete_early_history_retry():
+    catalog = FakeCatalog(
+        {
+            ("GDP", "macro_economic", "fmp"): SectionState(
+                symbol="GDP",
+                section="macro_economic",
+                provider="fmp",
+                min_date="2005-01-01",
+                max_date="2026-06-17",
+                row_count=85,
+                columns_present=("value",),
+                last_fetched_at=datetime.now(timezone.utc).isoformat(),
+            )
+        }
+    )
+    needs, reason = macro_refresh_needs_update(
+        catalog,  # type: ignore[arg-type]
+        "GDP",
+        "macro_economic",
+        "fmp",
+        target_end_date=pd.Timestamp("2026-06-17").date(),
+        history_start_date=pd.Timestamp(MIN_HISTORICAL_DATE).date(),
+        skip_recent_hours=24.0,
+    )
+    assert needs is False
+    assert reason == "recent_attempt"
+
+
 def test_macro_backfill_skips_when_treasury_is_current():
     target_end = expected_latest_price_date()
     fresh_at = datetime.now(timezone.utc).isoformat()
@@ -344,7 +372,7 @@ def test_historical_fetch_plan_tail_when_max_date_stale():
                 section="income",
                 provider="fmp",
                 min_date="2010-01-01",
-                max_date="2026-03-31",
+                max_date="2025-12-31",
                 row_count=64,
                 columns_present=("total_revenue",),
                 last_fetched_at=datetime.now(timezone.utc).isoformat(),
@@ -364,6 +392,34 @@ def test_historical_fetch_plan_tail_when_max_date_stale():
     assert plan.reason == "stale_max_date"
     assert plan.fetch_ranges
     assert plan.fetch_ranges[0][1].isoformat() == "2026-06-17"
+
+
+def test_historical_fetch_plan_skips_period_fundamental_inside_reporting_buffer():
+    catalog = FakeCatalog(
+        {
+            ("AAPL", "income", "fmp"): SectionState(
+                symbol="AAPL",
+                section="income",
+                provider="fmp",
+                min_date="2010-01-01",
+                max_date="2026-03-31",
+                row_count=64,
+                columns_present=("total_revenue",),
+                last_fetched_at="2026-06-01T12:00:00+00:00",
+            )
+        }
+    )
+    plan = historical_fetch_plan(
+        catalog,  # type: ignore[arg-type]
+        "AAPL",
+        "income",
+        "fmp",
+        target_end_date=pd.Timestamp("2026-06-17").date(),
+        skip_recent_hours=0.0,
+    )
+    assert plan.needs_refresh is False
+    assert plan.mode == "skip"
+    assert plan.reason == "fresh"
 
 
 def test_historical_fetch_plan_head_when_early_history_missing():
@@ -451,6 +507,34 @@ def test_historical_fetch_plan_defers_recent_incomplete_retry():
     assert plan.needs_refresh is False
     assert plan.mode == "skip"
     assert plan.reason == "defer_recent_attempt"
+
+
+def test_historical_fetch_plan_skips_sparse_fundamental_recent_attempt():
+    catalog = FakeCatalog(
+        {
+            ("MSFT", "historical_splits", "fmp"): SectionState(
+                symbol="MSFT",
+                section="historical_splits",
+                provider="fmp",
+                min_date="2003-02-18",
+                max_date="2003-02-18",
+                row_count=1,
+                columns_present=("split_ratio",),
+                last_fetched_at=datetime.now(timezone.utc).isoformat(),
+            )
+        }
+    )
+    plan = historical_fetch_plan(
+        catalog,  # type: ignore[arg-type]
+        "MSFT",
+        "historical_splits",
+        "fmp",
+        target_end_date=pd.Timestamp("2026-06-17").date(),
+        skip_recent_hours=24.0,
+    )
+    assert plan.needs_refresh is False
+    assert plan.mode == "skip"
+    assert plan.reason == "recent_attempt"
 
 
 def test_price_backfill_skips_when_fresh():
