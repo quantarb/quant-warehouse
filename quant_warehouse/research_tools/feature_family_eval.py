@@ -274,16 +274,23 @@ def build_fundamental_feature_panel(
     config: FamilyEvaluationConfig,
     *,
     warehouse: Warehouse | None = None,
+    strategy_sources: Iterable[str] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, float]]:
-    """Build FMP daily-adjusted and FinanceToolkit-style fundamental feature families."""
+    """Build only the requested fundamental feature families when supplied."""
 
     wh = warehouse or Warehouse()
+    wanted = {str(value).strip() for value in strategy_sources or () if str(value).strip()}
     start = perf_counter()
     frames: list[pd.DataFrame] = []
     all_specs: list[FeatureSpec] = []
     diagnostics: list[dict[str, object]] = []
     for symbol in symbols:
-        frame, specs, diag = _build_symbol_fundamental_panel(wh, symbol, config)
+        frame, specs, diag = _build_symbol_fundamental_panel(
+            wh,
+            symbol,
+            config,
+            strategy_sources=wanted or None,
+        )
         diagnostics.append(diag)
         if not frame.empty:
             frames.append(frame)
@@ -294,6 +301,10 @@ def build_fundamental_feature_panel(
     all_specs.extend(_add_time_calendar_features(panel))
     all_specs.extend(_add_macro_context_features(wh, panel, config))
     all_specs.extend(_add_cross_symbol_context_features(wh, panel, config))
+    if wanted:
+        all_specs = [spec for spec in all_specs if f"{spec.source}.{spec.family}" in wanted]
+        selected_columns = [spec.feature for spec in all_specs if spec.feature in panel.columns]
+        panel = panel[["symbol", "date", *dict.fromkeys(selected_columns)]].copy()
     metadata = (
         pd.DataFrame([spec.__dict__ for spec in all_specs])
         .drop_duplicates()
@@ -303,6 +314,90 @@ def build_fundamental_feature_panel(
     diagnostics_df = pd.DataFrame(diagnostics)
     timings = {"raw_panel_build_seconds": perf_counter() - start}
     return panel, metadata, diagnostics_df, timings
+
+
+def build_technical_feature_panel(
+    symbols: Iterable[str],
+    config: FamilyEvaluationConfig,
+    *,
+    strategy_sources: Iterable[str],
+    observation_dates: pd.DataFrame | None = None,
+    warehouse: Warehouse | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, float]]:
+    """Build requested technical families and optionally retain only required symbol/dates."""
+
+    from quant_warehouse.platforms.data_providers.fmp.feature_engineering.ta_classic_technical import (
+        TA_CLASSIC_FAMILY_PREFIXES,
+        build_price_ta_classic_feature_families,
+    )
+    from quant_warehouse.platforms.data_providers.fmp.feature_engineering.technical import (
+        build_price_technical_features,
+    )
+
+    requested = {str(value).strip() for value in strategy_sources if str(value).strip()}
+    allowed = {"fmp.price_technicals", *(f"fmp.{name}" for name in TA_CLASSIC_FAMILY_PREFIXES)}
+    unknown = sorted(requested.difference(allowed))
+    if unknown:
+        raise ValueError(f"Unknown technical strategy sources: {unknown}")
+    if not requested:
+        raise ValueError("At least one technical strategy source is required")
+    wanted_ta = {value.split(".", 1)[1] for value in requested if value != "fmp.price_technicals"}
+    dates = _normalize_observation_dates(observation_dates)
+    wh = warehouse or Warehouse()
+    started = perf_counter()
+    frames: list[pd.DataFrame] = []
+    specs: list[FeatureSpec] = []
+    diagnostics: list[dict[str, object]] = []
+    for raw_symbol in symbols:
+        symbol = str(raw_symbol).strip().upper()
+        prices = _slice_frame(wh.read_prices(symbol, provider=config.provider), config.start_date, config.end_date)
+        if prices.empty:
+            diagnostics.append({"symbol": symbol, "status": "missing_prices"})
+            continue
+        built_sets = {}
+        if "fmp.price_technicals" in requested:
+            built_sets["price_technicals"] = build_price_technical_features(symbol, prices)
+        if wanted_ta:
+            built_sets.update(build_price_ta_classic_feature_families(symbol, prices, families=wanted_ta))
+        symbol_frames = []
+        for family, built in built_sets.items():
+            if built.df is None or built.df.empty or not built.feature_cols:
+                continue
+            frame = built.df.reset_index()
+            frame["date"] = pd.to_datetime(frame["date"], errors="coerce").dt.normalize()
+            frame["symbol"] = symbol
+            symbol_frames.append(frame[["symbol", "date", *built.feature_cols]])
+            specs.extend(
+                FeatureSpec(feature, family, "fmp", feature, "unknown")
+                for feature in built.feature_cols
+            )
+        if symbol_frames:
+            merged = symbol_frames[0]
+            for other in symbol_frames[1:]:
+                merged = merged.merge(other, on=["symbol", "date"], how="outer", validate="one_to_one")
+            if dates is not None:
+                merged = merged.merge(dates.loc[dates["symbol"].eq(symbol)], on=["symbol", "date"], how="inner")
+            if not merged.empty:
+                frames.append(merged)
+        diagnostics.append({"symbol": symbol, "status": "ok", "families": len(built_sets)})
+    if not frames:
+        raise RuntimeError("No technical feature frames were built for the requested symbols and dates.")
+    panel = pd.concat(frames, ignore_index=True, sort=False).sort_values(["date", "symbol"]).reset_index(drop=True)
+    metadata = pd.DataFrame([spec.__dict__ for spec in specs]).drop_duplicates().sort_values(["family", "feature"]).reset_index(drop=True)
+    return panel, metadata, pd.DataFrame(diagnostics), {"technical_panel_build_seconds": perf_counter() - started}
+
+
+def _normalize_observation_dates(frame: pd.DataFrame | None) -> pd.DataFrame | None:
+    if frame is None:
+        return None
+    required = {"symbol", "date"}
+    missing = required.difference(frame.columns)
+    if missing:
+        raise KeyError(f"observation_dates missing columns: {sorted(missing)}")
+    out = frame[["symbol", "date"]].copy()
+    out["symbol"] = out["symbol"].astype(str).str.strip().str.upper()
+    out["date"] = pd.to_datetime(out["date"], errors="coerce").dt.normalize()
+    return out.dropna().drop_duplicates().reset_index(drop=True)
 
 
 def cap_features_by_quality(
@@ -877,6 +972,8 @@ def _build_symbol_fundamental_panel(
     warehouse: Warehouse,
     symbol: str,
     config: FamilyEvaluationConfig,
+    *,
+    strategy_sources: set[str] | None = None,
 ) -> tuple[pd.DataFrame, list[FeatureSpec], dict[str, object]]:
     start = perf_counter()
     inputs = {
@@ -907,9 +1004,27 @@ def _build_symbol_fundamental_panel(
     cash = _daily_column(aligned, "balance", "cash_and_cash_equivalents")
     daily_ev = daily_mcap.add(total_debt.reindex(daily_index), fill_value=0.0).sub(cash.reindex(daily_index), fill_value=0.0)
 
-    _build_daily_adjusted_features(aligned, daily_mcap, daily_ev, feature_frames, specs)
-    _build_statement_mcap_features(aligned, daily_mcap, feature_frames, specs)
-    _build_financetoolkit_style_features(aligned, feature_frames, specs)
+    wanted_families = (
+        {value.split(".", 1)[1] for value in strategy_sources if "." in value}
+        if strategy_sources
+        else None
+    )
+    _build_daily_adjusted_features(aligned, daily_mcap, daily_ev, feature_frames, specs, wanted_families=wanted_families)
+    _build_statement_mcap_features(aligned, daily_mcap, feature_frames, specs, wanted_families=wanted_families)
+    _build_financetoolkit_style_features(aligned, feature_frames, specs, wanted_families=wanted_families)
+
+    if strategy_sources:
+        keep_features = {
+            spec.feature
+            for spec in specs
+            if f"{spec.source}.{spec.family}" in strategy_sources
+        }
+        feature_frames = {
+            feature: values
+            for feature, values in feature_frames.items()
+            if feature in keep_features
+        }
+        specs = [spec for spec in specs if spec.feature in keep_features]
 
     if not feature_frames:
         return pd.DataFrame(), [], {"symbol": symbol, "status": "no_features"}
@@ -932,6 +1047,8 @@ def _build_daily_adjusted_features(
     daily_ev: pd.Series,
     feature_frames: dict[str, pd.Series],
     specs: list[FeatureSpec],
+    *,
+    wanted_families: set[str] | None = None,
 ) -> None:
     mcap_items = {
         "revenue": ("income", "revenue", "higher_is_better"),
@@ -953,7 +1070,8 @@ def _build_daily_adjusted_features(
         values = _daily_column(aligned, section, column)
         if values.empty:
             continue
-        _add_feature(
+        if wanted_families is None or "fmp_daily_mcap_yield" in wanted_families:
+            _add_feature(
             feature_frames,
             specs,
             f"{name}_to_mcap",
@@ -962,8 +1080,9 @@ def _build_daily_adjusted_features(
             source="fmp",
             source_column=f"{section}.{column}",
             expected_direction=direction,
-        )
-        _add_feature(
+            )
+        if wanted_families is None or "fmp_daily_mcap_multiple" in wanted_families:
+            _add_feature(
             feature_frames,
             specs,
             f"mcap_to_{name}",
@@ -972,7 +1091,7 @@ def _build_daily_adjusted_features(
             source="fmp",
             source_column=f"{section}.{column}",
             expected_direction="lower_is_better" if direction == "higher_is_better" else "higher_is_better",
-        )
+            )
 
     ev_items = {
         "revenue": ("income", "revenue"),
@@ -987,7 +1106,8 @@ def _build_daily_adjusted_features(
         values = _daily_column(aligned, section, column)
         if values.empty:
             continue
-        _add_feature(
+        if wanted_families is None or "fmp_daily_ev_yield" in wanted_families:
+            _add_feature(
             feature_frames,
             specs,
             f"{name}_to_ev",
@@ -996,8 +1116,9 @@ def _build_daily_adjusted_features(
             source="fmp",
             source_column=f"{section}.{column}",
             expected_direction="higher_is_better",
-        )
-        _add_feature(
+            )
+        if wanted_families is None or "fmp_daily_ev_multiple" in wanted_families:
+            _add_feature(
             feature_frames,
             specs,
             f"ev_to_{name}",
@@ -1006,7 +1127,7 @@ def _build_daily_adjusted_features(
             source="fmp",
             source_column=f"{section}.{column}",
             expected_direction="lower_is_better",
-        )
+            )
 
 
 def _build_statement_mcap_features(
@@ -1014,8 +1135,12 @@ def _build_statement_mcap_features(
     daily_mcap: pd.Series,
     feature_frames: dict[str, pd.Series],
     specs: list[FeatureSpec],
+    *,
+    wanted_families: set[str] | None = None,
 ) -> None:
     for section, family in (("income", "fmp_income_mcap"), ("balance", "fmp_balance_mcap"), ("cash", "fmp_cash_mcap")):
+        if wanted_families is not None and family not in wanted_families:
+            continue
         frame = aligned[section]
         for column in frame.columns:
             if column in {"fiscal_period", "accepted_date", "reported_currency", "calendar_year", "period"}:
@@ -1039,12 +1164,16 @@ def _build_financetoolkit_style_features(
     aligned: dict[str, pd.DataFrame],
     feature_frames: dict[str, pd.Series],
     specs: list[FeatureSpec],
+    *,
+    wanted_families: set[str] | None = None,
 ) -> None:
     for section in ("ratios", "metrics"):
         frame = aligned[section]
         for column in frame.columns:
             family = _family_for_ratio_column(column) if section == "ratios" else _family_for_metric_column(column)
             if family is None:
+                continue
+            if wanted_families is not None and family not in wanted_families:
                 continue
             values = pd.to_numeric(frame[column], errors="coerce")
             if values.notna().sum() == 0:
@@ -1065,6 +1194,8 @@ def _build_financetoolkit_style_features(
         ("balance_growth", "ft_growth_balance"),
         ("cash_growth", "ft_growth_cash"),
     ):
+        if wanted_families is not None and family not in wanted_families:
+            continue
         frame = aligned[section]
         for column in frame.columns:
             if not str(column).startswith("growth_"):

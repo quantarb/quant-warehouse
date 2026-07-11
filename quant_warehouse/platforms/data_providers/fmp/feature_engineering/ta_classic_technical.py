@@ -5,7 +5,7 @@ import logging
 import inspect
 import warnings
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Iterable
 
 import numpy as np
 import pandas as pd
@@ -36,6 +36,8 @@ class TaIndicatorSpec:
 def build_price_ta_classic_feature_families(
     symbol: str,
     df_prices: pd.DataFrame,
+    *,
+    families: Iterable[str] | None = None,
 ) -> dict[str, BuiltFeatureSet]:
     """Build split pandas-ta-classic technical feature families for a single symbol."""
 
@@ -46,9 +48,12 @@ def build_price_ta_classic_feature_families(
     if prices.empty:
         return _empty_family_sets()
 
+    wanted = {str(value).strip() for value in families or () if str(value).strip()}
     result: dict[str, BuiltFeatureSet] = {}
     with _suppress_pandas_ta_classic_row_warnings():
         for family_name, specs in _indicator_specs(ta).items():
+            if wanted and family_name not in wanted:
+                continue
             columns: dict[str, pd.Series] = {}
             for spec in specs:
                 indicator = _compute_indicator(ta, prices, spec)
