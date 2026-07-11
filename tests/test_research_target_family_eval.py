@@ -13,9 +13,18 @@ from quant_warehouse.research_tools.target_family_eval import (
     _price_base_panel,
     build_collapsed_bullish_event_target_panel,
     build_event_target_panel,
+    build_oracle_trade_target_panel,
     evaluate_feature_target_matrix,
     summarize_binary_targets,
 )
+
+
+class _PriceWarehouse:
+    def __init__(self, prices: dict[str, pd.DataFrame]):
+        self.prices = prices
+
+    def read_prices(self, symbol, *, provider, start, end):
+        return self.prices.get(symbol, pd.DataFrame()).copy()
 
 
 def test_binary_target_config_defaults_match_optimal_trader_execution_prices() -> None:
@@ -63,8 +72,14 @@ def test_build_event_target_panel_aligns_events_same_day_only() -> None:
         not str(column).startswith("target_event_") or str(column).startswith("target_event_on__")
         for column in target_panel.columns
     )
-    assert target_panel.loc[target_panel["date"].eq(pd.Timestamp("2024-01-02")), "target_event_on__congress_buy"].item() == 0
-    assert target_panel.loc[target_panel["date"].eq(pd.Timestamp("2024-01-03")), "target_event_on__congress_buy"].item() == 1
+    assert (
+        target_panel.loc[target_panel["date"].eq(pd.Timestamp("2024-01-02")), "target_event_on__congress_buy"].item()
+        == 0
+    )
+    assert (
+        target_panel.loc[target_panel["date"].eq(pd.Timestamp("2024-01-03")), "target_event_on__congress_buy"].item()
+        == 1
+    )
 
 
 def test_build_event_target_panel_supports_canonical_event_families() -> None:
@@ -80,9 +95,19 @@ def test_build_event_target_panel_supports_canonical_event_families() -> None:
             "symbol": ["A", "A", "A", "A"],
             "event_date": pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05"]),
             "event_family": ["analyst_estimate", "analyst_rating", "insider", "earnings"],
-            "event_type": ["analyst_estimate_raise", "analyst_downgrade", "insider_buy", "earnings_miss"],
+            "event_type": [
+                "analyst_estimate_raise",
+                "analyst_downgrade",
+                "insider_buy",
+                "earnings_miss",
+            ],
             "event_side": [1, -1, 1, -1],
-            "mirror_event_type": ["analyst_estimate_cut", "analyst_upgrade", "insider_sell", "earnings_beat"],
+            "mirror_event_type": [
+                "analyst_estimate_cut",
+                "analyst_upgrade",
+                "insider_sell",
+                "earnings_beat",
+            ],
         }
     )
     config = BinaryTargetConfig(event_families=("analyst_estimate", "analyst_rating", "insider", "earnings"))
@@ -106,9 +131,7 @@ def test_build_event_target_panel_supports_canonical_event_families() -> None:
 
 
 def test_old_feature_family_names_are_not_event_family_aliases() -> None:
-    feature_panel = pd.DataFrame(
-        {"symbol": ["A"], "date": [pd.Timestamp("2024-01-01")], "feature": [1.0]}
-    )
+    feature_panel = pd.DataFrame({"symbol": ["A"], "date": [pd.Timestamp("2024-01-01")], "feature": [1.0]})
 
     with pytest.raises(ValueError, match="Unsupported event families"):
         build_event_target_panel(
@@ -188,7 +211,13 @@ def test_evaluate_feature_target_matrix_reports_usable_pairs() -> None:
         }
     )
     target_metadata = pd.DataFrame(
-        [{"target": "target_event_on__congress_buy", "target_family": "event", "target_type": "binary"}]
+        [
+            {
+                "target": "target_event_on__congress_buy",
+                "target_family": "event",
+                "target_type": "binary",
+            }
+        ]
     )
 
     matrix, merged = evaluate_feature_target_matrix(
@@ -221,10 +250,26 @@ def test_summarize_binary_targets_uses_actual_event_rows_for_pair_positive_rate(
     )
     target_metadata = pd.DataFrame(
         [
-            {"target": "target_event_on__congress_buy", "target_family": "event", "target_type": "binary"},
-            {"target": "target_event_on__congress_sell", "target_family": "event", "target_type": "binary"},
-            {"target": "target_oracle_trade_entry__YE_k1_long", "target_family": "oracle_trade", "target_type": "binary"},
-            {"target": "target_oracle_trade_entry__YE_k1_short", "target_family": "oracle_trade", "target_type": "binary"},
+            {
+                "target": "target_event_on__congress_buy",
+                "target_family": "event",
+                "target_type": "binary",
+            },
+            {
+                "target": "target_event_on__congress_sell",
+                "target_family": "event",
+                "target_type": "binary",
+            },
+            {
+                "target": "target_oracle_trade_entry__YE_k1_long",
+                "target_family": "oracle_trade",
+                "target_type": "binary",
+            },
+            {
+                "target": "target_oracle_trade_entry__YE_k1_short",
+                "target_family": "oracle_trade",
+                "target_type": "binary",
+            },
         ]
     )
 
@@ -267,8 +312,16 @@ def test_evaluate_feature_target_matrix_uses_actual_event_rows_for_pair_positive
     )
     target_metadata = pd.DataFrame(
         [
-            {"target": "target_event_on__congress_buy", "target_family": "event", "target_type": "binary"},
-            {"target": "target_event_on__congress_sell", "target_family": "event", "target_type": "binary"},
+            {
+                "target": "target_event_on__congress_buy",
+                "target_family": "event",
+                "target_type": "binary",
+            },
+            {
+                "target": "target_event_on__congress_sell",
+                "target_family": "event",
+                "target_type": "binary",
+            },
         ]
     )
 
@@ -356,3 +409,37 @@ def test_mark_oracle_trade_entries_creates_sparse_entry_targets() -> None:
     assert first["target_oracle_trade_entry__YE_k1_any"] == 1
     assert first["target_oracle_trade_entry__YE_k1_short"] == 0
     assert second["target_oracle_trade_entry__YE_k1_any"] == 0
+
+
+def test_oracle_trade_target_collapses_k_values_and_excludes_ambiguous_entries(monkeypatch) -> None:
+    dates = pd.to_datetime(["2024-01-01", "2024-01-02", "2024-01-03"])
+    prices = {"A": pd.DataFrame({"high": [3.0, 4.0, 5.0], "low": [1.0, 2.0, 3.0]}, index=dates)}
+
+    def trade(side: str, date: pd.Timestamp) -> dict[str, object]:
+        return {"side": side, "entry_row": pd.Series(name=date, dtype=float)}
+
+    def fake_solver(price_frames, *, ks, **kwargs):
+        assert tuple(ks) == (1, 3)
+        return {
+            1: {"A": [trade("long", dates[0]), trade("long", dates[1])]},
+            3: {"A": [trade("short", dates[1]), trade("short", dates[2])]},
+        }
+
+    monkeypatch.setattr(
+        "quant_warehouse.research_tools.target_family_eval.solve_side_trades_by_frequency_batched_multi_k",
+        fake_solver,
+    )
+    config = BinaryTargetConfig(oracle_trade_k_by_frequency={"YE": (1, 3)})
+
+    panel, metadata, _ = build_oracle_trade_target_panel(["A"], config, warehouse=_PriceWarehouse(prices))
+
+    target = "target_oracle_trade_entry__long_vs_short"
+    activity = f"_target_activity__{target}"
+    assert list(metadata["target"]) == [target]
+    assert not any("_k1_" in column or "_k3_" in column or column.endswith("_any") for column in panel.columns)
+    assert panel[target].tolist() == [1, 0, 0]
+    assert panel[activity].tolist() == [1, 0, 1]
+    summary = summarize_binary_targets(panel, metadata).set_index("target")
+    assert summary.loc[target, "rate_rows"] == 2
+    assert summary.loc[target, "positive_rows"] == 1
+    assert summary.loc[target, "positive_rate"] == 0.5

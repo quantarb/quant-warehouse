@@ -13,7 +13,9 @@ from quant_warehouse.platforms.data_providers.fmp.target_engineering.event_pairs
     EventPairStore,
     build_event_pairs_from_historical_data,
 )
-from quant_warehouse.platforms.data_providers.fmp.target_engineering.strategy_solver import solve_side_trades_by_frequency_batched_multi_k
+from quant_warehouse.platforms.data_providers.fmp.target_engineering.strategy_solver import (
+    solve_side_trades_by_frequency_batched_multi_k,
+)
 from quant_warehouse.warehouse.api import Warehouse
 
 
@@ -22,7 +24,13 @@ class BinaryTargetConfig:
     provider: str = "fmp"
     start_date: str = "2018-01-01"
     end_date: str | None = None
-    event_families: tuple[str, ...] = ("congress", "insider", "analyst_rating", "price_target", "earnings")
+    event_families: tuple[str, ...] = (
+        "congress",
+        "insider",
+        "analyst_rating",
+        "price_target",
+        "earnings",
+    )
     oracle_trade_k_by_frequency: dict[str, tuple[int, ...]] | None = None
     oracle_trade_min_profit_pct: float = 0.01
     oracle_trade_long_entry_price_col: str = "high"
@@ -83,7 +91,9 @@ def load_fmp_event_pairs(
                 "cached_rows": len(cached),
                 "historical_rows": len(historical),
                 "combined_rows": len(combined),
-                "event_families": tuple(sorted(combined["event_family"].dropna().unique())) if not combined.empty else (),
+                "event_families": tuple(sorted(combined["event_family"].dropna().unique()))
+                if not combined.empty
+                else (),
             }
         )
         if not combined.empty:
@@ -119,7 +129,13 @@ def build_event_target_panel(
     if not aligned_events.empty:
         indicators = (
             aligned_events.assign(value=1)
-            .pivot_table(index=["symbol", "date"], columns="event_type", values="value", aggfunc="max", fill_value=0)
+            .pivot_table(
+                index=["symbol", "date"],
+                columns="event_type",
+                values="value",
+                aggfunc="max",
+                fill_value=0,
+            )
             .reset_index()
         )
         indicators.columns = [
@@ -175,11 +191,7 @@ def build_collapsed_bullish_event_target_panel(
     if usable_events.empty:
         return out, _target_metadata([target_name], "event_collapsed")
 
-    event_activity = (
-        usable_events.assign(activity=1)
-        .groupby(["symbol", "date"], as_index=False)["activity"]
-        .max()
-    )
+    event_activity = usable_events.assign(activity=1).groupby(["symbol", "date"], as_index=False)["activity"].max()
     bullish_activity = (
         usable_events.loc[usable_events["event_type"].astype(str).isin(bullish_event_types)]
         .assign(value=1)
@@ -199,7 +211,12 @@ def build_oracle_trade_target_panel(
     *,
     warehouse: Warehouse | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, float]:
-    """Create sparse oracle-trade entry labels using the batched top-k solver."""
+    """Create one sparse long-vs-short oracle entry target across all configured k values.
+
+    Only actual oracle entry dates participate in the task. Dates selected as
+    both long and short by any configured frequency/k are ambiguous and are
+    excluded from the activity mask rather than assigned an arbitrary side.
+    """
 
     start = perf_counter()
     wh = warehouse or Warehouse()
@@ -219,7 +236,11 @@ def build_oracle_trade_target_panel(
         return empty, _target_metadata([], "oracle_trade"), perf_counter() - start
 
     out = base.copy()
-    target_columns: list[str] = []
+    target_name = "target_oracle_trade_entry__long_vs_short"
+    long_entry_column = "_oracle_trade_long_entry"
+    short_entry_column = "_oracle_trade_short_entry"
+    out[long_entry_column] = 0
+    out[short_entry_column] = 0
     k_by_frequency = config.oracle_trade_k_by_frequency or {"YE": tuple(range(1, 13))}
     row_lookup = _target_row_lookup(out)
     for freq, raw_ks in k_by_frequency.items():
@@ -238,22 +259,22 @@ def build_oracle_trade_target_panel(
             short_exit_price_col=config.oracle_trade_short_exit_price_col,
         )
         for k in ks:
-            long_col = f"target_oracle_trade_entry__{frequency}_k{k}_long"
-            short_col = f"target_oracle_trade_entry__{frequency}_k{k}_short"
-            any_col = f"target_oracle_trade_entry__{frequency}_k{k}_any"
-            for column in (long_col, short_col, any_col):
-                out[column] = 0
-            target_columns.extend([long_col, short_col, any_col])
             _mark_oracle_trade_entries(
                 out,
                 trades_by_k.get(k, {}),
-                long_col=long_col,
-                short_col=short_col,
-                any_col=any_col,
+                long_col=long_entry_column,
+                short_col=short_entry_column,
+                any_col=None,
                 row_lookup=row_lookup,
             )
 
-    metadata = _target_metadata(target_columns, "oracle_trade")
+    long_entries = out[long_entry_column].gt(0)
+    short_entries = out[short_entry_column].gt(0)
+    unambiguous_entries = long_entries ^ short_entries
+    out[target_name] = (long_entries & unambiguous_entries).astype("int8")
+    out[_activity_column(target_name)] = unambiguous_entries.astype("int8")
+    out = out.drop(columns=[long_entry_column, short_entry_column])
+    metadata = _target_metadata([target_name], "oracle_trade")
     return out, metadata, perf_counter() - start
 
 
@@ -304,7 +325,11 @@ def summarize_binary_targets(target_panel: pd.DataFrame, target_metadata: pd.Dat
                 "max_positive_date": positive_frame["date"].max() if not positive_frame.empty else pd.NaT,
             }
         )
-    return pd.DataFrame(rows).sort_values(["target_family", "positive_rows"], ascending=[True, False]).reset_index(drop=True)
+    return (
+        pd.DataFrame(rows)
+        .sort_values(["target_family", "positive_rows"], ascending=[True, False])
+        .reset_index(drop=True)
+    )
 
 
 def evaluate_feature_target_matrix(
@@ -410,7 +435,7 @@ def _paired_target_column(target: str) -> str | None:
     target_name = str(target)
     prefix = "target_event_on__"
     if target_name.startswith(prefix):
-        event_type = target_name[len(prefix):]
+        event_type = target_name[len(prefix) :]
         for pair in EVENT_PAIR_TAXONOMY.values():
             if event_type == pair["positive"]:
                 return f"{prefix}{pair['negative']}"
@@ -440,7 +465,9 @@ def _dedupe_events(events: pd.DataFrame) -> pd.DataFrame:
     out["symbol"] = out["symbol"].astype(str).str.upper()
     out["event_date"] = pd.to_datetime(out["event_date"], errors="coerce").dt.normalize()
     out = out.dropna(subset=["symbol", "event_date", "event_family", "event_type"])
-    return out.drop_duplicates(["symbol", "event_date", "event_family", "event_type", "actor_name", "strength"]).reset_index(drop=True)
+    return out.drop_duplicates(
+        ["symbol", "event_date", "event_family", "event_type", "actor_name", "strength"]
+    ).reset_index(drop=True)
 
 
 def _concat_event_frames(frames: Iterable[pd.DataFrame]) -> pd.DataFrame:
@@ -471,7 +498,9 @@ def _base_panel_dates(feature_panel: pd.DataFrame) -> pd.DataFrame:
     base = feature_panel[["symbol", "date"]].copy()
     base["symbol"] = base["symbol"].astype(str).str.upper()
     base["date"] = pd.to_datetime(base["date"], errors="coerce").dt.normalize()
-    return base.dropna(subset=["symbol", "date"]).drop_duplicates().sort_values(["symbol", "date"]).reset_index(drop=True)
+    return (
+        base.dropna(subset=["symbol", "date"]).drop_duplicates().sort_values(["symbol", "date"]).reset_index(drop=True)
+    )
 
 
 def _align_events_to_panel_dates(base: pd.DataFrame, events: pd.DataFrame, *, tolerance_days: int) -> pd.DataFrame:
@@ -533,7 +562,7 @@ def _mark_oracle_trade_entries(
     *,
     long_col: str,
     short_col: str,
-    any_col: str,
+    any_col: str | None,
     row_lookup: dict[tuple[str, pd.Timestamp], int] | None = None,
 ) -> None:
     if not trades_by_symbol:
@@ -556,7 +585,8 @@ def _mark_oracle_trade_entries(
                 target_panel.at[row_index, long_col] = 1
             elif side == "short":
                 target_panel.at[row_index, short_col] = 1
-            target_panel.at[row_index, any_col] = 1
+            if any_col is not None:
+                target_panel.at[row_index, any_col] = 1
 
 
 def _target_row_lookup(target_panel: pd.DataFrame) -> dict[tuple[str, pd.Timestamp], int]:
