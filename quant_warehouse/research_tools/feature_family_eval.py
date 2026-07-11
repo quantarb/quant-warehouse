@@ -275,11 +275,13 @@ def build_fundamental_feature_panel(
     *,
     warehouse: Warehouse | None = None,
     strategy_sources: Iterable[str] | None = None,
+    observation_dates: pd.DataFrame | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, float]]:
     """Build only the requested fundamental feature families when supplied."""
 
     wh = warehouse or Warehouse()
     wanted = {str(value).strip() for value in strategy_sources or () if str(value).strip()}
+    dates = _normalize_observation_dates(observation_dates)
     start = perf_counter()
     frames: list[pd.DataFrame] = []
     all_specs: list[FeatureSpec] = []
@@ -290,6 +292,7 @@ def build_fundamental_feature_panel(
             symbol,
             config,
             strategy_sources=wanted or None,
+            observation_dates=None if dates is None else dates.loc[dates["symbol"].eq(str(symbol).strip().upper()), "date"],
         )
         diagnostics.append(diag)
         if not frame.empty:
@@ -974,6 +977,7 @@ def _build_symbol_fundamental_panel(
     config: FamilyEvaluationConfig,
     *,
     strategy_sources: set[str] | None = None,
+    observation_dates: pd.Series | None = None,
 ) -> tuple[pd.DataFrame, list[FeatureSpec], dict[str, object]]:
     start = perf_counter()
     inputs = {
@@ -1032,6 +1036,9 @@ def _build_symbol_fundamental_panel(
     panel = pd.concat([panel, feature_df], axis=1)
     for horizon in config.horizons:
         panel[f"forward_return_{horizon}d"] = panel["close"].shift(-horizon) / panel["close"] - 1.0
+    if observation_dates is not None:
+        wanted_dates = pd.DatetimeIndex(pd.to_datetime(observation_dates, errors="coerce").dropna()).normalize()
+        panel = panel.loc[pd.DatetimeIndex(panel["date"]).normalize().isin(wanted_dates)].copy()
     return panel.reset_index(drop=True), specs, {
         "symbol": symbol,
         "status": "ok",

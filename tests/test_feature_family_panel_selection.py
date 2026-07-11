@@ -7,8 +7,8 @@ from quant_warehouse.platforms.data_providers.fmp.feature_engineering.specs impo
 def test_feature_panel_pushes_requested_sources_into_symbol_build_and_filters_context(monkeypatch):
     received = []
 
-    def fake_symbol(_warehouse, symbol, _config, *, strategy_sources=None):
-        received.append(strategy_sources)
+    def fake_symbol(_warehouse, symbol, _config, *, strategy_sources=None, observation_dates=None):
+        received.append((strategy_sources, [] if observation_dates is None else list(observation_dates)))
         frame = pd.DataFrame(
             {
                 "symbol": [symbol],
@@ -33,9 +33,10 @@ def test_feature_panel_pushes_requested_sources_into_symbol_build_and_filters_co
         module.FamilyEvaluationConfig(),
         warehouse=object(),
         strategy_sources=("fmp.wanted",),
+        observation_dates=pd.DataFrame([{"symbol": "AAPL", "date": "2026-07-10"}]),
     )
 
-    assert received == [{"fmp.wanted"}]
+    assert received == [({"fmp.wanted"}, [pd.Timestamp("2026-07-10")])]
     assert list(panel.columns) == ["symbol", "date", "wanted_feature"]
     assert metadata[["source", "family"]].to_dict("records") == [
         {"source": "fmp", "family": "wanted"}
