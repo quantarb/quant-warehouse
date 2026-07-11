@@ -112,12 +112,12 @@ def rating_score(text: str) -> int | None:
 
 
 def is_buy_text(text: str) -> bool:
-    tokens = str(text or "").strip().lower()
+    tokens = f" {str(text or '').strip().lower()} "
     return any(token in tokens for token in ("purchase", "buy", "acquisition", "acquired", " p ", " a "))
 
 
 def is_sell_text(text: str) -> bool:
-    tokens = str(text or "").strip().lower()
+    tokens = f" {str(text or '').strip().lower()} "
     return any(token in tokens for token in ("sale", "sell", "disposition", "disposed", " s ", " d "))
 
 

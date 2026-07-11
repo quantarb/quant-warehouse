@@ -254,6 +254,34 @@ def test_build_event_pairs_from_existing_historical_sections() -> None:
     ]
 
 
+def test_build_insider_event_pairs_uses_stored_acquisition_disposition_codes() -> None:
+    fundamentals = _FakeFundamentals(
+        {
+            "ownership_insider_trading": pd.DataFrame(
+                {
+                    "symbol": ["AAPL", "AAPL"],
+                    "transaction_date": ["2024-01-03", "2024-01-04"],
+                    "transaction_type": ["A-Award", "M-Exempt"],
+                    "acquisition_or_disposition": ["A", "D"],
+                    "owner_name": ["Jane CEO", "John CFO"],
+                    "owner_title": ["Chief Executive Officer", "Chief Financial Officer"],
+                    "securities_transacted": [100, 50],
+                    "transaction_price": [10.0, 20.0],
+                }
+            )
+        }
+    )
+
+    events = build_event_pairs_from_historical_data(
+        "AAPL",
+        fundamentals=fundamentals,
+        event_families=("insider",),
+    )
+
+    assert list(events["event_type"]) == ["insider_buy", "insider_sell"]
+    assert list(events["event_side"]) == [1, -1]
+
+
 def test_build_analyst_estimate_event_pairs_from_existing_historical_sections() -> None:
     fundamentals = _FakeFundamentals(
         {
