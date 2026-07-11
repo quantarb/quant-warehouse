@@ -6,6 +6,8 @@ Gets, normalizes, refreshes, and maintains **point-in-time** market and event da
 
 Framework-agnostic data provider: downstream systems such as `quant-orchestrator`, Zipline, VectorBT, or custom research code consume prepared warehouse datasets. This repo does not run model training or backtests. OpenBB is the vendor/source adapter layer; ArcticDB is the canonical store for historical time-series data.
 
+Prepared datasets can be frozen with `quant_warehouse.lineage.build_dataset_lineage_manifest`. The manifest records a point-in-time availability cutoff, full-frame content fingerprint, schema, universe, recipe fingerprint, and source references. `write_dataset_lineage_manifest` is immutable: an existing path may only contain the identical manifest.
+
 ## Storage Layers
 
 ```text
