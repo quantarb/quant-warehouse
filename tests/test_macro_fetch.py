@@ -3,6 +3,7 @@ from __future__ import annotations
 import pandas as pd
 
 from quant_warehouse.ingest.macro_fetch import (
+    _fetch_fmp_economic_indicator_series_direct,
     _normalize_treasury_column_name,
     _yield_curve_wide_from_long,
     normalize_calendar_frame,
@@ -10,6 +11,51 @@ from quant_warehouse.ingest.macro_fetch import (
     treasury_series_code,
     yield_curve_series_code,
 )
+
+
+def test_direct_fmp_economic_indicator_fetch_normalizes_records(monkeypatch):
+    calls = {}
+
+    def fake_key(*, required=False):
+        calls["required"] = required
+        return "test-key"
+
+    class FakeResponse:
+        def raise_for_status(self):
+            calls["raise_for_status"] = True
+
+        def json(self):
+            return [
+                {"date": "2024-01-01", "value": "1.25"},
+                {"date": "2024-02-01", "value": "1.50"},
+            ]
+
+    def fake_get(url, *, params, timeout):
+        calls.update({"url": url, "params": params, "timeout": timeout})
+        return FakeResponse()
+
+    monkeypatch.setattr("quant_warehouse.ingest.macro_fetch.resolve_fmp_api_key", fake_key)
+    monkeypatch.setattr("requests.get", fake_get)
+
+    frame = _fetch_fmp_economic_indicator_series_direct(
+        "GDP",
+        start_date="2024-01-01",
+        end_date="2024-02-29",
+    )
+
+    assert calls == {
+        "required": True,
+        "url": "https://financialmodelingprep.com/stable/economic-indicators",
+        "params": {
+            "apikey": "test-key",
+            "name": "GDP",
+            "from": "2024-01-01",
+            "to": "2024-02-29",
+        },
+        "timeout": (5, 30),
+        "raise_for_status": True,
+    }
+    assert list(frame["value"]) == [1.25, 1.50]
 
 
 def test_treasury_column_normalization_matches_fmp_codes():

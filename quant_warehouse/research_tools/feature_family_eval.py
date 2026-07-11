@@ -219,7 +219,8 @@ def _pooled_or_noncommon_equity_type(symbol: str, record: dict[str, object]) -> 
         return "fund"
     if security_type in {"mutualfund", "mutual_fund", "fund", "open_end_fund", "closed_end_fund"}:
         return "fund"
-    if payload.get("fund_family") not in (None, "") or payload.get("fundfamily") not in (None, ""):
+    # Catalog rows often include fund_family=NaN; treat missing/NaN as empty (not a fund).
+    if _has_nonempty_text(payload.get("fund_family")) or _has_nonempty_text(payload.get("fundfamily")):
         return "fund"
     if _looks_like_mutual_fund_symbol(symbol):
         return "fund_symbol_pattern"
@@ -227,12 +228,39 @@ def _pooled_or_noncommon_equity_type(symbol: str, record: dict[str, object]) -> 
 
 
 def _clean_token(value: object) -> str:
-    return str(value or "").strip().lower().replace(" ", "_").replace("-", "_")
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    text = str(value).strip().lower()
+    if text in {"nan", "none", "null", "nat"}:
+        return ""
+    return text.replace(" ", "_").replace("-", "_")
+
+
+def _has_nonempty_text(value: object) -> bool:
+    if value is None:
+        return False
+    try:
+        if pd.isna(value):
+            return False
+    except Exception:
+        pass
+    text = str(value).strip()
+    return bool(text) and text.lower() not in {"nan", "none", "null", "nat"}
 
 
 def _truthy(value: object) -> bool:
     if isinstance(value, bool):
         return value
+    try:
+        if pd.isna(value):
+            return False
+    except Exception:
+        pass
     return str(value or "").strip().lower() in {"1", "true", "yes", "y"}
 
 

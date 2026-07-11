@@ -9,6 +9,7 @@ import pandas as pd
 from quant_warehouse.catalog.listing_date import equity_historical_floor
 from quant_warehouse.catalog.store import CatalogStore, SectionState
 from quant_warehouse.warehouse.sections import (
+    ALL_FUNDAMENTAL_SECTIONS,
     DATE_WINDOW_SECTIONS,
     DEFAULT_ECONOMIC_SERIES,
     MACRO_TREASURY_SECTION,
@@ -244,6 +245,11 @@ def historical_fetch_plan(
             return HistoricalFetchPlan(False, "skip", "recent_attempt", (), target_start, target_end)
         if coverage_ratio >= COVERAGE_THRESHOLD and not head_needed:
             return HistoricalFetchPlan(False, "skip", "defer_recent_attempt", (), target_start, target_end)
+        if section in ALL_FUNDAMENTAL_SECTIONS and not head_needed:
+            return HistoricalFetchPlan(False, "skip", "recent_attempt", (), target_start, target_end)
+
+    if section in PERIOD_FUNDAMENTAL_SECTIONS and is_recent_enough and not head_needed:
+        return HistoricalFetchPlan(False, "skip", "fresh", (), target_start, target_end)
 
     if has_date_window and max_date is not None and min_date is not None:
         if coverage_ratio >= COVERAGE_THRESHOLD:
@@ -478,9 +484,13 @@ def macro_refresh_needs_update(
     state = catalog.get(symbol=symbol.strip().upper(), section=section, provider=provider)
     if state is None or int(state.row_count) <= 0:
         return True, "missing"
+    hours = _hours_since(_parse_timestamp(state.last_fetched_at))
+    recent_attempt = hours is not None and hours < max(0.0, float(skip_recent_hours))
     if history_start_date is not None:
         min_date = _parse_date(state.min_date)
         if min_date is not None and min_date > history_start_date:
+            if recent_attempt:
+                return False, "recent_attempt"
             return True, "incomplete_early_history"
     if _is_below_min_historical_date(state.min_date):
         return True, "below_min_historical_date"
@@ -489,8 +499,7 @@ def macro_refresh_needs_update(
         return True, "missing_max_date"
     if max_date < target_end_date:
         return True, "stale_max_date"
-    hours = _hours_since(_parse_timestamp(state.last_fetched_at))
-    if hours is not None and hours < max(0.0, float(skip_recent_hours)):
+    if recent_attempt:
         return False, "recent_attempt"
     return False, "fresh"
 

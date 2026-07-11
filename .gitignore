@@ -12,3 +12,4 @@ build/
 research/
 notebooks/outputs/
 notebooks/.ipynb_checkpoints/
+artifacts/
