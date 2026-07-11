@@ -28,6 +28,11 @@ from quant_warehouse.platforms.data_providers.thetadata.target_engineering.optio
     solve_long_only_mean_variance_weights,
     solve_mean_variance_weights,
 )
+from quant_warehouse.platforms.data_providers.thetadata.target_engineering.oracle_option_labels import (
+    OracleOptionLabelPanelResult,
+    OracleOptionLabelPanelSpec,
+    build_oracle_option_label_panel,
+)
 from quant_warehouse.platforms.data_providers.thetadata.target_engineering.options import (
     build_option_best_return_labels,
     build_option_mean_variance_labels,
@@ -40,6 +45,8 @@ __all__ = [
     "OptionLabelSpec",
     "OptionMlDatasetResult",
     "OptionMlDatasetSpec",
+    "OracleOptionLabelPanelResult",
+    "OracleOptionLabelPanelSpec",
     "ThetaDataDownloadSpec",
     "build_option_best_return_labels",
     "build_option_label_panel",
@@ -47,6 +54,7 @@ __all__ = [
     "build_option_mean_variance_labels",
     "build_option_ml_dataset",
     "build_option_return_rank_labels",
+    "build_oracle_option_label_panel",
     "compute_return_covariance_matrix",
     "download_option_snapshots_for_range",
     "load_cached_snapshots_for_trade_window",
