@@ -8,6 +8,8 @@ Framework-agnostic data provider: downstream systems such as `quant-orchestrator
 
 Prepared datasets can be frozen with `quant_warehouse.lineage.build_dataset_lineage_manifest`. The manifest records a point-in-time availability cutoff, full-frame content fingerprint, schema, universe, recipe fingerprint, and source references. `write_dataset_lineage_manifest` is immutable: an existing path may only contain the identical manifest.
 
+`quant_warehouse.research_tools.build_security_context_panel` produces attribution dimensions separately from predictive feature columns. Calendar, historical market-cap, rolling dollar-liquidity, and rolling volatility dimensions are point-in-time. Sector and industry currently come from the latest cached issuer profile, so every row explicitly reports `classification_temporality=latest_known_applied_historically` and the profile observation timestamp.
+
 ## Storage Layers
 
 ```text

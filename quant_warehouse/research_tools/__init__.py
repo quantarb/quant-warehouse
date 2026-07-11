@@ -25,6 +25,10 @@ from quant_warehouse.research_tools.feature_family_eval import (
     evaluate_feature_families,
     screen_fmp_equity_universe,
 )
+from quant_warehouse.research_tools.security_context import (
+    SecurityContextSpec,
+    build_security_context_panel,
+)
 from quant_warehouse.research_tools.target_family_eval import (
     BinaryTargetConfig,
     build_collapsed_bullish_event_target_panel,
@@ -47,12 +51,14 @@ __all__ = [
     "add_fmp_equity_profile_feature_family",
     "add_fmp_event_context_feature_families",
     "FamilyEvaluationConfig",
+    "SecurityContextSpec",
     "FeatureSpec",
     "build_event_context",
     "build_event_feature_text_dataset",
     "build_collapsed_bullish_event_target_panel",
     "build_event_target_panel",
     "build_fundamental_feature_panel",
+    "build_security_context_panel",
     "build_oracle_trade_target_panel",
     "cap_features_by_quality",
     "combine_target_panels",
