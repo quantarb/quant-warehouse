@@ -38,8 +38,13 @@ def build_price_ta_classic_feature_families(
     df_prices: pd.DataFrame,
     *,
     families: Iterable[str] | None = None,
+    mode: str = "curated",
 ) -> dict[str, BuiltFeatureSet]:
-    """Build split pandas-ta-classic technical feature families for a single symbol."""
+    """Build split pandas-ta-classic technical families.
+
+    ``curated`` is the compact V1 trading set. ``all`` appends every supported
+    pandas-ta-classic builtin for exploratory research.
+    """
 
     if df_prices.empty:
         return _empty_family_sets()
@@ -49,9 +54,14 @@ def build_price_ta_classic_feature_families(
         return _empty_family_sets()
 
     wanted = {str(value).strip() for value in families or () if str(value).strip()}
+    normalized_mode = str(mode).strip().lower()
+    if normalized_mode not in {"curated", "all"}:
+        raise ValueError("mode must be 'curated' or 'all'")
     result: dict[str, BuiltFeatureSet] = {}
     with _suppress_pandas_ta_classic_row_warnings():
-        for family_name, specs in _indicator_specs(ta).items():
+        for family_name, specs in _indicator_specs(
+            ta, include_all_builtins=normalized_mode == "all"
+        ).items():
             if wanted and family_name not in wanted:
                 continue
             columns: dict[str, pd.Series] = {}
@@ -282,7 +292,9 @@ def _to_built_feature_set(symbol: str, frame: pd.DataFrame, feature_cols: list[s
     return BuiltFeatureSet(df=out, feature_cols=list(feature_cols))
 
 
-def _indicator_specs(ta) -> dict[str, tuple[TaIndicatorSpec, ...]]:
+def _indicator_specs(
+    ta, *, include_all_builtins: bool = False
+) -> dict[str, tuple[TaIndicatorSpec, ...]]:
     specs: dict[str, list[TaIndicatorSpec]] = {
         "technical_candles": list(_candlestick_specs(ta)),
         "technical_cycles": [
@@ -313,10 +325,7 @@ def _indicator_specs(ta) -> dict[str, tuple[TaIndicatorSpec, ...]]:
         "technical_momentum": [
             TaIndicatorSpec("rsi_14", "rsi", ("close",), {"length": 14}, min_rows=14),
             TaIndicatorSpec("macd", "macd", ("close",), min_rows=26),
-            TaIndicatorSpec("macdext", "macdext", ("close",), min_rows=26),
-            TaIndicatorSpec("macdfix", "macdfix", ("close",), min_rows=26),
             TaIndicatorSpec("stoch", "stoch", ("high", "low", "close"), min_rows=14),
-            TaIndicatorSpec("stochf", "stochf", ("high", "low", "close"), min_rows=14),
             TaIndicatorSpec("stochrsi", "stochrsi", ("close",), {"length": 14, "rsi_length": 14}, min_rows=14),
             TaIndicatorSpec("cci_20", "cci", ("high", "low", "close"), {"length": 20}, min_rows=20),
             TaIndicatorSpec("roc_10", "roc", ("close",), {"length": 10}, min_rows=10),
@@ -336,7 +345,6 @@ def _indicator_specs(ta) -> dict[str, tuple[TaIndicatorSpec, ...]]:
             TaIndicatorSpec("stc", "stc", ("close",), min_rows=50),
             TaIndicatorSpec("tsi", "tsi", ("close",), min_rows=25),
             TaIndicatorSpec("trix", "trix", ("close",), min_rows=18),
-            TaIndicatorSpec("trixh", "trixh", ("close",), min_rows=18),
             TaIndicatorSpec("uo", "uo", ("high", "low", "close"), min_rows=28),
             TaIndicatorSpec("ui_14", "ui", ("close",), {"length": 14}, min_rows=14),
             TaIndicatorSpec("natr_14", "natr", ("high", "low", "close"), {"length": 14}, min_rows=14),
@@ -350,12 +358,9 @@ def _indicator_specs(ta) -> dict[str, tuple[TaIndicatorSpec, ...]]:
             TaIndicatorSpec("ema_12", "ema", ("close",), {"length": 12}, min_rows=12),
             TaIndicatorSpec("ema_26", "ema", ("close",), {"length": 26}, min_rows=26),
             TaIndicatorSpec("ema_50", "ema", ("close",), {"length": 50}, min_rows=50),
-            TaIndicatorSpec("dema_20", "dema", ("close",), {"length": 20}, min_rows=20),
-            TaIndicatorSpec("tema_20", "tema", ("close",), {"length": 20}, min_rows=20),
             TaIndicatorSpec("hma_20", "hma", ("close",), {"length": 20}, min_rows=20),
             TaIndicatorSpec("wma_20", "wma", ("close",), {"length": 20}, min_rows=20),
             TaIndicatorSpec("kama_20", "kama", ("close",), {"length": 20}, min_rows=20),
-            TaIndicatorSpec("alma_20", "alma", ("close",), {"length": 20}, min_rows=20),
             TaIndicatorSpec("vwma_20", "vwma", ("close", "volume"), {"length": 20}, min_rows=20),
             TaIndicatorSpec("vwap", "vwap", ("high", "low", "close", "volume"), min_rows=2),
             TaIndicatorSpec("bbands_20", "bbands", ("close",), {"length": 20}, min_rows=20),
@@ -363,12 +368,8 @@ def _indicator_specs(ta) -> dict[str, tuple[TaIndicatorSpec, ...]]:
             TaIndicatorSpec("donchian_20", "donchian", ("high", "low"), {"lower_length": 20, "upper_length": 20}, min_rows=20),
             TaIndicatorSpec("supertrend_7_3", "supertrend", ("high", "low", "close"), {"length": 7, "multiplier": 3.0}, min_rows=7),
             TaIndicatorSpec("psar", "psar", ("high", "low", "close")),
-            TaIndicatorSpec("rma_20", "rma", ("close",), {"length": 20}, min_rows=20),
-            TaIndicatorSpec("vidya_14", "vidya", ("close",), {"length": 14}, min_rows=14),
-            TaIndicatorSpec("zlma_20", "zlma", ("close",), {"length": 20}, min_rows=20),
             TaIndicatorSpec("midpoint_20", "midpoint", ("close",), {"length": 20}, min_rows=20),
             TaIndicatorSpec("midprice_20", "midprice", ("high", "low"), {"length": 20}, min_rows=20),
-            TaIndicatorSpec("amat", "amat", ("close",), {"fast": 8, "slow": 21, "lookback": 2}, min_rows=21),
             TaIndicatorSpec("hl2", "hl2", ("high", "low")),
             TaIndicatorSpec("hlc3", "hlc3", ("high", "low", "close")),
             TaIndicatorSpec("ohlc4", "ohlc4", ("open", "high", "low", "close")),
@@ -384,17 +385,18 @@ def _indicator_specs(ta) -> dict[str, tuple[TaIndicatorSpec, ...]]:
         ],
     }
 
-    existing = {spec.fn_name for family_specs in specs.values() for spec in family_specs}
-    all_builtin_names = sorted({fn for functions in ta.Category.values() for fn in functions})
-    for fn_name in all_builtin_names:
-        if fn_name in existing:
-            continue
-        family_name = _family_for_builtin_indicator(ta, fn_name)
-        spec = _auto_indicator_spec(ta, fn_name)
-        if spec is None:
-            continue
-        specs[family_name].append(spec)
-        existing.add(fn_name)
+    if include_all_builtins:
+        existing = {spec.fn_name for family_specs in specs.values() for spec in family_specs}
+        all_builtin_names = sorted({fn for functions in ta.Category.values() for fn in functions})
+        for fn_name in all_builtin_names:
+            if fn_name in existing:
+                continue
+            family_name = _family_for_builtin_indicator(ta, fn_name)
+            spec = _auto_indicator_spec(ta, fn_name)
+            if spec is None:
+                continue
+            specs[family_name].append(spec)
+            existing.add(fn_name)
 
     return {family_name: tuple(family_specs) for family_name, family_specs in specs.items()}
 

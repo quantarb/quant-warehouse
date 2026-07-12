@@ -103,6 +103,23 @@ def test_ta_classic_feature_families_are_split_and_prefixed():
         )
 
 
+def test_ta_classic_curated_mode_is_the_bounded_v1_indicator_set():
+    from quant_warehouse.platforms.data_providers.fmp.feature_engineering.ta_classic_technical import (
+        _import_pandas_ta_classic,
+        _indicator_specs,
+    )
+
+    ta = _import_pandas_ta_classic()
+    curated = _indicator_specs(ta)
+    exhaustive = _indicator_specs(ta, include_all_builtins=True)
+    curated_names = {spec.fn_name for specs in curated.values() for spec in specs}
+    exhaustive_names = {spec.fn_name for specs in exhaustive.values() for spec in specs}
+
+    assert curated_names < exhaustive_names
+    assert {"rsi", "macd", "stoch", "bbands", "drawdown"}.issubset(curated_names)
+    assert {"macdext", "macdfix", "stochf", "dema", "tema", "alma"}.isdisjoint(curated_names)
+
+
 def test_build_time_features_matches_target_index():
     target_index = pd.MultiIndex.from_product(
         [pd.date_range("2024-01-01", periods=3), ["AAPL"]],
