@@ -3,12 +3,14 @@ from __future__ import annotations
 EQUITY_PRICES_LIBRARY = "prices"
 ETF_PRICES_LIBRARY = "etf_prices"
 FUND_PRICES_LIBRARY = "fund_prices"
+COMPANY_NEWS_LIBRARY = "company_news"
 
 EQUITY_PRICES_SECTION = "prices"
 ETF_PRICES_SECTION = "etf_prices"
 FUND_PRICES_SECTION = "fund_prices"
 EQUITY_PROFILE_SECTION = "profile"
 ETF_PROFILE_SECTION = "etf_profile"
+COMPANY_NEWS_SECTION = "company_news"
 
 # OpenBB equity.fundamental.* historical routes (one Arctic library per section).
 EQUITY_FUNDAMENTAL_SECTIONS: tuple[str, ...] = (

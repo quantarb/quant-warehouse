@@ -62,6 +62,7 @@ SECTION_ROUTES: dict[str, str] = {
     "equity_calendar_splits": "equity.calendar.splits",
     "equity_calendar_ipo": "equity.calendar.ipo",
     "options_eod": "derivatives.options.chains",
+    "company_news": "news.company",
 }
 
 EQUITY_FUNDAMENTAL_ROUTE_SECTIONS: tuple[str, ...] = EQUITY_FUNDAMENTAL_SECTIONS

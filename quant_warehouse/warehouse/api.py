@@ -14,6 +14,7 @@ from quant_warehouse.warehouse.fundamentals import FundamentalsStore
 from quant_warehouse.warehouse.prices import EQUITY_PRICE_ADJUSTMENT, PricesStore
 from quant_warehouse.warehouse.macro import MacroStore
 from quant_warehouse.warehouse.market_prices import MarketPricesStore
+from quant_warehouse.warehouse.news import CompanyNewsStore
 from quant_warehouse.warehouse.profile import ProfileStore
 from quant_warehouse.warehouse.sections import EQUITY_FUNDAMENTAL_SECTIONS, ETF_FUNDAMENTAL_SECTIONS
 
@@ -57,6 +58,11 @@ class Warehouse:
             catalog=shared_catalog,
         )
         self.equity_calendar = EquityCalendarStore(
+            self.config,
+            backend=shared_backend,
+            catalog=shared_catalog,
+        )
+        self.news = CompanyNewsStore(
             self.config,
             backend=shared_backend,
             catalog=shared_catalog,
@@ -238,6 +244,16 @@ class Warehouse:
         if df is None or df.empty:
             return pd.DataFrame()
         return _slice_dates(df, start=start, end=end)
+
+    def read_news(
+        self,
+        symbol: str,
+        *,
+        provider: str = "fmp",
+        start: str | None = None,
+        end: str | None = None,
+    ) -> pd.DataFrame:
+        return self.news.read(symbol, provider=provider, start=start, end=end)
 
     def refresh_macro(
         self,
