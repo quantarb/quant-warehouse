@@ -102,3 +102,35 @@ def test_build_oracle_option_label_panel_reports_missing_endpoint(monkeypatch):
 def test_build_oracle_option_label_panel_requires_trade_columns():
     with pytest.raises(KeyError, match="exit_date"):
         build_oracle_option_label_panel(pd.DataFrame([{"symbol": "AAPL", "side": "long", "entry_date": "2026-01-02"}]))
+
+
+def test_entry_candidates_must_survive_oracle_exit_without_default_dte_ceiling():
+    chain = pd.DataFrame(
+        [
+            {
+                "option_type": "call",
+                "bid": 1.0,
+                "ask": 1.2,
+                "expiration": "2026-03-01",
+                "contract_symbol": "EXPIRES_BEFORE_EXIT",
+            },
+            {
+                "option_type": "call",
+                "bid": 2.0,
+                "ask": 2.2,
+                "expiration": "2026-12-31",
+                "contract_symbol": "COVERS_LONG_TRADE",
+            },
+        ]
+    )
+
+    result = oracle_option_labels._filter_entry_candidates(
+        chain,
+        option_type="call",
+        entry_date=pd.Timestamp("2026-01-02"),
+        exit_date=pd.Timestamp("2026-06-30"),
+        max_dte=None,
+    )
+
+    assert result["contract_symbol"].tolist() == ["COVERS_LONG_TRADE"]
+    assert result["dte"].iloc[0] > 90

@@ -28,7 +28,7 @@ class OracleOptionLabelPanelSpec:
     """Configuration for labels built from oracle equity trade endpoints."""
 
     max_trades: int = 0
-    max_dte: int = 90
+    max_dte: int | None = None
     target_dte: int = 90
     progress_every: int = 50
 
@@ -109,6 +109,7 @@ def build_oracle_option_label_panel(
                 entry_chain,
                 option_type=option_type,
                 entry_date=entry_date,
+                exit_date=exit_date,
                 max_dte=config.max_dte,
             )
             if entry_candidates.empty:
@@ -121,7 +122,7 @@ def build_oracle_option_label_panel(
                         "symbol": symbol,
                         "side": side,
                         "entry_date": entry_date.date().isoformat(),
-                        "reason": "no_entry_candidates_after_type_bid_ask_max_dte",
+                        "reason": "no_entry_candidates_covering_oracle_exit",
                     },
                 )
                 continue
@@ -210,7 +211,8 @@ def _filter_entry_candidates(
     *,
     option_type: str,
     entry_date: pd.Timestamp,
-    max_dte: int,
+    exit_date: pd.Timestamp,
+    max_dte: int | None,
 ) -> pd.DataFrame:
     if chain is None or chain.empty or not {"option_type", "bid", "ask", "expiration"}.issubset(chain.columns):
         return pd.DataFrame()
@@ -222,7 +224,10 @@ def _filter_entry_candidates(
     out = out.loc[out["bid"].ge(0) & out["ask"].gt(0) & out["ask"].ge(out["bid"])].copy()
     out["expiration"] = pd.to_datetime(out["expiration"], errors="coerce").dt.normalize()
     out["dte"] = (out["expiration"] - pd.Timestamp(entry_date).normalize()).dt.days
-    return out.loc[out["dte"].gt(0) & out["dte"].le(int(max_dte))].reset_index(drop=True)
+    keep = out["dte"].gt(0) & out["expiration"].ge(pd.Timestamp(exit_date).normalize())
+    if max_dte is not None and int(max_dte) > 0:
+        keep &= out["dte"].le(int(max_dte))
+    return out.loc[keep].reset_index(drop=True)
 
 
 def _panel_rows(
@@ -358,9 +363,9 @@ def _initial_summary(work: pd.DataFrame, spec: OracleOptionLabelPanelSpec) -> di
         "thetadata_mode": "arctic_cache_only_download_missing=False",
         "skip_policy": "skip_oracle_trade_if_entry_or_exit_option_chain_missing",
         "pricing_convention": "buy_ask_entry_sell_bid_exit_no_intermediate_marks",
-        "entry_filters": "option_type + bid/ask + max_dte_from_entry",
+        "entry_filters": "option_type + bid/ask + expiration_covers_oracle_exit + optional_max_dte",
         "exit_policy": "unfiltered_existence_match_only",
-        "max_dte": int(spec.max_dte),
+        "max_dte": None if spec.max_dte is None else int(spec.max_dte),
     }
 
 
