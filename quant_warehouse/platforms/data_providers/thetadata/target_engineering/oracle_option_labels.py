@@ -30,6 +30,7 @@ class OracleOptionLabelPanelSpec:
     max_trades: int = 0
     max_dte: int | None = None
     target_dte: int = 90
+    max_candidates_per_trade: int = 128
     progress_every: int = 50
 
 
@@ -92,6 +93,8 @@ def build_oracle_option_label_panel(
             }
         )
         snapshots = _normalized_cached_snapshots(symbol, needed_dates)
+        entry_candidate_cache: dict[tuple[pd.Timestamp, str], pd.DataFrame] = {}
+        entry_feature_cache: dict[tuple[pd.Timestamp, str], pd.DataFrame] = {}
         for trade in symbol_trades.to_dict("records"):
             side = str(trade["side"])
             option_type = "call" if side == "long" else "put"
@@ -105,12 +108,16 @@ def build_oracle_option_label_panel(
                 _record_missing_endpoint(summary, trade, side, entry_date, exit_date, entry_ok, exit_ok)
                 continue
 
-            entry_candidates = _filter_entry_candidates(
-                entry_chain,
-                option_type=option_type,
-                entry_date=entry_date,
-                max_dte=config.max_dte,
-            )
+            entry_key = (entry_date, option_type)
+            entry_candidates = entry_candidate_cache.get(entry_key)
+            if entry_candidates is None:
+                entry_candidates = _filter_entry_candidates(
+                    entry_chain,
+                    option_type=option_type,
+                    entry_date=entry_date,
+                    max_dte=config.max_dte,
+                )
+                entry_candidate_cache[entry_key] = entry_candidates
             if entry_candidates.empty:
                 summary["trades_skipped_empty_intersection"] += 1
                 _append_limited(
@@ -133,11 +140,14 @@ def build_oracle_option_label_panel(
             )
             label_frame = pd.DataFrame(label_result.option_rows)
 
-            featured = build_option_contract_features(
-                entry_candidates,
-                underlying_price=_median_underlying_price(entry_candidates),
-                target_dte=int(config.target_dte),
-            ).df
+            featured = entry_feature_cache.get(entry_key)
+            if featured is None:
+                featured = build_option_contract_features(
+                    entry_candidates,
+                    underlying_price=_median_underlying_price(entry_candidates),
+                    target_dte=int(config.target_dte),
+                ).df
+                entry_feature_cache[entry_key] = featured
             panel_part = _panel_rows(
                 label_frame,
                 trade=trade,
@@ -159,6 +169,11 @@ def build_oracle_option_label_panel(
                 summary["trades_skipped_empty_intersection"] += 1
                 continue
 
+            panel_part = _unified_behavior_rank(panel_part)
+            summary["option_rows_before_candidate_bound"] += int(len(panel_part))
+            panel_part = _select_diverse_labeled_candidates(
+                panel_part, int(config.max_candidates_per_trade)
+            )
             panel_parts.append(panel_part)
             summary["trades_labeled"] += 1
             summary["option_rows"] += int(len(panel_part))
@@ -171,7 +186,6 @@ def build_oracle_option_label_panel(
         return OracleOptionLabelPanelResult(summary=summary)
 
     panel = pd.concat(panel_parts, ignore_index=True, sort=False)
-    panel = _unified_behavior_rank(panel)
     summary.update(
         {
             "symbols": int(panel["symbol"].nunique()),
@@ -201,13 +215,18 @@ def _normalize_side(value: object) -> str | None:
 def _normalized_cached_snapshots(symbol: str, dates: list[pd.Timestamp]) -> dict[pd.Timestamp, pd.DataFrame]:
     raw = load_thetadata_option_snapshots(symbol, dates, use_cache=True, download_missing=False)
     snapshots: dict[pd.Timestamp, pd.DataFrame] = {}
-    for date, frame in raw.items():
+
+    def normalize(item: tuple[pd.Timestamp, pd.DataFrame]) -> tuple[pd.Timestamp, pd.DataFrame | None]:
+        date, frame = item
         try:
             normalized = normalize_thetadata_option_chain(frame)
         except (KeyError, TypeError, ValueError):
-            continue
+            normalized = None
+        return pd.Timestamp(date).normalize(), normalized
+
+    for date, normalized in map(normalize, raw.items()):
         if normalized is not None:
-            snapshots[pd.Timestamp(date).normalize()] = normalized
+            snapshots[date] = normalized
     return snapshots
 
 
@@ -303,6 +322,36 @@ def _unified_behavior_rank(panel: pd.DataFrame) -> pd.DataFrame:
         work["rank_y"] = ordinal / float(len(work))
         parts.append(work)
     return pd.concat(parts, ignore_index=True, sort=False)
+
+
+def _select_diverse_labeled_candidates(frame: pd.DataFrame, limit: int) -> pd.DataFrame:
+    """Bound stored rows after full-chain ranking while preserving broad coverage."""
+
+    if limit <= 0 or len(frame) <= limit:
+        return frame.copy()
+    work = frame.copy()
+    work["_source_order"] = np.arange(len(work))
+    core_size = max(1, limit // 4)
+    core = work.sort_values(
+        ["fixed_near_atm_score", "_source_order"],
+        ascending=[False, True],
+        kind="stable",
+    ).head(core_size)
+    remaining = work.drop(index=core.index)
+    coverage_columns = [
+        column for column in ("dte", "moneyness", "spread_pct", "rank_y") if column in remaining
+    ]
+    for column in coverage_columns:
+        remaining[column] = pd.to_numeric(remaining[column], errors="coerce")
+    remaining = remaining.sort_values(
+        [*coverage_columns, "_source_order"],
+        kind="stable",
+        na_position="last",
+    )
+    coverage_size = min(limit - len(core), len(remaining))
+    positions = np.linspace(0, len(remaining) - 1, num=coverage_size, dtype=int)
+    selected = pd.concat([core, remaining.iloc[positions]], ignore_index=True, sort=False)
+    return selected.drop(columns=["_source_order"])
 
 
 def _panel_rows(
@@ -433,6 +482,7 @@ def _initial_summary(work: pd.DataFrame, spec: OracleOptionLabelPanelSpec) -> di
         "trades_skipped_missing_historical_options": 0,
         "trades_skipped_empty_intersection": 0,
         "option_rows": 0,
+        "option_rows_before_candidate_bound": 0,
         "symbols": 0,
         "skipped_missing_options": [],
         "labeled_trade_ids": [],
@@ -443,6 +493,7 @@ def _initial_summary(work: pd.DataFrame, spec: OracleOptionLabelPanelSpec) -> di
         "entry_filters": "option_type + bid/ask + optional_max_dte",
         "exit_policy": "single_rank_space: realized_exit_return_then_early_expiration_closeness",
         "max_dte": None if spec.max_dte is None else int(spec.max_dte),
+        "max_candidates_per_trade": int(spec.max_candidates_per_trade),
     }
 
 

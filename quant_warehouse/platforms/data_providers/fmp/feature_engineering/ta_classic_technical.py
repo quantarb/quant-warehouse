@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import contextlib
-import logging
 import inspect
+import logging
 import warnings
 from dataclasses import dataclass
 from typing import Callable, Iterable
@@ -38,13 +38,8 @@ def build_price_ta_classic_feature_families(
     df_prices: pd.DataFrame,
     *,
     families: Iterable[str] | None = None,
-    mode: str = "curated",
 ) -> dict[str, BuiltFeatureSet]:
-    """Build split pandas-ta-classic technical families.
-
-    ``curated`` is the compact V1 trading set. ``all`` appends every supported
-    pandas-ta-classic builtin for exploratory research.
-    """
+    """Build the curated split pandas-ta-classic technical families."""
 
     if df_prices.empty:
         return _empty_family_sets()
@@ -54,14 +49,9 @@ def build_price_ta_classic_feature_families(
         return _empty_family_sets()
 
     wanted = {str(value).strip() for value in families or () if str(value).strip()}
-    normalized_mode = str(mode).strip().lower()
-    if normalized_mode not in {"curated", "all"}:
-        raise ValueError("mode must be 'curated' or 'all'")
     result: dict[str, BuiltFeatureSet] = {}
     with _suppress_pandas_ta_classic_row_warnings():
-        for family_name, specs in _indicator_specs(
-            ta, include_all_builtins=normalized_mode == "all"
-        ).items():
+        for family_name, specs in _indicator_specs(ta).items():
             if wanted and family_name not in wanted:
                 continue
             columns: dict[str, pd.Series] = {}
@@ -292,9 +282,7 @@ def _to_built_feature_set(symbol: str, frame: pd.DataFrame, feature_cols: list[s
     return BuiltFeatureSet(df=out, feature_cols=list(feature_cols))
 
 
-def _indicator_specs(
-    ta, *, include_all_builtins: bool = False
-) -> dict[str, tuple[TaIndicatorSpec, ...]]:
+def _indicator_specs(ta) -> dict[str, tuple[TaIndicatorSpec, ...]]:
     specs: dict[str, list[TaIndicatorSpec]] = {
         "technical_candles": list(_candlestick_specs(ta)),
         "technical_cycles": [
@@ -384,19 +372,6 @@ def _indicator_specs(
             TaIndicatorSpec("drawdown", "drawdown", ("close",)),
         ],
     }
-
-    if include_all_builtins:
-        existing = {spec.fn_name for family_specs in specs.values() for spec in family_specs}
-        all_builtin_names = sorted({fn for functions in ta.Category.values() for fn in functions})
-        for fn_name in all_builtin_names:
-            if fn_name in existing:
-                continue
-            family_name = _family_for_builtin_indicator(ta, fn_name)
-            spec = _auto_indicator_spec(ta, fn_name)
-            if spec is None:
-                continue
-            specs[family_name].append(spec)
-            existing.add(fn_name)
 
     return {family_name: tuple(family_specs) for family_name, family_specs in specs.items()}
 

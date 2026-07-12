@@ -56,6 +56,8 @@
 - Prefer vectorized Pandas/NumPy and batched warehouse reads/writes.
 - Add GPU/CUDA acceleration only for data transformations where it materially helps. The FMP oracle-trade target path intentionally does not have a CUDA implementation because the measured version was not materially faster than the CPU/Numba path.
 - Do not move model training or backtesting into this repo for CUDA reasons; those belong in `quant-orchestrator`.
+- The six curated technical feature families are the sole production technical contract. Do not restore an exhaustive/all-indicator mode, expose a mode switch, or add a second bloated technical builder.
+- Public feature-panel builders must use the curated technical set by default and support observation-date projection so downstream workflows do not materialize unnecessary full-history panels.
 
 ## Git Hygiene
 

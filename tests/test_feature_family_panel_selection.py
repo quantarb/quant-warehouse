@@ -53,8 +53,8 @@ def test_technical_panel_builds_requested_family_and_only_observation_date(monke
 
     received = []
 
-    def fake_ta(symbol, prices, *, families=None, mode="curated"):
-        received.append((families, mode))
+    def fake_ta(symbol, prices, *, families=None):
+        received.append(families)
         index = pd.MultiIndex.from_product(
             [pd.to_datetime(["2026-07-09", "2026-07-10"]), [symbol]],
             names=["date", "symbol"],
@@ -78,7 +78,7 @@ def test_technical_panel_builds_requested_family_and_only_observation_date(monke
         warehouse=Warehouse(),
     )
 
-    assert received == [({"technical_momentum"}, "curated")]
+    assert received == [{"technical_momentum"}]
     assert panel[["symbol", "date"]].to_dict("records") == [
         {"symbol": "AAPL", "date": pd.Timestamp("2026-07-10")}
     ]

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from quant_warehouse.platforms.data_providers.fmp.feature_engineering import (
     TA_CLASSIC_FAMILY_PREFIXES,
@@ -103,21 +104,19 @@ def test_ta_classic_feature_families_are_split_and_prefixed():
         )
 
 
-def test_ta_classic_curated_mode_is_the_bounded_v1_indicator_set():
+def test_ta_classic_exposes_only_the_bounded_v1_indicator_set():
     from quant_warehouse.platforms.data_providers.fmp.feature_engineering.ta_classic_technical import (
         _import_pandas_ta_classic,
         _indicator_specs,
     )
 
     ta = _import_pandas_ta_classic()
-    curated = _indicator_specs(ta)
-    exhaustive = _indicator_specs(ta, include_all_builtins=True)
-    curated_names = {spec.fn_name for specs in curated.values() for spec in specs}
-    exhaustive_names = {spec.fn_name for specs in exhaustive.values() for spec in specs}
+    curated_names = {spec.fn_name for specs in _indicator_specs(ta).values() for spec in specs}
 
-    assert curated_names < exhaustive_names
     assert {"rsi", "macd", "stoch", "bbands", "drawdown"}.issubset(curated_names)
     assert {"macdext", "macdfix", "stochf", "dema", "tema", "alma"}.isdisjoint(curated_names)
+    with pytest.raises(TypeError, match="unexpected keyword argument 'mode'"):
+        build_price_ta_classic_feature_families("AAPL", _price_frame(90), mode="all")
 
 
 def test_build_time_features_matches_target_index():

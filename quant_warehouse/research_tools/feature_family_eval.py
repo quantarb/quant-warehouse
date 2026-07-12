@@ -329,7 +329,6 @@ def build_technical_feature_panel(
     observation_dates: pd.DataFrame | None = None,
     warehouse: Warehouse | None = None,
     max_workers: int = 1,
-    ta_mode: str = "curated",
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, float]]:
     """Build requested technical families and optionally retain only required symbol/dates."""
 
@@ -362,7 +361,6 @@ def build_technical_feature_panel(
                 config,
                 requested=requested,
                 wanted_ta=wanted_ta,
-                ta_mode=ta_mode,
                 observation_dates=None
                 if dates is None
                 else dates.loc[dates["symbol"].eq(symbol), "date"],
@@ -376,7 +374,6 @@ def build_technical_feature_panel(
                 config,
                 tuple(sorted(requested)),
                 tuple(sorted(wanted_ta)),
-                str(ta_mode),
                 None
                 if dates is None
                 else tuple(dates.loc[dates["symbol"].eq(symbol), "date"].tolist()),
@@ -407,18 +404,16 @@ def _build_symbol_technical_panel_worker(
         FamilyEvaluationConfig,
         tuple[str, ...],
         tuple[str, ...],
-        str,
         tuple[pd.Timestamp, ...] | None,
     ],
 ) -> tuple[pd.DataFrame | None, list[FeatureSpec], dict[str, object]]:
-    symbol, config, requested, wanted_ta, ta_mode, observation_dates = task
+    symbol, config, requested, wanted_ta, observation_dates = task
     return _build_symbol_technical_panel(
         _technical_worker_warehouse(),
         symbol,
         config,
         requested=set(requested),
         wanted_ta=set(wanted_ta),
-        ta_mode=ta_mode,
         observation_dates=None if observation_dates is None else pd.Series(observation_dates),
     )
 
@@ -437,7 +432,6 @@ def _build_symbol_technical_panel(
     *,
     requested: set[str],
     wanted_ta: set[str],
-    ta_mode: str,
     observation_dates: pd.Series | None,
 ) -> tuple[pd.DataFrame | None, list[FeatureSpec], dict[str, object]]:
     from quant_warehouse.platforms.data_providers.fmp.feature_engineering.ta_classic_technical import (
@@ -457,9 +451,7 @@ def _build_symbol_technical_panel(
         built_sets["price_technicals"] = build_price_technical_features(symbol, prices)
     if wanted_ta:
         built_sets.update(
-            build_price_ta_classic_feature_families(
-                symbol, prices, families=wanted_ta, mode=ta_mode
-            )
+            build_price_ta_classic_feature_families(symbol, prices, families=wanted_ta)
         )
     symbol_frames = []
     symbol_specs: list[FeatureSpec] = []
