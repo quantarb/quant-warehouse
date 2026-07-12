@@ -4,6 +4,11 @@ from quant_warehouse.export.agent_evidence import build_agent_evidence
 
 
 class FakeWarehouse:
+    class News:
+        def ensure_date(self, *args, **kwargs):
+            return pd.DataFrame()
+
+    news = News()
     def read_prices(self, symbol, **kwargs):
         return pd.DataFrame(
             {"close": range(100, 170), "open": range(99, 169), "volume": [1000] * 70},
@@ -29,3 +34,5 @@ def test_build_agent_evidence_is_compact_and_point_in_time():
     assert "return_20d" in packet["price_summary"]
     assert packet["fundamentals"]["income"]["period"] == "2026-03-31"
     assert packet["news"][0]["title"] == "Headline"
+    assert packet["roles"]["market"]["price_summary"]["close"] == 169.0
+    assert "price_summary" not in packet["roles"]["fundamentals"]

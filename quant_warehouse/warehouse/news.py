@@ -7,6 +7,8 @@ import pandas as pd
 from quant_warehouse.catalog.store import CatalogStore
 from quant_warehouse.config import WarehouseConfig
 from quant_warehouse.ingest.normalize import symbol_provider_key
+from quant_warehouse.ingest.openbb_fetch import fetch_dataframe
+from quant_warehouse.ingest.oracle_news import _normalize_news
 from quant_warehouse.warehouse.backend import ArcticBackend, StorageBackend, open_backend
 from quant_warehouse.warehouse.sections import COMPANY_NEWS_LIBRARY, COMPANY_NEWS_SECTION
 from quant_warehouse.warehouse.storage import provider_library, read_provider_frame
@@ -60,6 +62,58 @@ class CompanyNewsStore:
 
     def import_parquet(self, path: str, *, provider: str = "fmp") -> dict[str, int]:
         return self.import_frame(pd.read_parquet(path), provider=provider)
+
+    def ensure_date(
+        self,
+        symbol: str,
+        observation_date: str | pd.Timestamp,
+        *,
+        provider: str = "fmp",
+        page_limit: int = 250,
+        max_pages: int = 101,
+    ) -> pd.DataFrame:
+        """Read an exact symbol/date from storage, fetching FMP only when absent."""
+        ticker = str(symbol).strip().upper()
+        day = pd.Timestamp(observation_date).normalize()
+        existing = self.read(ticker, provider=provider, observation_dates=[day])
+        if not existing.empty:
+            return existing
+        if str(provider).strip().lower() != "fmp":
+            return pd.DataFrame()
+
+        frames: list[pd.DataFrame] = []
+        day_text = day.strftime("%Y-%m-%d")
+        for page in range(max_pages):
+            frame = fetch_dataframe(
+                "company_news",
+                symbol=ticker,
+                provider="fmp",
+                start_date=day_text,
+                end_date=day_text,
+                page=page,
+                limit=page_limit,
+            )
+            if frame is None or frame.empty:
+                break
+            if (isinstance(frame.index, pd.DatetimeIndex) or frame.index.name == "date") and not any(
+                name in frame.columns
+                for name in ("date", "published_date", "publishedDate", "published_at")
+            ):
+                frame = frame.copy()
+                frame["published_at"] = pd.to_datetime(frame.index, errors="coerce", utc=True)
+            frames.append(frame)
+            if len(frame) < page_limit:
+                break
+        if not frames:
+            return pd.DataFrame()
+        boundaries = pd.DataFrame(
+            {"symbol": [ticker], "observation_date": [day], "boundary_kind": ["agent_scoring"]}
+        )
+        normalized = _normalize_news(pd.concat(frames, ignore_index=True), boundaries)
+        if normalized.empty:
+            return pd.DataFrame()
+        self.import_frame(normalized, provider="fmp")
+        return self.read(ticker, provider="fmp", observation_dates=[day])
 
     def read(
         self,

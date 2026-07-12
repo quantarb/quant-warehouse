@@ -43,3 +43,28 @@ def test_company_news_store_upserts_and_reads_point_in_time(tmp_path: Path):
     state = warehouse.catalog.get(symbol="AAPL", section="company_news", provider="fmp")
     assert state is not None
     assert state.row_count == 2
+
+
+def test_ensure_news_date_uses_storage_before_provider(tmp_path: Path, monkeypatch):
+    config = WarehouseConfig(
+        home=tmp_path / "home",
+        arctic_uri=f"lmdb://{tmp_path / 'arctic'}",
+        catalog_path=tmp_path / "catalog.sqlite",
+    )
+    warehouse = Warehouse(config)
+    frame = pd.DataFrame(
+        {
+            "symbol": ["AAPL"],
+            "observation_date": ["2024-01-02"],
+            "published_at": ["2024-01-02T12:00:00Z"],
+            "title": ["stored"],
+            "url": ["https://stored"],
+        }
+    )
+    warehouse.news.import_frame(frame)
+    monkeypatch.setattr(
+        "quant_warehouse.warehouse.news.fetch_dataframe",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("provider should not run")),
+    )
+    result = warehouse.news.ensure_date("AAPL", "2024-01-02")
+    assert result["title"].tolist() == ["stored"]

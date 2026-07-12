@@ -13,6 +13,7 @@ def build_agent_evidence(
     price_providers: tuple[str, ...] = ("fmp", "yfinance"),
     lookback_days: int = 260,
     news_lookback_days: int = 7,
+    refresh_news_if_missing: bool = True,
 ) -> dict[str, Any]:
     """Build a compact point-in-time packet from warehouse-owned data."""
     ticker = str(symbol).strip().upper()
@@ -46,6 +47,8 @@ def build_agent_evidence(
             packet["fundamentals"][section] = _latest_record(frame)
 
     news_start = as_of - pd.Timedelta(days=int(news_lookback_days))
+    if refresh_news_if_missing and hasattr(warehouse.news, "ensure_date"):
+        warehouse.news.ensure_date(ticker, as_of, provider="fmp")
     news = warehouse.read_news(
         ticker,
         provider="fmp",
@@ -73,6 +76,23 @@ def build_agent_evidence(
         )
         if not present
     ]
+    packet["roles"] = {
+        "market": {
+            "sufficient": bool(packet["price_summary"]),
+            "price_provider": packet["price_provider"],
+            "price_summary": packet["price_summary"],
+        },
+        "fundamentals": {
+            "sufficient": bool(packet["fundamentals"]),
+            "fundamentals": packet["fundamentals"],
+        },
+        "news": {"sufficient": bool(packet["news"]), "news": packet["news"]},
+        "social": {
+            "sufficient": False,
+            "social": [],
+            "missing": ["point_in_time_social_data"],
+        },
+    }
     return packet
 
 
