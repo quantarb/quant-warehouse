@@ -109,7 +109,6 @@ def build_oracle_option_label_panel(
                 entry_chain,
                 option_type=option_type,
                 entry_date=entry_date,
-                exit_date=exit_date,
                 max_dte=config.max_dte,
             )
             if entry_candidates.empty:
@@ -122,7 +121,7 @@ def build_oracle_option_label_panel(
                         "symbol": symbol,
                         "side": side,
                         "entry_date": entry_date.date().isoformat(),
-                        "reason": "no_entry_candidates_covering_oracle_exit",
+                        "reason": "no_entry_candidates_after_type_bid_ask_optional_max_dte",
                     },
                 )
                 continue
@@ -133,9 +132,6 @@ def build_oracle_option_label_panel(
                 spec=label_spec,
             )
             label_frame = pd.DataFrame(label_result.option_rows)
-            if label_frame.empty:
-                summary["trades_skipped_empty_intersection"] += 1
-                continue
 
             featured = build_option_contract_features(
                 entry_candidates,
@@ -150,6 +146,15 @@ def build_oracle_option_label_panel(
                 entry_features=featured,
                 target_dte=config.target_dte,
             )
+            expired_part = _expired_horizon_rows(
+                entry_candidates,
+                trade=trade,
+                side=side,
+                option_type=option_type,
+                entry_features=featured,
+                target_dte=config.target_dte,
+            )
+            panel_part = pd.concat([expired_part, panel_part], ignore_index=True, sort=False)
             if panel_part.empty:
                 summary["trades_skipped_empty_intersection"] += 1
                 continue
@@ -166,13 +171,13 @@ def build_oracle_option_label_panel(
         return OracleOptionLabelPanelResult(summary=summary)
 
     panel = pd.concat(panel_parts, ignore_index=True, sort=False)
-    panel["rank_y"] = panel.groupby("trade_id")["option_return"].rank(
-        method="average", pct=True, ascending=True
-    )
+    panel = _unified_behavior_rank(panel)
     summary.update(
         {
             "symbols": int(panel["symbol"].nunique()),
             "option_rows": int(len(panel)),
+            "realized_return_rows": int(panel["label_basis"].eq("realized_exit_return").sum()),
+            "expiration_closeness_rows": int(panel["label_basis"].eq("expiration_closeness").sum()),
             "long_call_rows": int(
                 ((panel["side"] == "long") & panel["option_type"].astype(str).str.startswith("c")).sum()
             ),
@@ -211,7 +216,6 @@ def _filter_entry_candidates(
     *,
     option_type: str,
     entry_date: pd.Timestamp,
-    exit_date: pd.Timestamp,
     max_dte: int | None,
 ) -> pd.DataFrame:
     if chain is None or chain.empty or not {"option_type", "bid", "ask", "expiration"}.issubset(chain.columns):
@@ -224,10 +228,81 @@ def _filter_entry_candidates(
     out = out.loc[out["bid"].ge(0) & out["ask"].gt(0) & out["ask"].ge(out["bid"])].copy()
     out["expiration"] = pd.to_datetime(out["expiration"], errors="coerce").dt.normalize()
     out["dte"] = (out["expiration"] - pd.Timestamp(entry_date).normalize()).dt.days
-    keep = out["dte"].gt(0) & out["expiration"].ge(pd.Timestamp(exit_date).normalize())
+    keep = out["dte"].gt(0)
     if max_dte is not None and int(max_dte) > 0:
         keep &= out["dte"].le(int(max_dte))
     return out.loc[keep].reset_index(drop=True)
+
+
+def _expired_horizon_rows(
+    entry_candidates: pd.DataFrame,
+    *,
+    trade: dict[str, Any],
+    side: str,
+    option_type: str,
+    entry_features: pd.DataFrame,
+    target_dte: int,
+) -> pd.DataFrame:
+    exit_date = pd.Timestamp(trade.get("exit_date")).normalize()
+    expired = entry_candidates.copy()
+    expired["expiration"] = pd.to_datetime(expired["expiration"], errors="coerce").dt.normalize()
+    expired = expired.loc[expired["expiration"].lt(exit_date)].copy()
+    if expired.empty:
+        return pd.DataFrame()
+    panel = pd.DataFrame(index=expired.index)
+    panel["trade_id"] = trade.get("trade_id")
+    panel["symbol"] = str(trade.get("symbol") or "").upper()
+    panel["side"] = side
+    panel["equity_signal_side"] = side
+    panel["option_type"] = expired["option_type"].astype(str).str.lower()
+    panel["option_action"] = "buy_call" if side == "long" else "buy_put"
+    panel["entry_date"] = pd.Timestamp(trade.get("entry_date")).normalize()
+    panel["equity_exit_date"] = exit_date
+    panel["option_exit_date"] = pd.NaT
+    panel["contract_symbol"] = expired["contract_symbol"].astype(str)
+    panel["expiration"] = expired["expiration"]
+    panel["strike"] = pd.to_numeric(expired.get("strike"), errors="coerce")
+    panel["entry_bid"] = pd.to_numeric(expired.get("bid"), errors="coerce")
+    panel["entry_ask"] = pd.to_numeric(expired.get("ask"), errors="coerce")
+    panel["entry_mid"] = pd.to_numeric(expired.get("mid"), errors="coerce")
+    panel["exit_bid"] = np.nan
+    panel["option_return"] = np.nan
+    panel["label_basis"] = "expiration_closeness"
+    panel["days_before_oracle_exit"] = (exit_date - panel["expiration"]).dt.days
+    panel["freq"] = trade.get("freq")
+    panel["k"] = trade.get("k")
+    if entry_features is not None and not entry_features.empty and "contract_symbol" in entry_features:
+        feature_cols = option_ranker_feature_columns(entry_features)
+        extras = [
+            col
+            for col in ("bid", "ask", "mid", "underlying_price", "snapshot_date", "spread")
+            if col in entry_features.columns and col not in feature_cols
+        ]
+        features = entry_features[["contract_symbol", *feature_cols, *extras]].copy()
+        features["contract_symbol"] = features["contract_symbol"].astype(str)
+        panel = panel.merge(features.drop_duplicates("contract_symbol"), on="contract_symbol", how="left")
+    if "dte" in panel.columns and "dte_gap" not in panel.columns:
+        panel["dte_gap"] = (pd.to_numeric(panel["dte"], errors="coerce") - float(target_dte)).abs()
+    panel["fixed_near_atm_score"] = _fixed_near_atm_score(panel)
+    return panel.reset_index(drop=True)
+
+
+def _unified_behavior_rank(panel: pd.DataFrame) -> pd.DataFrame:
+    parts: list[pd.DataFrame] = []
+    for _trade_id, group in panel.groupby("trade_id", sort=False):
+        work = group.copy()
+        realized = work["label_basis"].eq("realized_exit_return")
+        expired_count = int((~realized).sum())
+        expired_value = -pd.to_numeric(work["days_before_oracle_exit"], errors="coerce")
+        realized_value = pd.to_numeric(work["option_return"], errors="coerce")
+        ordinal = pd.Series(index=work.index, dtype=float)
+        ordinal.loc[~realized] = expired_value.loc[~realized].rank(method="average", ascending=True)
+        ordinal.loc[realized] = expired_count + realized_value.loc[realized].rank(
+            method="average", ascending=True
+        )
+        work["rank_y"] = ordinal / float(len(work))
+        parts.append(work)
+    return pd.concat(parts, ignore_index=True, sort=False)
 
 
 def _panel_rows(
@@ -285,6 +360,8 @@ def _panel_rows(
         panel["option_pnl"] / panel["entry_price"],
         np.nan,
     )
+    panel["label_basis"] = "realized_exit_return"
+    panel["days_before_oracle_exit"] = 0
     panel["pricing_convention"] = "buy_ask_sell_bid_entry_exit_only"
 
     if entry_features is not None and not entry_features.empty and "contract_symbol" in entry_features.columns:
@@ -363,8 +440,8 @@ def _initial_summary(work: pd.DataFrame, spec: OracleOptionLabelPanelSpec) -> di
         "thetadata_mode": "arctic_cache_only_download_missing=False",
         "skip_policy": "skip_oracle_trade_if_entry_or_exit_option_chain_missing",
         "pricing_convention": "buy_ask_entry_sell_bid_exit_no_intermediate_marks",
-        "entry_filters": "option_type + bid/ask + expiration_covers_oracle_exit + optional_max_dte",
-        "exit_policy": "unfiltered_existence_match_only",
+        "entry_filters": "option_type + bid/ask + optional_max_dte",
+        "exit_policy": "single_rank_space: realized_exit_return_then_early_expiration_closeness",
         "max_dte": None if spec.max_dte is None else int(spec.max_dte),
     }
 

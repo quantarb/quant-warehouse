@@ -84,6 +84,57 @@ def test_build_oracle_option_label_panel_uses_entry_ask_and_exit_bid(monkeypatch
     assert result.panel.iloc[0]["pricing_convention"] == "buy_ask_sell_bid_entry_exit_only"
 
 
+def test_panel_combines_expiration_closeness_and_realized_return_in_one_rank(monkeypatch):
+    entry = pd.DataFrame(
+        [
+            {
+                "snapshot_date": "2026-01-02",
+                "underlying_symbol": "AAPL",
+                "contract_symbol": "EARLY_CALL",
+                "expiration": "2026-01-03",
+                "strike": 195.0,
+                "option_type": "call",
+                "bid": 2.0,
+                "ask": 2.5,
+                "mid": 2.25,
+                "underlying_price": 195.0,
+            },
+            {
+                "snapshot_date": "2026-01-02",
+                "underlying_symbol": "AAPL",
+                "contract_symbol": "SURVIVING_CALL",
+                "expiration": "2026-02-20",
+                "strike": 200.0,
+                "option_type": "call",
+                "bid": 4.0,
+                "ask": 5.0,
+                "mid": 4.5,
+                "underlying_price": 195.0,
+            },
+        ]
+    )
+    exit_chain = entry.loc[entry["contract_symbol"].eq("SURVIVING_CALL")].copy()
+    exit_chain["snapshot_date"] = "2026-01-05"
+    exit_chain["bid"] = 7.0
+    exit_chain["ask"] = 8.0
+    monkeypatch.setattr(
+        oracle_option_labels,
+        "_normalized_cached_snapshots",
+        lambda _symbol, _dates: {
+            pd.Timestamp("2026-01-02"): entry,
+            pd.Timestamp("2026-01-05"): exit_chain,
+        },
+    )
+
+    result = build_oracle_option_label_panel(_trades())
+    panel = result.panel.set_index("contract_symbol")
+
+    assert set(panel["label_basis"]) == {"expiration_closeness", "realized_exit_return"}
+    assert panel.loc["EARLY_CALL", "rank_y"] == pytest.approx(0.5)
+    assert panel.loc["SURVIVING_CALL", "rank_y"] == pytest.approx(1.0)
+    assert pd.isna(panel.loc["EARLY_CALL", "option_return"])
+
+
 def test_build_oracle_option_label_panel_reports_missing_endpoint(monkeypatch):
     monkeypatch.setattr(
         oracle_option_labels,
@@ -104,7 +155,7 @@ def test_build_oracle_option_label_panel_requires_trade_columns():
         build_oracle_option_label_panel(pd.DataFrame([{"symbol": "AAPL", "side": "long", "entry_date": "2026-01-02"}]))
 
 
-def test_entry_candidates_must_survive_oracle_exit_without_default_dte_ceiling():
+def test_entry_candidates_have_no_default_dte_ceiling_and_share_one_behavior_rank():
     chain = pd.DataFrame(
         [
             {
@@ -128,9 +179,26 @@ def test_entry_candidates_must_survive_oracle_exit_without_default_dte_ceiling()
         chain,
         option_type="call",
         entry_date=pd.Timestamp("2026-01-02"),
-        exit_date=pd.Timestamp("2026-06-30"),
         max_dte=None,
     )
 
-    assert result["contract_symbol"].tolist() == ["COVERS_LONG_TRADE"]
-    assert result["dte"].iloc[0] > 90
+    assert result["contract_symbol"].tolist() == ["EXPIRES_BEFORE_EXIT", "COVERS_LONG_TRADE"]
+    assert result["dte"].max() > 90
+
+    ranked = oracle_option_labels._unified_behavior_rank(
+        pd.DataFrame(
+            {
+                "trade_id": ["t1"] * 4,
+                "label_basis": [
+                    "expiration_closeness",
+                    "expiration_closeness",
+                    "realized_exit_return",
+                    "realized_exit_return",
+                ],
+                "days_before_oracle_exit": [55, 20, 0, 0],
+                "option_return": [float("nan"), float("nan"), -0.6, 0.1],
+            }
+        )
+    )
+
+    assert ranked["rank_y"].tolist() == [0.25, 0.5, 0.75, 1.0]
