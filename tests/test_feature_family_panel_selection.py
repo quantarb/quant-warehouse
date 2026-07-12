@@ -83,3 +83,47 @@ def test_technical_panel_builds_requested_family_and_only_observation_date(monke
         {"symbol": "AAPL", "date": pd.Timestamp("2026-07-10")}
     ]
     assert metadata["family"].tolist() == ["technical_momentum"]
+
+
+def test_technical_panel_processes_symbols_in_parallel_deterministically(monkeypatch):
+    calls = []
+
+    class FakeExecutor:
+        def __init__(self, max_workers):
+            calls.append(("workers", max_workers))
+
+        def map(self, function, tasks):
+            calls.append(("symbols", [task[0] for task in tasks]))
+            return map(function, tasks)
+
+        def shutdown(self, wait):
+            calls.append(("shutdown", wait))
+
+    def fake_worker(task):
+        symbol = task[0]
+        return (
+            pd.DataFrame(
+                {"symbol": [symbol], "date": [pd.Timestamp("2026-07-10")], "feature": [1.0]}
+            ),
+            [module.FeatureSpec("feature", "technical_momentum", "fmp", "feature", "unknown")],
+            {"symbol": symbol, "status": "ok"},
+        )
+
+    monkeypatch.setattr(module, "ProcessPoolExecutor", FakeExecutor)
+    monkeypatch.setattr(module, "_build_symbol_technical_panel_worker", fake_worker)
+
+    panel, metadata, diagnostics, _timings = module.build_technical_feature_panel(
+        ["MSFT", "AAPL"],
+        module.FamilyEvaluationConfig(),
+        strategy_sources=("fmp.technical_momentum",),
+        max_workers=8,
+    )
+
+    assert calls == [
+        ("workers", 2),
+        ("symbols", ["MSFT", "AAPL"]),
+        ("shutdown", True),
+    ]
+    assert panel["symbol"].tolist() == ["AAPL", "MSFT"]
+    assert metadata["feature"].tolist() == ["feature"]
+    assert diagnostics["symbol"].tolist() == ["MSFT", "AAPL"]

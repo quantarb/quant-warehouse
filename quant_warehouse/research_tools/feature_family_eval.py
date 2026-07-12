@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
+from functools import lru_cache
 from time import perf_counter
 from typing import Iterable
 import warnings
@@ -326,15 +328,12 @@ def build_technical_feature_panel(
     strategy_sources: Iterable[str],
     observation_dates: pd.DataFrame | None = None,
     warehouse: Warehouse | None = None,
+    max_workers: int = 1,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, float]]:
     """Build requested technical families and optionally retain only required symbol/dates."""
 
     from quant_warehouse.platforms.data_providers.fmp.feature_engineering.ta_classic_technical import (
         TA_CLASSIC_FAMILY_PREFIXES,
-        build_price_ta_classic_feature_families,
-    )
-    from quant_warehouse.platforms.data_providers.fmp.feature_engineering.technical import (
-        build_price_technical_features,
     )
 
     requested = {str(value).strip() for value in strategy_sources if str(value).strip()}
@@ -351,43 +350,129 @@ def build_technical_feature_panel(
     frames: list[pd.DataFrame] = []
     specs: list[FeatureSpec] = []
     diagnostics: list[dict[str, object]] = []
-    for raw_symbol in symbols:
-        symbol = str(raw_symbol).strip().upper()
-        prices = _slice_frame(wh.read_prices(symbol, provider=config.provider), config.start_date, config.end_date)
-        if prices.empty:
-            diagnostics.append({"symbol": symbol, "status": "missing_prices"})
-            continue
-        built_sets = {}
-        if "fmp.price_technicals" in requested:
-            built_sets["price_technicals"] = build_price_technical_features(symbol, prices)
-        if wanted_ta:
-            built_sets.update(build_price_ta_classic_feature_families(symbol, prices, families=wanted_ta))
-        symbol_frames = []
-        for family, built in built_sets.items():
-            if built.df is None or built.df.empty or not built.feature_cols:
-                continue
-            frame = built.df.reset_index()
-            frame["date"] = pd.to_datetime(frame["date"], errors="coerce").dt.normalize()
-            frame["symbol"] = symbol
-            symbol_frames.append(frame[["symbol", "date", *built.feature_cols]])
-            specs.extend(
-                FeatureSpec(feature, family, "fmp", feature, "unknown")
-                for feature in built.feature_cols
+    symbol_list = [str(value).strip().upper() for value in symbols if str(value).strip()]
+
+    worker_count = max(1, int(max_workers))
+    if worker_count == 1:
+        results = (
+            _build_symbol_technical_panel(
+                wh,
+                symbol,
+                config,
+                requested=requested,
+                wanted_ta=wanted_ta,
+                observation_dates=None
+                if dates is None
+                else dates.loc[dates["symbol"].eq(symbol), "date"],
             )
-        if symbol_frames:
-            merged = symbol_frames[0]
-            for other in symbol_frames[1:]:
-                merged = merged.merge(other, on=["symbol", "date"], how="outer", validate="one_to_one")
-            if dates is not None:
-                merged = merged.merge(dates.loc[dates["symbol"].eq(symbol)], on=["symbol", "date"], how="inner")
-            if not merged.empty:
-                frames.append(merged)
-        diagnostics.append({"symbol": symbol, "status": "ok", "families": len(built_sets)})
+            for symbol in symbol_list
+        )
+    else:
+        tasks = [
+            (
+                symbol,
+                config,
+                tuple(sorted(requested)),
+                tuple(sorted(wanted_ta)),
+                None
+                if dates is None
+                else tuple(dates.loc[dates["symbol"].eq(symbol), "date"].tolist()),
+            )
+            for symbol in symbol_list
+        ]
+        executor = ProcessPoolExecutor(max_workers=min(worker_count, len(tasks) or 1))
+        results = executor.map(_build_symbol_technical_panel_worker, tasks)
+    try:
+        for frame, symbol_specs, diagnostic in results:
+            diagnostics.append(diagnostic)
+            if frame is not None:
+                frames.append(frame)
+                specs.extend(symbol_specs)
+    finally:
+        if worker_count != 1:
+            executor.shutdown(wait=True)
     if not frames:
         raise RuntimeError("No technical feature frames were built for the requested symbols and dates.")
     panel = pd.concat(frames, ignore_index=True, sort=False).sort_values(["date", "symbol"]).reset_index(drop=True)
     metadata = pd.DataFrame([spec.__dict__ for spec in specs]).drop_duplicates().sort_values(["family", "feature"]).reset_index(drop=True)
     return panel, metadata, pd.DataFrame(diagnostics), {"technical_panel_build_seconds": perf_counter() - started}
+
+
+def _build_symbol_technical_panel_worker(
+    task: tuple[str, FamilyEvaluationConfig, tuple[str, ...], tuple[str, ...], tuple[pd.Timestamp, ...] | None],
+) -> tuple[pd.DataFrame | None, list[FeatureSpec], dict[str, object]]:
+    symbol, config, requested, wanted_ta, observation_dates = task
+    return _build_symbol_technical_panel(
+        _technical_worker_warehouse(),
+        symbol,
+        config,
+        requested=set(requested),
+        wanted_ta=set(wanted_ta),
+        observation_dates=None if observation_dates is None else pd.Series(observation_dates),
+    )
+
+
+@lru_cache(maxsize=1)
+def _technical_worker_warehouse() -> Warehouse:
+    """Reuse one reader inside each process instead of reopening it for every symbol."""
+
+    return Warehouse()
+
+
+def _build_symbol_technical_panel(
+    warehouse: Warehouse,
+    symbol: str,
+    config: FamilyEvaluationConfig,
+    *,
+    requested: set[str],
+    wanted_ta: set[str],
+    observation_dates: pd.Series | None,
+) -> tuple[pd.DataFrame | None, list[FeatureSpec], dict[str, object]]:
+    from quant_warehouse.platforms.data_providers.fmp.feature_engineering.ta_classic_technical import (
+        build_price_ta_classic_feature_families,
+    )
+    from quant_warehouse.platforms.data_providers.fmp.feature_engineering.technical import (
+        build_price_technical_features,
+    )
+
+    prices = _slice_frame(
+        warehouse.read_prices(symbol, provider=config.provider), config.start_date, config.end_date
+    )
+    if prices.empty:
+        return None, [], {"symbol": symbol, "status": "missing_prices"}
+    built_sets = {}
+    if "fmp.price_technicals" in requested:
+        built_sets["price_technicals"] = build_price_technical_features(symbol, prices)
+    if wanted_ta:
+        built_sets.update(
+            build_price_ta_classic_feature_families(symbol, prices, families=wanted_ta)
+        )
+    symbol_frames = []
+    symbol_specs: list[FeatureSpec] = []
+    for family, built in built_sets.items():
+        if built.df is None or built.df.empty or not built.feature_cols:
+            continue
+        frame = built.df.reset_index()
+        frame["date"] = pd.to_datetime(frame["date"], errors="coerce").dt.normalize()
+        frame["symbol"] = symbol
+        symbol_frames.append(frame[["symbol", "date", *built.feature_cols]])
+        symbol_specs.extend(
+            FeatureSpec(feature, family, "fmp", feature, "unknown")
+            for feature in built.feature_cols
+        )
+    if not symbol_frames:
+        return None, symbol_specs, {"symbol": symbol, "status": "ok", "families": len(built_sets)}
+    merged = symbol_frames[0]
+    for other in symbol_frames[1:]:
+        merged = merged.merge(other, on=["symbol", "date"], how="outer", validate="one_to_one")
+    if observation_dates is not None:
+        wanted_dates = pd.DataFrame({"symbol": symbol, "date": observation_dates})
+        merged = merged.merge(wanted_dates, on=["symbol", "date"], how="inner")
+    return (
+        None if merged.empty else merged,
+        symbol_specs,
+        {"symbol": symbol, "status": "ok", "families": len(built_sets)},
+    )
 
 
 def _normalize_observation_dates(frame: pd.DataFrame | None) -> pd.DataFrame | None:
