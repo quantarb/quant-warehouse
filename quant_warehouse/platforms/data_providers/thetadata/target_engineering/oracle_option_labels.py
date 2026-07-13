@@ -97,6 +97,36 @@ def build_oracle_option_label_panel(
         snapshots = _normalized_cached_snapshots(symbol, needed_dates)
         entry_candidate_cache: dict[tuple[pd.Timestamp, str], pd.DataFrame] = {}
         entry_feature_cache: dict[tuple[pd.Timestamp, str], pd.DataFrame] = {}
+        # Resolve all early-expiration dates in one ArcticDB range read per
+        # symbol. Per-trade reads repeatedly scanned the same symbol history.
+        early_expiration_dates: set[pd.Timestamp] = set()
+        for trade in symbol_trades.to_dict("records"):
+            side = str(trade["side"])
+            option_type = "call" if side == "long" else "put"
+            entry_date = pd.Timestamp(trade["entry_date"]).normalize()
+            exit_date = pd.Timestamp(trade["exit_date"]).normalize()
+            entry_chain = snapshots.get(entry_date)
+            if entry_chain is None or entry_chain.empty:
+                continue
+            entry_key = (entry_date, option_type)
+            candidates = entry_candidate_cache.get(entry_key)
+            if candidates is None:
+                candidates = _filter_entry_candidates(
+                    entry_chain,
+                    option_type=option_type,
+                    entry_date=entry_date,
+                    max_dte=config.max_dte,
+                )
+                entry_candidate_cache[entry_key] = candidates
+            expirations = pd.to_datetime(candidates.get("expiration"), errors="coerce")
+            early_expiration_dates.update(
+                pd.Timestamp(value).normalize()
+                for value in expirations.loc[expirations.lt(exit_date)].dropna().unique()
+            )
+        missing_early_dates = sorted(date for date in early_expiration_dates if date not in snapshots)
+        if missing_early_dates:
+            snapshots.update(_normalized_cached_snapshots(symbol, missing_early_dates))
+
         for trade in symbol_trades.to_dict("records"):
             side = str(trade["side"])
             option_type = "call" if side == "long" else "put"
@@ -141,15 +171,6 @@ def build_oracle_option_label_panel(
             early_candidates = entry_candidates.loc[candidate_expirations.lt(exit_date)].copy()
             surviving_candidates = entry_candidates.loc[candidate_expirations.ge(exit_date)].copy()
 
-            expiration_dates = sorted(
-                pd.to_datetime(early_candidates["expiration"], errors="coerce")
-                .dropna()
-                .dt.normalize()
-                .unique()
-            )
-            missing_expiration_dates = [date for date in expiration_dates if date not in snapshots]
-            if missing_expiration_dates:
-                snapshots.update(_normalized_cached_snapshots(symbol, missing_expiration_dates))
             expiration_exit_chain, expiration_exit_dates = _contract_expiration_exits(
                 early_candidates, snapshots
             )
