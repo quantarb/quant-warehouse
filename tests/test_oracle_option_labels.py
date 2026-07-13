@@ -135,7 +135,7 @@ def test_panel_combines_expiration_closeness_and_realized_return_in_one_rank(mon
     assert pd.isna(panel.loc["EARLY_CALL", "option_return"])
 
 
-def test_build_oracle_option_label_panel_reports_missing_endpoint(monkeypatch):
+def test_build_oracle_option_label_panel_does_not_require_exact_oracle_exit(monkeypatch):
     monkeypatch.setattr(
         oracle_option_labels,
         "_normalized_cached_snapshots",
@@ -146,8 +146,33 @@ def test_build_oracle_option_label_panel_reports_missing_endpoint(monkeypatch):
 
     assert result.panel.empty
     assert result.summary["status"] == "no_option_rows"
-    assert result.summary["trades_skipped_missing_historical_options"] == 1
-    assert result.summary["skipped_missing_options"][0]["exit_option_data"] is False
+    assert result.summary["trades_skipped_missing_historical_options"] == 0
+    assert result.summary["trades_skipped_empty_intersection"] == 1
+
+
+def test_panel_prefers_contracts_own_expiration_quote(monkeypatch):
+    entry = _chain("2026-01-02", call_bid=4.0, call_ask=5.0)
+    oracle_exit = _chain("2026-01-05", call_bid=6.0, call_ask=7.0)
+    expiration = _chain("2026-02-20", call_bid=9.0, call_ask=10.0)
+    monkeypatch.setattr(
+        oracle_option_labels,
+        "_normalized_cached_snapshots",
+        lambda _symbol, _dates: {
+            pd.Timestamp("2026-01-02"): entry,
+            pd.Timestamp("2026-01-05"): oracle_exit,
+            pd.Timestamp("2026-02-20"): expiration,
+        },
+    )
+
+    result = build_oracle_option_label_panel(_trades())
+
+    call = result.panel.loc[result.panel["option_type"].str.startswith("c")].iloc[0]
+    assert call["option_exit_date"] == pd.Timestamp("2026-02-20")
+    assert call["exit_bid"] == 9.0
+    assert call["option_return"] == pytest.approx(0.8)
+    assert call["label_basis"] == "realized_exit_return"
+    assert call["return_horizon"] == "contract_expiration"
+    assert call["days_before_oracle_exit"] == -46
 
 
 def test_build_oracle_option_label_panel_requires_trade_columns():

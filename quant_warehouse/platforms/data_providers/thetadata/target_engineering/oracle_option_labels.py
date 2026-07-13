@@ -48,11 +48,12 @@ def build_oracle_option_label_panel(
     spec: OracleOptionLabelPanelSpec | None = None,
     progress_logger: ProgressLogger = None,
 ) -> OracleOptionLabelPanelResult:
-    """Build cache-only option labels for oracle trade entry and exit dates.
+    """Build cache-only option labels from oracle entries and available exits.
 
     Candidates are filtered at entry by option side, executable bid/ask, and
-    maximum DTE. Returns use entry ask and exit bid for contracts present at
-    both endpoints. Missing endpoint chains skip the entire oracle trade.
+    maximum DTE. Returns use entry ask and the latest cached exit bid available
+    for each contract on or before the oracle exit. Contracts without a later
+    quote retain the expiration-closeness fallback in the same rank space.
     """
 
     config = spec or OracleOptionLabelPanelSpec()
@@ -101,10 +102,10 @@ def build_oracle_option_label_panel(
             entry_date = pd.Timestamp(trade["entry_date"]).normalize()
             exit_date = pd.Timestamp(trade["exit_date"]).normalize()
             entry_chain = snapshots.get(entry_date)
-            exit_chain = snapshots.get(exit_date)
             entry_ok = entry_chain is not None and not entry_chain.empty
-            exit_ok = exit_chain is not None and not exit_chain.empty
-            if not entry_ok or not exit_ok:
+            oracle_exit_chain = snapshots.get(exit_date)
+            exit_ok = oracle_exit_chain is not None and not oracle_exit_chain.empty
+            if not entry_ok:
                 _record_missing_endpoint(summary, trade, side, entry_date, exit_date, entry_ok, exit_ok)
                 continue
 
@@ -133,12 +134,42 @@ def build_oracle_option_label_panel(
                 )
                 continue
 
-            label_result = build_option_labels(
-                [trade],
-                {entry_date: entry_candidates, exit_date: exit_chain},
-                spec=label_spec,
+            expiration_dates = sorted(
+                pd.to_datetime(entry_candidates["expiration"], errors="coerce")
+                .dropna()
+                .dt.normalize()
+                .unique()
             )
-            label_frame = pd.DataFrame(label_result.option_rows)
+            missing_expiration_dates = [date for date in expiration_dates if date not in snapshots]
+            if missing_expiration_dates:
+                snapshots.update(_normalized_cached_snapshots(symbol, missing_expiration_dates))
+            expiration_exit_chain, expiration_exit_dates = _contract_expiration_exits(
+                entry_candidates, snapshots
+            )
+
+            expiration_label_frame = pd.DataFrame()
+            if not expiration_exit_chain.empty:
+                label_result = build_option_labels(
+                    [trade],
+                    {entry_date: entry_candidates, exit_date: expiration_exit_chain},
+                    spec=label_spec,
+                )
+                expiration_label_frame = pd.DataFrame(label_result.option_rows)
+
+            expiration_contracts = set(
+                expiration_label_frame.get("contract_symbol", pd.Series(dtype=str)).astype(str)
+            )
+            remaining_candidates = entry_candidates.loc[
+                ~entry_candidates["contract_symbol"].astype(str).isin(expiration_contracts)
+            ].copy()
+            oracle_label_frame = pd.DataFrame()
+            if exit_ok and not remaining_candidates.empty:
+                oracle_result = build_option_labels(
+                    [trade],
+                    {entry_date: remaining_candidates, exit_date: oracle_exit_chain},
+                    spec=label_spec,
+                )
+                oracle_label_frame = pd.DataFrame(oracle_result.option_rows)
 
             featured = entry_feature_cache.get(entry_key)
             if featured is None:
@@ -148,23 +179,56 @@ def build_oracle_option_label_panel(
                     target_dte=int(config.target_dte),
                 ).df
                 entry_feature_cache[entry_key] = featured
-            panel_part = _panel_rows(
-                label_frame,
+            expiration_part = _panel_rows(
+                expiration_label_frame,
                 trade=trade,
                 side=side,
                 option_type=option_type,
                 entry_features=featured,
                 target_dte=config.target_dte,
+            )
+            if not expiration_part.empty:
+                expiration_part["option_exit_date"] = expiration_part["contract_symbol"].map(
+                    expiration_exit_dates
+                )
+                expiration_part["days_before_oracle_exit"] = (
+                    exit_date - pd.to_datetime(expiration_part["option_exit_date"], errors="coerce")
+                ).dt.days
+                expiration_part["return_horizon"] = "contract_expiration"
+            oracle_part = _panel_rows(
+                oracle_label_frame,
+                trade=trade,
+                side=side,
+                option_type=option_type,
+                entry_features=featured,
+                target_dte=config.target_dte,
+            )
+            if not oracle_part.empty:
+                oracle_part["return_horizon"] = "oracle_exit"
+            realized_contracts = set(
+                pd.concat(
+                    [
+                        expiration_part.get("contract_symbol", pd.Series(dtype=str)),
+                        oracle_part.get("contract_symbol", pd.Series(dtype=str)),
+                    ],
+                    ignore_index=True,
+                ).astype(str)
             )
             expired_part = _expired_horizon_rows(
-                entry_candidates,
+                entry_candidates.loc[
+                    ~entry_candidates["contract_symbol"].astype(str).isin(realized_contracts)
+                ].copy(),
                 trade=trade,
                 side=side,
                 option_type=option_type,
                 entry_features=featured,
                 target_dte=config.target_dte,
             )
-            panel_part = pd.concat([expired_part, panel_part], ignore_index=True, sort=False)
+            if not expired_part.empty:
+                expired_part["return_horizon"] = "expiration_closeness_fallback"
+            panel_part = pd.concat(
+                [expired_part, oracle_part, expiration_part], ignore_index=True, sort=False
+            )
             if panel_part.empty:
                 summary["trades_skipped_empty_intersection"] += 1
                 continue
@@ -228,6 +292,40 @@ def _normalized_cached_snapshots(symbol: str, dates: list[pd.Timestamp]) -> dict
         if normalized is not None:
             snapshots[date] = normalized
     return snapshots
+
+
+def _contract_expiration_exits(
+    entry_candidates: pd.DataFrame,
+    snapshots: dict[pd.Timestamp, pd.DataFrame],
+) -> tuple[pd.DataFrame, dict[str, pd.Timestamp]]:
+    """Select each entry contract's quote on its own expiration date."""
+
+    parts: list[pd.DataFrame] = []
+    candidates = entry_candidates[["contract_symbol", "expiration"]].copy()
+    candidates["contract_symbol"] = candidates["contract_symbol"].astype(str)
+    candidates["expiration"] = pd.to_datetime(candidates["expiration"], errors="coerce").dt.normalize()
+    for expiration, expected in candidates.dropna().groupby("expiration", sort=False):
+        date = pd.Timestamp(expiration).normalize()
+        chain = snapshots.get(date)
+        if chain is None or chain.empty or "contract_symbol" not in chain:
+            continue
+        wanted = set(expected["contract_symbol"])
+        part = chain.loc[chain["contract_symbol"].astype(str).isin(wanted)].copy()
+        part["_contract_expiration_date"] = date
+        parts.append(part)
+    if not parts:
+        return pd.DataFrame(), {}
+    combined = pd.concat(parts, ignore_index=True, sort=False)
+    if "contract_symbol" not in combined.columns:
+        return pd.DataFrame(), {}
+    combined["contract_symbol"] = combined["contract_symbol"].astype(str)
+    combined["bid"] = pd.to_numeric(combined.get("bid"), errors="coerce")
+    combined = combined.dropna(subset=["contract_symbol", "_contract_expiration_date", "bid"])
+    combined = combined.loc[combined["bid"].ge(0)].drop_duplicates("contract_symbol", keep="last")
+    exit_dates = dict(
+        zip(combined["contract_symbol"], combined["_contract_expiration_date"], strict=False)
+    )
+    return combined.drop(columns="_contract_expiration_date"), exit_dates
 
 
 def _filter_entry_candidates(
@@ -488,10 +586,10 @@ def _initial_summary(work: pd.DataFrame, spec: OracleOptionLabelPanelSpec) -> di
         "labeled_trade_ids": [],
         "elapsed_seconds": 0.0,
         "thetadata_mode": "arctic_cache_only_download_missing=False",
-        "skip_policy": "skip_oracle_trade_if_entry_or_exit_option_chain_missing",
-        "pricing_convention": "buy_ask_entry_sell_bid_exit_no_intermediate_marks",
+        "skip_policy": "skip_oracle_trade_only_if_entry_option_chain_missing",
+        "pricing_convention": "buy_ask_entry_sell_bid_at_contract_expiration_then_oracle_exit_fallback",
         "entry_filters": "option_type + bid/ask + optional_max_dte",
-        "exit_policy": "single_rank_space: realized_exit_return_then_early_expiration_closeness",
+        "exit_policy": "single_rank_space: contract_expiration_return_then_oracle_exit_return_then_expiration_closeness",
         "max_dte": None if spec.max_dte is None else int(spec.max_dte),
         "max_candidates_per_trade": int(spec.max_candidates_per_trade),
     }
