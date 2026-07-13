@@ -21,6 +21,7 @@ from quant_warehouse.platforms.data_providers.thetadata.target_engineering.optio
 )
 
 ProgressLogger = Callable[[str], None] | None
+ORACLE_OPTION_LABEL_POLICY = "oracle_exit_survivors_expiration_early_fallback_v1"
 
 
 @dataclass(frozen=True)
@@ -51,9 +52,9 @@ def build_oracle_option_label_panel(
     """Build cache-only option labels from oracle entries and available exits.
 
     Candidates are filtered at entry by option side, executable bid/ask, and
-    maximum DTE. Returns use entry ask and the latest cached exit bid available
-    for each contract on or before the oracle exit. Contracts without a later
-    quote retain the expiration-closeness fallback in the same rank space.
+    maximum DTE. Contracts surviving the oracle horizon use the oracle-exit
+    bid; contracts expiring earlier use their expiration-date bid. Missing
+    applicable quotes retain expiration closeness in the same rank space.
     """
 
     config = spec or OracleOptionLabelPanelSpec()
@@ -134,8 +135,14 @@ def build_oracle_option_label_panel(
                 )
                 continue
 
+            candidate_expirations = pd.to_datetime(
+                entry_candidates["expiration"], errors="coerce"
+            ).dt.normalize()
+            early_candidates = entry_candidates.loc[candidate_expirations.lt(exit_date)].copy()
+            surviving_candidates = entry_candidates.loc[candidate_expirations.ge(exit_date)].copy()
+
             expiration_dates = sorted(
-                pd.to_datetime(entry_candidates["expiration"], errors="coerce")
+                pd.to_datetime(early_candidates["expiration"], errors="coerce")
                 .dropna()
                 .dt.normalize()
                 .unique()
@@ -144,29 +151,23 @@ def build_oracle_option_label_panel(
             if missing_expiration_dates:
                 snapshots.update(_normalized_cached_snapshots(symbol, missing_expiration_dates))
             expiration_exit_chain, expiration_exit_dates = _contract_expiration_exits(
-                entry_candidates, snapshots
+                early_candidates, snapshots
             )
 
             expiration_label_frame = pd.DataFrame()
             if not expiration_exit_chain.empty:
                 label_result = build_option_labels(
                     [trade],
-                    {entry_date: entry_candidates, exit_date: expiration_exit_chain},
+                    {entry_date: early_candidates, exit_date: expiration_exit_chain},
                     spec=label_spec,
                 )
                 expiration_label_frame = pd.DataFrame(label_result.option_rows)
 
-            expiration_contracts = set(
-                expiration_label_frame.get("contract_symbol", pd.Series(dtype=str)).astype(str)
-            )
-            remaining_candidates = entry_candidates.loc[
-                ~entry_candidates["contract_symbol"].astype(str).isin(expiration_contracts)
-            ].copy()
             oracle_label_frame = pd.DataFrame()
-            if exit_ok and not remaining_candidates.empty:
+            if exit_ok and not surviving_candidates.empty:
                 oracle_result = build_option_labels(
                     [trade],
-                    {entry_date: remaining_candidates, exit_date: oracle_exit_chain},
+                    {entry_date: surviving_candidates, exit_date: oracle_exit_chain},
                     spec=label_spec,
                 )
                 oracle_label_frame = pd.DataFrame(oracle_result.option_rows)
@@ -214,7 +215,7 @@ def build_oracle_option_label_panel(
                     ignore_index=True,
                 ).astype(str)
             )
-            expired_part = _expired_horizon_rows(
+            expired_part = _expiration_closeness_rows(
                 entry_candidates.loc[
                     ~entry_candidates["contract_symbol"].astype(str).isin(realized_contracts)
                 ].copy(),
@@ -234,6 +235,7 @@ def build_oracle_option_label_panel(
                 continue
 
             panel_part = _unified_behavior_rank(panel_part)
+            panel_part["label_policy"] = ORACLE_OPTION_LABEL_POLICY
             summary["option_rows_before_candidate_bound"] += int(len(panel_part))
             panel_part = _select_diverse_labeled_candidates(
                 panel_part, int(config.max_candidates_per_trade)
@@ -351,7 +353,7 @@ def _filter_entry_candidates(
     return out.loc[keep].reset_index(drop=True)
 
 
-def _expired_horizon_rows(
+def _expiration_closeness_rows(
     entry_candidates: pd.DataFrame,
     *,
     trade: dict[str, Any],
@@ -361,27 +363,26 @@ def _expired_horizon_rows(
     target_dte: int,
 ) -> pd.DataFrame:
     exit_date = pd.Timestamp(trade.get("exit_date")).normalize()
-    expired = entry_candidates.copy()
-    expired["expiration"] = pd.to_datetime(expired["expiration"], errors="coerce").dt.normalize()
-    expired = expired.loc[expired["expiration"].lt(exit_date)].copy()
-    if expired.empty:
+    fallback = entry_candidates.copy()
+    fallback["expiration"] = pd.to_datetime(fallback["expiration"], errors="coerce").dt.normalize()
+    if fallback.empty:
         return pd.DataFrame()
-    panel = pd.DataFrame(index=expired.index)
+    panel = pd.DataFrame(index=fallback.index)
     panel["trade_id"] = trade.get("trade_id")
     panel["symbol"] = str(trade.get("symbol") or "").upper()
     panel["side"] = side
     panel["equity_signal_side"] = side
-    panel["option_type"] = expired["option_type"].astype(str).str.lower()
+    panel["option_type"] = fallback["option_type"].astype(str).str.lower()
     panel["option_action"] = "buy_call" if side == "long" else "buy_put"
     panel["entry_date"] = pd.Timestamp(trade.get("entry_date")).normalize()
     panel["equity_exit_date"] = exit_date
     panel["option_exit_date"] = pd.NaT
-    panel["contract_symbol"] = expired["contract_symbol"].astype(str)
-    panel["expiration"] = expired["expiration"]
-    panel["strike"] = pd.to_numeric(expired.get("strike"), errors="coerce")
-    panel["entry_bid"] = pd.to_numeric(expired.get("bid"), errors="coerce")
-    panel["entry_ask"] = pd.to_numeric(expired.get("ask"), errors="coerce")
-    panel["entry_mid"] = pd.to_numeric(expired.get("mid"), errors="coerce")
+    panel["contract_symbol"] = fallback["contract_symbol"].astype(str)
+    panel["expiration"] = fallback["expiration"]
+    panel["strike"] = pd.to_numeric(fallback.get("strike"), errors="coerce")
+    panel["entry_bid"] = pd.to_numeric(fallback.get("bid"), errors="coerce")
+    panel["entry_ask"] = pd.to_numeric(fallback.get("ask"), errors="coerce")
+    panel["entry_mid"] = pd.to_numeric(fallback.get("mid"), errors="coerce")
     panel["exit_bid"] = np.nan
     panel["option_return"] = np.nan
     panel["label_basis"] = "expiration_closeness"
@@ -410,7 +411,9 @@ def _unified_behavior_rank(panel: pd.DataFrame) -> pd.DataFrame:
         work = group.copy()
         realized = work["label_basis"].eq("realized_exit_return")
         expired_count = int((~realized).sum())
-        expired_value = -pd.to_numeric(work["days_before_oracle_exit"], errors="coerce")
+        expired_value = -pd.to_numeric(
+            work["days_before_oracle_exit"], errors="coerce"
+        ).abs()
         realized_value = pd.to_numeric(work["option_return"], errors="coerce")
         ordinal = pd.Series(index=work.index, dtype=float)
         ordinal.loc[~realized] = expired_value.loc[~realized].rank(method="average", ascending=True)
@@ -587,9 +590,10 @@ def _initial_summary(work: pd.DataFrame, spec: OracleOptionLabelPanelSpec) -> di
         "elapsed_seconds": 0.0,
         "thetadata_mode": "arctic_cache_only_download_missing=False",
         "skip_policy": "skip_oracle_trade_only_if_entry_option_chain_missing",
-        "pricing_convention": "buy_ask_entry_sell_bid_at_contract_expiration_then_oracle_exit_fallback",
+        "pricing_convention": "buy_ask_entry_sell_oracle_exit_bid_for_survivors_or_expiration_bid_for_early_expiry",
         "entry_filters": "option_type + bid/ask + optional_max_dte",
-        "exit_policy": "single_rank_space: contract_expiration_return_then_oracle_exit_return_then_expiration_closeness",
+        "exit_policy": "single_rank_space: oracle_exit_return_for_survivors_then_contract_expiration_return_for_early_expiry_then_expiration_closeness",
+        "label_policy": ORACLE_OPTION_LABEL_POLICY,
         "max_dte": None if spec.max_dte is None else int(spec.max_dte),
         "max_candidates_per_trade": int(spec.max_candidates_per_trade),
     }
