@@ -747,5 +747,117 @@ def write_backfill_log(summary: dict[str, object], *, log_path: str | Path) -> P
     return path
 
 
+def backfill_thetadata_options_for_oracle_trade_ranges(
+    trades: Sequence[Mapping[str, Any]] | pd.DataFrame,
+    *,
+    warehouse: Warehouse | None = None,
+    config: WarehouseConfig | None = None,
+    symbols: Sequence[str] | None = None,
+    max_trades: int | None = None,
+    skip_existing: bool = True,
+    overwrite: bool = False,
+    request_sleep: float = 1.0,
+    progress_logger: ProgressLogger = None,
+) -> dict[str, object]:
+    """Backfill every business date in oracle windows, newest date first.
+
+    This is the progressive data-completion pass for option labels. It writes
+    full chains to the warehouse and is safe to rerun: cached symbol/date
+    snapshots are skipped and the next run resumes at the newest remaining
+    missing date.
+    """
+
+    warehouse = warehouse or Warehouse(config=config)
+    windows = normalize_oracle_trade_windows(trades, max_trades=max_trades, symbols=symbols)
+    if windows.empty:
+        return {"status": "empty_trades", "dates_requested": 0, "dates_downloaded": 0}
+
+    today = pd.Timestamp(datetime.now(timezone.utc).date()).normalize()
+    keys: set[tuple[str, pd.Timestamp]] = set()
+    for row in windows.to_dict("records"):
+        symbol = str(row["symbol"]).upper()
+        start = pd.Timestamp(row["entry_date"]).normalize()
+        end = pd.Timestamp(row["exit_date"]).normalize()
+        for date in _business_days(start, end):
+            if date < today:
+                keys.add((symbol, date))
+
+    cached_by_symbol: dict[str, set[pd.Timestamp]] = {}
+    if skip_existing and not overwrite:
+        for symbol in sorted({symbol for symbol, _date in keys}):
+            symbol_dates = [date for key_symbol, date in keys if key_symbol == symbol]
+            if symbol_dates:
+                cached, _rows = option_chain_cached_date_summary(
+                    symbol, min(symbol_dates), max(symbol_dates)
+                )
+                cached_by_symbol[symbol] = cached
+
+    missing = [
+        key for key in keys
+        if overwrite or key[1] not in cached_by_symbol.get(key[0], set())
+    ]
+    missing.sort(key=lambda item: (item[1], item[0]), reverse=True)
+    results: list[dict[str, object]] = []
+    unavailable_symbols: set[str] = set()
+    for index, (symbol, date) in enumerate(missing, start=1):
+        if symbol in unavailable_symbols:
+            results.append({"symbol": symbol, "snapshot_date": date.date().isoformat(), "skipped": True, "reason": "empty_symbol"})
+            continue
+        try:
+            manifest = download_option_snapshots_for_range(
+                symbol,
+                date,
+                date,
+                overwrite=overwrite,
+            )
+            empty = int(manifest.get("snapshot_days") or 0) <= 0 and int(manifest.get("fetched_rows") or 0) <= 0
+            result = {
+                "symbol": symbol,
+                "snapshot_date": date.date().isoformat(),
+                "downloaded": not empty,
+                "skipped": False,
+                "manifest": manifest,
+            }
+            if empty:
+                unavailable_symbols.add(symbol)
+                result.update({"skipped": True, "reason": "empty_symbol"})
+            else:
+                _upsert_options_catalog_state(
+                    warehouse,
+                    symbol=symbol,
+                    start_date=str(manifest["start_date"]),
+                    end_date=str(manifest["end_date"]),
+                    snapshot_days=int(manifest.get("snapshot_days") or 0),
+                    contracts_total=int(manifest.get("contracts_total") or 0),
+                )
+            results.append(result)
+            if callable(progress_logger):
+                progress_logger(
+                    f"[thetadata-oracle-ranges] {index}/{len(missing)} {symbol} {date.date()} "
+                    f"contracts={manifest.get('contracts_total')}"
+                )
+        except Exception as exc:  # noqa: BLE001
+            results.append({"symbol": symbol, "snapshot_date": date.date().isoformat(), "skipped": False, "error": str(exc)})
+            if callable(progress_logger):
+                progress_logger(f"[thetadata-oracle-ranges] error {symbol} {date.date()}: {exc}")
+        if request_sleep > 0 and index < len(missing):
+            time.sleep(float(request_sleep))
+
+    return {
+        "status": "ok",
+        "source": "oracle-trade-ranges",
+        "sort_order": "snapshot_date_desc",
+        "trade_windows": int(len(windows)),
+        "symbols": int(windows["symbol"].nunique()),
+        "dates_requested": int(len(keys)),
+        "dates_cached": int(len(keys) - len(missing)),
+        "dates_missing": int(len(missing)),
+        "dates_downloaded": int(sum(bool(row.get("downloaded")) for row in results)),
+        "dates_skipped": int(sum(bool(row.get("skipped")) for row in results)),
+        "dates_failed": int(sum(bool(row.get("error")) for row in results)),
+        "results": results,
+    }
+
+
 def log_progress(message: str) -> None:
     print(message, file=sys.stderr, flush=True)
