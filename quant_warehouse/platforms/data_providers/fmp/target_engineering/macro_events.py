@@ -37,6 +37,14 @@ def _slug(value: object) -> str:
     return text or "unknown_event"
 
 
+def _canonical_event_type(event_type: str) -> str:
+    """Collapse recurring calendar names that contain release month/day text."""
+    months = "jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec"
+    value = re.sub(rf"_(?:{months})(?:_\d{{1,2}})?$", "", str(event_type))
+    value = re.sub(r"_q[1-4]$", "", value)
+    return value or str(event_type)
+
+
 def normalize_macro_events(events: pd.DataFrame) -> pd.DataFrame:
     """Normalize FMP economic-calendar rows into one row per release."""
     if events is None or events.empty:
@@ -48,6 +56,10 @@ def normalize_macro_events(events: pd.DataFrame) -> pd.DataFrame:
             ]
         )
     frame = events.copy()
+    if "date" not in frame.columns and (
+        isinstance(frame.index, pd.DatetimeIndex) or str(frame.index.name or "").lower() == "date"
+    ):
+        frame = frame.reset_index().rename(columns={frame.index.name or "index": "date"})
     if "date" not in frame.columns or "event" not in frame.columns:
         raise ValueError("macro events require date and event columns")
     frame["date"] = pd.to_datetime(frame["date"], errors="coerce", utc=True).dt.tz_convert(None)
@@ -86,7 +98,7 @@ def _macro_target_name(row: pd.Series) -> str:
     without expanding a restrictive taxonomy.
     """
     country = str(row.get("country", "")).lower()
-    event_type = str(row.get("event_type", "unknown_event"))
+    event_type = _canonical_event_type(str(row.get("event_type", "unknown_event")))
     is_rate_decision = country == "us" and (
         "interest_rate_decision" in event_type
         or "federal_funds_rate" in event_type
@@ -102,6 +114,16 @@ def _macro_target_name(row: pd.Series) -> str:
                 return "fed_rate_hike"
             return "fed_rate_hold"
         return "fed_rate_decision"
+    actual = pd.to_numeric(pd.Series([row.get("actual")]), errors="coerce").iloc[0]
+    previous = pd.to_numeric(pd.Series([row.get("previous")]), errors="coerce").iloc[0]
+    if pd.notna(actual) and pd.notna(previous):
+        if actual > previous:
+            direction = "increase"
+        elif actual < previous:
+            direction = "decrease"
+        else:
+            direction = "unchanged"
+        return f"macro_{country or 'global'}_{event_type}_{direction}"
     return f"macro_{country or 'global'}_{event_type}"
 
 

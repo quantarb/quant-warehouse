@@ -77,3 +77,17 @@ def test_fed_rate_direction_becomes_independent_binary_event_targets():
     panel = build_macro_event_label_panel(tokens, events)
     assert panel.loc[panel.date == "2025-01-29", "is_fed_rate_cut"].eq(1).all()
     assert panel.loc[panel.date == "2025-01-30", "is_fed_rate_cut"].eq(0).all()
+
+
+def test_recurring_month_suffixes_share_one_macro_target():
+    events = pd.DataFrame(
+        {
+            "date": ["2025-01-15", "2025-02-15"],
+            "country": ["US", "US"],
+            "event": ["CPI YoY (Dec)", "CPI YoY (Jan)"],
+            "actual": [2.5, 2.6],
+            "previous": [2.4, 2.5],
+        }
+    )
+    targets = build_macro_event_targets(events)
+    assert targets.target_name.tolist() == ["macro_us_cpi_yoy_increase", "macro_us_cpi_yoy_increase"]
