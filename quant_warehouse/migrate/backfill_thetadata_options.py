@@ -6,7 +6,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Literal, Mapping, Sequence
+from typing import Any, Callable, Literal, Mapping, MutableSet, Sequence
 
 import pandas as pd
 
@@ -16,7 +16,7 @@ from quant_warehouse.platforms.data_providers.thetadata.options import (
     THETADATA_RICH_OPTION_COLUMNS,
     ThetaDataDownloadSpec,
     download_option_snapshots_for_range,
-    option_chain_cached_date_summary,
+    option_chain_cached_date_summary_bulk,
     option_chain_range_cached,
 )
 from quant_warehouse.warehouse.api import Warehouse
@@ -32,6 +32,34 @@ MARKET_CAP_TIERS: dict[str, float] = {
     "100b": 100_000_000_000,
     "10b": 10_000_000_000,
 }
+
+
+def fmp_trading_days_for_year(
+    year: int,
+    *,
+    warehouse: Warehouse | None = None,
+    calendar_symbol: str = "SPY",
+) -> tuple[pd.Timestamp, ...]:
+    """Return distinct FMP price dates for a calendar year.
+
+    FMP's stored daily price panel is the source of truth for valid US market
+    trading dates. This avoids treating exchange holidays as ThetaData dates.
+    """
+
+    warehouse = warehouse or Warehouse()
+    start = f"{int(year):04d}-01-01"
+    end = f"{int(year):04d}-12-31"
+    frame = warehouse.read_prices(calendar_symbol, provider="fmp", start=start, end=end)
+    if frame is None or frame.empty:
+        raise ValueError(f"FMP price history is missing for calendar symbol {calendar_symbol!r} in {year}")
+    if "date" in frame.columns:
+        dates = pd.to_datetime(frame["date"], errors="coerce")
+    else:
+        dates = pd.to_datetime(frame.index, errors="coerce")
+    result = tuple(sorted({pd.Timestamp(value).normalize() for value in dates.dropna()}))
+    if not result:
+        raise ValueError(f"FMP price history contains no valid dates for {calendar_symbol!r} in {year}")
+    return result
 
 
 def _is_us_option_symbol(symbol: str) -> bool:
@@ -220,6 +248,7 @@ def _cached_endpoint_dates_by_symbol(trade_windows: pd.DataFrame) -> dict[str, s
     cached: dict[str, set[pd.Timestamp]] = {}
     if trade_windows.empty:
         return cached
+    requested_ranges: dict[str, tuple[pd.Timestamp, pd.Timestamp]] = {}
     for symbol, group in trade_windows.groupby("symbol", sort=True):
         endpoints = pd.concat([group["entry_date"], group["exit_date"]], ignore_index=True)
         dates = sorted({pd.Timestamp(value).normalize() for value in endpoints.dropna()})
@@ -227,13 +256,18 @@ def _cached_endpoint_dates_by_symbol(trade_windows: pd.DataFrame) -> dict[str, s
         if not business_dates:
             cached[str(symbol).upper()] = set()
             continue
-        cached_dates, _row_count = option_chain_cached_date_summary(
-            str(symbol).upper(),
-            min(business_dates),
-            max(business_dates),
+        requested_ranges[str(symbol).upper()] = (min(business_dates), max(business_dates))
+    if requested_ranges:
+        global_start = min(start for start, _end in requested_ranges.values())
+        global_end = max(end for _start, end in requested_ranges.values())
+        bulk = option_chain_cached_date_summary_bulk(
+            requested_ranges.keys(),
+            global_start,
+            global_end,
             required_columns=THETADATA_RICH_OPTION_COLUMNS,
         )
-        cached[str(symbol).upper()] = {pd.Timestamp(value).normalize() for value in cached_dates}
+        for symbol in requested_ranges:
+            cached[symbol] = {pd.Timestamp(value).normalize() for value in bulk.get(symbol, (set(), 0))[0]}
     return cached
 
 
@@ -442,7 +476,9 @@ def backfill_thetadata_options_for_oracle_trades(
     skip_existing: bool = True,
     overwrite: bool = False,
     request_sleep: float = 1.0,
+    trading_days: Sequence[date | str | pd.Timestamp] | None = None,
     empty_symbol_probe_limit: int = 1,
+    probed_symbols: MutableSet[str] | None = None,
     progress_logger: ProgressLogger = None,
 ) -> dict[str, object]:
     """Download ThetaData EOD option chains for oracle trade entry/exit dates."""
@@ -462,13 +498,25 @@ def backfill_thetadata_options_for_oracle_trades(
 
     records = trade_windows.to_dict("records")
     endpoint_keys: list[tuple[str, pd.Timestamp]] = []
+    valid_trading_days = (
+        {pd.Timestamp(value).normalize() for value in trading_days}
+        if trading_days is not None
+        else None
+    )
     for trade in records:
         symbol = str(trade["symbol"]).upper()
         start = pd.Timestamp(trade["entry_date"]).normalize()
         end = pd.Timestamp(trade["exit_date"]).normalize()
         for snapshot_date in _oracle_trade_endpoint_dates(start, end):
+            if valid_trading_days is not None and pd.Timestamp(snapshot_date).normalize() not in valid_trading_days:
+                continue
             endpoint_keys.append((symbol, pd.Timestamp(snapshot_date).normalize()))
     unique_endpoint_keys = list(dict.fromkeys(endpoint_keys))
+    if callable(progress_logger):
+        progress_logger(
+            f"[thetadata-oracle-options] planned trades={total:,} "
+            f"unique_endpoint_dates={len(unique_endpoint_keys):,} order=trade_entry_desc"
+        )
 
     endpoint_results: dict[tuple[str, pd.Timestamp], dict[str, object]] = {}
     for symbol, snapshot_date in unique_endpoint_keys:
@@ -490,15 +538,12 @@ def backfill_thetadata_options_for_oracle_trades(
             date_result.update({"skipped": True, "reason": "current_or_future_eod_snapshot"})
         endpoint_results[(symbol, snapshot_date)] = date_result
 
-    no_cache_symbols: list[str] = []
-    if skip_existing and not overwrite:
-        seen_symbols: set[str] = set()
-        for symbol, _snapshot_date in unique_endpoint_keys:
-            if symbol in seen_symbols:
-                continue
-            seen_symbols.add(symbol)
-            if not cached_dates_by_symbol.get(symbol):
-                no_cache_symbols.append(symbol)
+    # Always probe every symbol, even when its endpoint dates appear cached.
+    # This makes zero-contract symbols explicit and prevents wasting calls on
+    # later endpoint dates that cannot return option chains.
+    no_cache_symbols = sorted({symbol for symbol, _snapshot_date in unique_endpoint_keys})
+    if probed_symbols is not None:
+        no_cache_symbols = [symbol for symbol in no_cache_symbols if symbol not in probed_symbols]
 
     unavailable_symbols: set[str] = set()
     for probe_index, symbol in enumerate(no_cache_symbols, start=1):
@@ -506,7 +551,7 @@ def backfill_thetadata_options_for_oracle_trades(
             (
                 (key_symbol, key_date)
                 for key_symbol, key_date in unique_endpoint_keys
-                if key_symbol == symbol and not endpoint_results[(key_symbol, key_date)].get("skipped")
+                if key_symbol == symbol and key_date < today
             ),
             None,
         )
@@ -550,11 +595,14 @@ def backfill_thetadata_options_for_oracle_trades(
                     snapshot_days=int(manifest.get("snapshot_days") or 0),
                     contracts_total=int(manifest.get("contracts_total") or 0),
                 )
+            if probed_symbols is not None:
+                probed_symbols.add(symbol)
             if callable(progress_logger):
                 status_text = "empty probe" if is_empty else "probe"
                 progress_logger(
                     f"[thetadata-oracle-options] {status_text} {probe_index}/{len(no_cache_symbols)} "
-                    f"{symbol} {probe_date.date()} contracts={manifest.get('contracts_total')}"
+                    f"({'db' if manifest.get('cached_only') else 'api'}) {symbol} "
+                    f"{probe_date.date()} contracts={manifest.get('contracts_total')}"
                 )
         except Exception as exc:
             endpoint_results[probe_key].update(
@@ -600,6 +648,11 @@ def backfill_thetadata_options_for_oracle_trades(
             )
             continue
         try:
+            if callable(progress_logger):
+                progress_logger(
+                    f"[thetadata-oracle-options] downloading {download_index}/{len(missing_endpoint_keys)} "
+                    f"{symbol} {snapshot_date.date()}"
+                )
             manifest = download_option_snapshots_for_range(
                 symbol,
                 snapshot_date,
@@ -662,14 +715,19 @@ def backfill_thetadata_options_for_oracle_trades(
             "entry_date": start.date().isoformat(),
             "exit_date": end.date().isoformat(),
             "snapshot_mode": "entry_exit",
-            "snapshot_dates": [ts.date().isoformat() for ts in _oracle_trade_endpoint_dates(start, end)],
         }
+        snapshot_dates = [
+            pd.Timestamp(ts).normalize()
+            for ts in _oracle_trade_endpoint_dates(start, end)
+            if valid_trading_days is None or pd.Timestamp(ts).normalize() in valid_trading_days
+        ]
+        row["snapshot_dates"] = [ts.date().isoformat() for ts in snapshot_dates]
         date_results = []
         manifests: list[dict[str, Any]] = []
         errors: list[str] = []
         provider_calls = 0
-        for snapshot_date in _oracle_trade_endpoint_dates(start, end):
-            date_result = dict(endpoint_results[(symbol, pd.Timestamp(snapshot_date).normalize())])
+        for snapshot_date in snapshot_dates:
+            date_result = dict(endpoint_results[(symbol, snapshot_date)])
             manifest = date_result.pop("manifest", None)
             if manifest is not None:
                 manifests.append(manifest)
@@ -750,16 +808,24 @@ def write_backfill_log(summary: dict[str, object], *, log_path: str | Path) -> P
 def backfill_thetadata_options_for_oracle_trade_ranges(
     trades: Sequence[Mapping[str, Any]] | pd.DataFrame,
     *,
+    mode: Literal["oracle_entry_exit", "all"] = "all",
     warehouse: Warehouse | None = None,
     config: WarehouseConfig | None = None,
     symbols: Sequence[str] | None = None,
     max_trades: int | None = None,
+    trading_days: Sequence[date | str | pd.Timestamp] | None = None,
     skip_existing: bool = True,
     overwrite: bool = False,
     request_sleep: float = 1.0,
+    empty_symbol_probe_limit: int = 1,
+    probed_symbols: MutableSet[str] | None = None,
     progress_logger: ProgressLogger = None,
 ) -> dict[str, object]:
-    """Backfill every business date in oracle windows, newest date first.
+    """Backfill ThetaData using an explicit oracle snapshot policy.
+
+    ``oracle_entry_exit`` downloads only each trade's entry and exit dates.
+    ``all`` downloads every missing business date in each oracle window,
+    ordered newest-first so repeated runs progressively work backward.
 
     This is the progressive data-completion pass for option labels. It writes
     full chains to the warehouse and is safe to rerun: cached symbol/date
@@ -767,43 +833,131 @@ def backfill_thetadata_options_for_oracle_trade_ranges(
     missing date.
     """
 
+    if mode not in {"oracle_entry_exit", "all"}:
+        raise ValueError("mode must be 'oracle_entry_exit' or 'all'")
+    if mode == "oracle_entry_exit":
+        return backfill_thetadata_options_for_oracle_trades(
+            trades,
+            warehouse=warehouse,
+            config=config,
+            symbols=symbols,
+            max_trades=max_trades,
+            trading_days=trading_days,
+            skip_existing=skip_existing,
+            overwrite=overwrite,
+            request_sleep=request_sleep,
+            empty_symbol_probe_limit=empty_symbol_probe_limit,
+            probed_symbols=probed_symbols,
+            progress_logger=progress_logger,
+        )
+
     warehouse = warehouse or Warehouse(config=config)
     windows = normalize_oracle_trade_windows(trades, max_trades=max_trades, symbols=symbols)
     if windows.empty:
         return {"status": "empty_trades", "dates_requested": 0, "dates_downloaded": 0}
 
     today = pd.Timestamp(datetime.now(timezone.utc).date()).normalize()
+    valid_trading_days = (
+        {pd.Timestamp(value).normalize() for value in trading_days}
+        if trading_days is not None
+        else None
+    )
     keys: set[tuple[str, pd.Timestamp]] = set()
     for row in windows.to_dict("records"):
         symbol = str(row["symbol"]).upper()
         start = pd.Timestamp(row["entry_date"]).normalize()
         end = pd.Timestamp(row["exit_date"]).normalize()
         for date in _business_days(start, end):
-            if date < today:
+            if (valid_trading_days is None or date in valid_trading_days) and date < today:
                 keys.add((symbol, date))
 
     cached_by_symbol: dict[str, set[pd.Timestamp]] = {}
     if skip_existing and not overwrite:
-        for symbol in sorted({symbol for symbol, _date in keys}):
-            symbol_dates = [date for key_symbol, date in keys if key_symbol == symbol]
-            if symbol_dates:
-                cached, _rows = option_chain_cached_date_summary(
-                    symbol, min(symbol_dates), max(symbol_dates)
-                )
-                cached_by_symbol[symbol] = cached
+        requested_dates_by_symbol: dict[str, list[pd.Timestamp]] = {}
+        for symbol, date in keys:
+            requested_dates_by_symbol.setdefault(symbol, []).append(date)
+        if requested_dates_by_symbol:
+            bulk = option_chain_cached_date_summary_bulk(
+                requested_dates_by_symbol.keys(),
+                min(date for dates in requested_dates_by_symbol.values() for date in dates),
+                max(date for dates in requested_dates_by_symbol.values() for date in dates),
+                required_columns=THETADATA_RICH_OPTION_COLUMNS,
+            )
+            for symbol, requested_dates in requested_dates_by_symbol.items():
+                cached_dates = bulk.get(symbol, (set(), 0))[0]
+                requested_set = set(requested_dates)
+                cached_by_symbol[symbol] = cached_dates.intersection(requested_set)
 
     missing = [
         key for key in keys
         if overwrite or key[1] not in cached_by_symbol.get(key[0], set())
     ]
     missing.sort(key=lambda item: (item[1], item[0]), reverse=True)
-    results: list[dict[str, object]] = []
+    # Always probe every symbol before the date loop. A zero-contract probe
+    # suppresses the symbol for this run, while a non-empty probe is cached and
+    # the normal loop proceeds over the remaining dates.
     unavailable_symbols: set[str] = set()
+    probe_symbols = sorted({symbol for symbol, _date in keys})
+    if probed_symbols is not None:
+        probe_symbols = [symbol for symbol in probe_symbols if symbol not in probed_symbols]
+    for probe_index, symbol in enumerate(probe_symbols, start=1):
+        symbol_dates = sorted(date for key_symbol, date in keys if key_symbol == symbol and date < today)
+        if not symbol_dates:
+            continue
+        probe_date = symbol_dates[-1]
+        if callable(progress_logger):
+            progress_logger(
+                f"[thetadata-oracle-ranges] probe {probe_index}/{len(probe_symbols)} "
+                f"{symbol} {probe_date.date()}"
+            )
+        try:
+            probe_manifest = download_option_snapshots_for_range(
+                symbol,
+                probe_date,
+                probe_date,
+                overwrite=overwrite,
+            )
+            probe_empty = (
+                int(probe_manifest.get("snapshot_days") or 0) <= 0
+                and int(probe_manifest.get("contracts_total") or 0) <= 0
+                and int(probe_manifest.get("fetched_rows") or 0) <= 0
+            )
+            if probe_empty:
+                unavailable_symbols.add(symbol)
+                if callable(progress_logger):
+                    progress_logger(
+                        f"[thetadata-oracle-ranges] probe empty {symbol} {probe_date.date()} "
+                        "; skipping remaining dates for this run"
+                    )
+            elif callable(progress_logger):
+                progress_logger(
+                    f"[thetadata-oracle-ranges] probe ok ({'db' if probe_manifest.get('cached_only') else 'api'}) "
+                    f"{symbol} {probe_date.date()} contracts={probe_manifest.get('contracts_total')}"
+                )
+            if probed_symbols is not None:
+                probed_symbols.add(symbol)
+        except Exception as exc:
+            if callable(progress_logger):
+                progress_logger(
+                    f"[thetadata-oracle-ranges] probe error {symbol} {probe_date.date()}: {exc}"
+                )
+    if callable(progress_logger):
+        progress_logger(
+            f"[thetadata-oracle-ranges] planned windows={len(windows):,} "
+            f"unique_dates={len(keys):,} cached={len(keys) - len(missing):,} "
+            f"missing={len(missing):,} order=newest_first"
+        )
+    results: list[dict[str, object]] = []
     for index, (symbol, date) in enumerate(missing, start=1):
         if symbol in unavailable_symbols:
             results.append({"symbol": symbol, "snapshot_date": date.date().isoformat(), "skipped": True, "reason": "empty_symbol"})
             continue
         try:
+            if callable(progress_logger):
+                progress_logger(
+                    f"[thetadata-oracle-ranges] downloading {index}/{len(missing)} "
+                    f"{symbol} {date.date()}"
+                )
             manifest = download_option_snapshots_for_range(
                 symbol,
                 date,
@@ -846,6 +1000,7 @@ def backfill_thetadata_options_for_oracle_trade_ranges(
     return {
         "status": "ok",
         "source": "oracle-trade-ranges",
+        "mode": mode,
         "sort_order": "snapshot_date_desc",
         "trade_windows": int(len(windows)),
         "symbols": int(windows["symbol"].nunique()),

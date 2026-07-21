@@ -211,15 +211,16 @@ def test_backfill_thetadata_options_for_oracle_trades_skips_cached_windows(monke
     class _Warehouse:
         catalog = _Catalog()
 
-    def _fake_cached_summary(symbol, start_date, end_date, **kwargs):
-        cached_calls.append((symbol, pd.Timestamp(start_date), pd.Timestamp(end_date)))
-        if symbol == "AAPL":
-            return {
+    def _fake_cached_summary_bulk(symbols, start_date, end_date, **kwargs):
+        cached_calls.append(("bulk", pd.Timestamp(start_date), pd.Timestamp(end_date)))
+        return {
+            "AAPL": ({
                 pd.Timestamp("2024-02-01"),
                 pd.Timestamp("2024-02-02"),
                 pd.Timestamp("2024-02-05"),
-            }, 10
-        return set(), 0
+            }, 10),
+            "MSFT": (set(), 0),
+        }
 
     def _fake_download(symbol, start_date, end_date, **kwargs):
         download_calls.append((symbol, pd.Timestamp(start_date), pd.Timestamp(end_date)))
@@ -239,8 +240,8 @@ def test_backfill_thetadata_options_for_oracle_trades_skips_cached_windows(monke
         }
 
     monkeypatch.setattr(
-        "quant_warehouse.migrate.backfill_thetadata_options.option_chain_cached_date_summary",
-        _fake_cached_summary,
+        "quant_warehouse.migrate.backfill_thetadata_options.option_chain_cached_date_summary_bulk",
+        _fake_cached_summary_bulk,
     )
     monkeypatch.setattr(
         "quant_warehouse.migrate.backfill_thetadata_options.download_option_snapshots_for_range",
@@ -261,11 +262,9 @@ def test_backfill_thetadata_options_for_oracle_trades_skips_cached_windows(monke
     assert summary["trade_windows_requested"] == 2
     assert summary["trade_windows_skipped"] == 1
     assert [row["trade_id"] for row in summary["results"]] == ["newer", "older"]
-    assert cached_calls == [
-        ("AAPL", pd.Timestamp("2024-02-01"), pd.Timestamp("2024-02-05")),
-        ("MSFT", pd.Timestamp("2024-01-02"), pd.Timestamp("2024-01-05")),
-    ]
+    assert cached_calls == [("bulk", pd.Timestamp("2024-01-02"), pd.Timestamp("2024-02-05"))]
     assert download_calls == [
+        ("AAPL", pd.Timestamp("2024-02-01"), pd.Timestamp("2024-02-01")),
         ("MSFT", pd.Timestamp("2024-01-02"), pd.Timestamp("2024-01-02")),
         ("MSFT", pd.Timestamp("2024-01-05"), pd.Timestamp("2024-01-05")),
     ]
@@ -284,9 +283,9 @@ def test_backfill_thetadata_options_for_oracle_trades_skips_current_or_future_en
     class _Warehouse:
         catalog = _Catalog()
 
-    def _fake_cached_summary(symbol, start_date, end_date, **kwargs):
-        cached_calls.append((symbol, pd.Timestamp(start_date), pd.Timestamp(end_date)))
-        return set(), 0
+    def _fake_cached_summary_bulk(symbols, start_date, end_date, **kwargs):
+        cached_calls.append(("bulk", pd.Timestamp(start_date), pd.Timestamp(end_date)))
+        return {str(symbol): (set(), 0) for symbol in symbols}
 
     def _fake_download(symbol, start_date, end_date, **kwargs):
         download_calls.append((symbol, pd.Timestamp(start_date), pd.Timestamp(end_date)))
@@ -306,8 +305,8 @@ def test_backfill_thetadata_options_for_oracle_trades_skips_current_or_future_en
         }
 
     monkeypatch.setattr(
-        "quant_warehouse.migrate.backfill_thetadata_options.option_chain_cached_date_summary",
-        _fake_cached_summary,
+        "quant_warehouse.migrate.backfill_thetadata_options.option_chain_cached_date_summary_bulk",
+        _fake_cached_summary_bulk,
     )
     monkeypatch.setattr(
         "quant_warehouse.migrate.backfill_thetadata_options.download_option_snapshots_for_range",
@@ -326,9 +325,7 @@ def test_backfill_thetadata_options_for_oracle_trades_skips_current_or_future_en
 
     assert summary["trade_windows_requested"] == 1
     assert summary["trade_windows_skipped"] == 1
-    assert cached_calls == [
-        ("AAPL", pd.Timestamp("2099-01-02"), pd.Timestamp("2099-01-05")),
-    ]
+    assert cached_calls == [("bulk", pd.Timestamp("2099-01-02"), pd.Timestamp("2099-01-05"))]
     assert download_calls == []
     assert {row["reason"] for row in summary["results"][0]["date_results"]} == {"current_or_future_eod_snapshot"}
 
@@ -344,8 +341,8 @@ def test_backfill_thetadata_options_for_oracle_trades_removes_symbol_after_empty
         catalog = _Catalog()
 
     monkeypatch.setattr(
-        "quant_warehouse.migrate.backfill_thetadata_options.option_chain_cached_date_summary",
-        lambda *args, **kwargs: (set(), 0),
+        "quant_warehouse.migrate.backfill_thetadata_options.option_chain_cached_date_summary_bulk",
+        lambda symbols, *args, **kwargs: {str(symbol): (set(), 0) for symbol in symbols},
     )
 
     def _fake_download(symbol, start_date, end_date, **kwargs):

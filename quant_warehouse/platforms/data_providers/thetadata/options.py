@@ -652,6 +652,73 @@ def option_chain_cached_date_summary(
     return rich_dates, rich_row_count
 
 
+def option_chain_cached_date_summary_bulk(
+    symbols: Sequence[str],
+    start_date: date | str | pd.Timestamp,
+    end_date: date | str | pd.Timestamp,
+    *,
+    required_columns: Sequence[str] | None = None,
+    backend: Any | None = None,
+    config: WarehouseConfig | None = None,
+    batch_size: int = 100,
+) -> dict[str, tuple[set[pd.Timestamp], int]]:
+    """Return cached date summaries for many symbols with one ArcticDB batch read.
+
+    The result uses the same rich-date contract as
+    :func:`option_chain_cached_date_summary`, but submits all symbol reads to
+    ArcticDB's ``read_batch`` API instead of opening one read per symbol.
+    """
+
+    normalized_symbols = sorted({str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()})
+    result = {symbol: (set(), 0) for symbol in normalized_symbols}
+    if not normalized_symbols:
+        return result
+    from arcticdb import ReadRequest
+
+    backend = backend or open_backend(config or WarehouseConfig.from_env())
+    library_name = provider_library(OPTIONS_THETADATA_EOD_LIBRARY, OPTIONS_THETADATA_PROVIDER)
+    physical_backend = backend._backend_for_library(library_name)
+    library = physical_backend._library(library_name)
+    requested_columns = ["snapshot_date"]
+    if required_columns is not None:
+        requested_columns.extend(str(column) for column in required_columns)
+    start = pd.Timestamp(start_date).normalize()
+    end = pd.Timestamp(end_date).normalize()
+    chunk_size = max(1, int(batch_size))
+    for offset in range(0, len(normalized_symbols), chunk_size):
+        chunk_symbols = normalized_symbols[offset : offset + chunk_size]
+        requests = [
+            ReadRequest(
+                symbol,
+                date_range=(start, end),
+                columns=requested_columns,
+            )
+            for symbol in chunk_symbols
+        ]
+        items = library.read_batch(requests)
+        for symbol, item in zip(chunk_symbols, items, strict=True):
+            frame = getattr(item, "data", None)
+            if frame is None or frame.empty or "snapshot_date" not in frame.columns:
+                continue
+            dates = _normalize_snapshot_dates(frame["snapshot_date"]).dropna()
+            if required_columns is None:
+                result[symbol] = ({pd.Timestamp(ts).normalize() for ts in dates.unique()}, int(len(frame)))
+                continue
+            required = [str(column) for column in required_columns]
+            if any(column not in frame.columns for column in required):
+                continue
+            work = frame.copy()
+            work["_snapshot_date"] = dates
+            rich_dates: set[pd.Timestamp] = set()
+            rich_row_count = 0
+            for ts, group in work.dropna(subset=["_snapshot_date"]).groupby("_snapshot_date", sort=True):
+                if all(group[column].notna().any() for column in required):
+                    rich_dates.add(pd.Timestamp(ts).normalize())
+                    rich_row_count += int(len(group))
+            result[symbol] = (rich_dates, rich_row_count)
+    return result
+
+
 def load_thetadata_option_snapshots(
     symbol: str,
     snapshot_dates: Sequence[date | str | pd.Timestamp],
@@ -867,7 +934,6 @@ def _download_and_cache_snapshots(
         )
         if fetched.empty:
             continue
-        fetched_rows += len(fetched)
         chunk_frames: list[pd.DataFrame] = []
         for ts, frame in split_snapshots_by_date(fetched).items():
             if ts not in requested or frame.empty:
@@ -876,6 +942,7 @@ def _download_and_cache_snapshots(
             chunk_frames.append(frame)
         if backend is not None and chunk_frames:
             combined = pd.concat(chunk_frames, ignore_index=True, sort=False)
+            fetched_rows += len(combined)
             paths.append(write_option_chain_arctic(symbol, combined, backend=backend, merge=True))
 
     missing_dates = [ts for ts in requested_dates if ts not in downloaded_dates]
@@ -883,7 +950,6 @@ def _download_and_cache_snapshots(
         day_frame = fetch_option_history_eod(symbol, ts, ts, spec=spec)
         if day_frame.empty:
             continue
-        fetched_rows += len(day_frame)
         day_frames: list[pd.DataFrame] = []
         for day_ts, frame in split_snapshots_by_date(day_frame).items():
             if day_ts not in requested or frame.empty:
@@ -892,6 +958,7 @@ def _download_and_cache_snapshots(
             day_frames.append(frame)
         if backend is not None and day_frames:
             combined = pd.concat(day_frames, ignore_index=True, sort=False)
+            fetched_rows += len(combined)
             paths.append(write_option_chain_arctic(symbol, combined, backend=backend, merge=True))
 
     return downloaded_dates, fetched_rows, list(dict.fromkeys(paths))
