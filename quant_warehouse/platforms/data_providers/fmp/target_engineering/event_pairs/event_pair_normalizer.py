@@ -4,11 +4,10 @@ from typing import Any
 
 import pandas as pd
 
-from quant_warehouse.platforms.data_providers.fmp.target_engineering.event_pairs.event_pair_schema import EVENT_PAIR_COLUMNS
-from quant_warehouse.platforms.data_providers.fmp.target_engineering.event_pairs.event_pair_taxonomy import get_event_side, get_mirror_event_type
+from quant_warehouse.platforms.data_providers.fmp.target_engineering.event_pairs.event_pair_schema import EVENT_COLUMNS
 
 
-def normalize_event_pairs(
+def normalize_events(
     raw_events: pd.DataFrame,
     *,
     event_family: str,
@@ -29,10 +28,10 @@ def normalize_event_pairs(
     reported_date_col: str | None = None,
     raw_json_col: str | None = None,
 ) -> pd.DataFrame:
-    """Normalize observed mirrored event-pair rows on exact event dates only."""
+    """Normalize independent event rows on exact event dates only."""
 
     if raw_events is None or raw_events.empty:
-        return pd.DataFrame(columns=EVENT_PAIR_COLUMNS)
+        return pd.DataFrame(columns=EVENT_COLUMNS)
     required = [event_type_col, symbol_col, event_date_col]
     for optional in (
         actor_type_col,
@@ -56,7 +55,6 @@ def normalize_event_pairs(
     family = str(event_family).strip().lower()
     for _, row in raw_events.iterrows():
         event_type = str(row[event_type_col]).strip().lower()
-        event_side = get_event_side(family, event_type)
         event_date = pd.to_datetime(row[event_date_col], errors="coerce")
         if pd.isna(event_date):
             continue
@@ -73,8 +71,6 @@ def normalize_event_pairs(
                 "event_date": event_date.normalize(),
                 "event_family": family,
                 "event_type": event_type,
-                "event_side": event_side,
-                "mirror_event_type": get_mirror_event_type(family, event_type),
                 "actor_type": _optional_value(row, actor_type_col),
                 "actor_name": _optional_value(row, actor_name_col),
                 "actor_role": _optional_value(row, actor_role_col),
@@ -92,11 +88,15 @@ def normalize_event_pairs(
             }
         )
     if not rows:
-        return pd.DataFrame(columns=EVENT_PAIR_COLUMNS)
-    return pd.DataFrame(rows, columns=EVENT_PAIR_COLUMNS).sort_values(
+        return pd.DataFrame(columns=EVENT_COLUMNS)
+    return pd.DataFrame(rows, columns=EVENT_COLUMNS).sort_values(
         ["symbol", "event_date", "event_type"],
         ignore_index=True,
     )
+
+
+# Transitional alias for downstream code.  It does not add pair semantics.
+normalize_event_pairs = normalize_events
 
 
 def _optional_value(row: pd.Series, column: str | None) -> Any:

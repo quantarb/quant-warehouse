@@ -49,9 +49,7 @@ def test_build_event_target_panel_aligns_events_same_day_only() -> None:
             "symbol": ["A"],
             "event_date": [pd.Timestamp("2024-01-03")],
             "event_family": ["congress"],
-            "event_type": ["congress_buy"],
-            "event_side": [1],
-            "mirror_event_type": ["congress_sell"],
+            "event_type": ["congressman_buy"],
             "actor_type": ["House"],
             "actor_name": ["Example"],
             "source": ["unit"],
@@ -64,8 +62,10 @@ def test_build_event_target_panel_aligns_events_same_day_only() -> None:
     target_panel, metadata = build_event_target_panel(feature_panel, events, config)
 
     assert set(metadata["target"]) == {
-        "target_event_on__congress_buy",
-        "target_event_on__congress_sell",
+        "target_event_on__congressman_buy",
+        "target_event_on__congressman_sell",
+        "target_event_on__senator_buy",
+        "target_event_on__senator_sell",
     }
     assert all(str(target).startswith("target_event_on__") for target in metadata["target"])
     assert all(
@@ -73,11 +73,11 @@ def test_build_event_target_panel_aligns_events_same_day_only() -> None:
         for column in target_panel.columns
     )
     assert (
-        target_panel.loc[target_panel["date"].eq(pd.Timestamp("2024-01-02")), "target_event_on__congress_buy"].item()
+        target_panel.loc[target_panel["date"].eq(pd.Timestamp("2024-01-02")), "target_event_on__congressman_buy"].item()
         == 0
     )
     assert (
-        target_panel.loc[target_panel["date"].eq(pd.Timestamp("2024-01-03")), "target_event_on__congress_buy"].item()
+        target_panel.loc[target_panel["date"].eq(pd.Timestamp("2024-01-03")), "target_event_on__congressman_buy"].item()
         == 1
     )
 
@@ -99,14 +99,7 @@ def test_build_event_target_panel_supports_canonical_event_families() -> None:
                 "analyst_estimate_raise",
                 "analyst_downgrade",
                 "insider_buy",
-                "earnings_miss",
-            ],
-            "event_side": [1, -1, 1, -1],
-            "mirror_event_type": [
-                "analyst_estimate_cut",
-                "analyst_upgrade",
-                "insider_sell",
-                "earnings_beat",
+                "eps_miss",
             ],
         }
     )
@@ -121,13 +114,16 @@ def test_build_event_target_panel_supports_canonical_event_families() -> None:
         "target_event_on__analyst_downgrade",
         "target_event_on__insider_buy",
         "target_event_on__insider_sell",
-        "target_event_on__earnings_beat",
-        "target_event_on__earnings_miss",
+        "target_event_on__earnings_reported",
+        "target_event_on__eps_beat",
+        "target_event_on__eps_miss",
+        "target_event_on__revenue_beat",
+        "target_event_on__revenue_miss",
     }
     assert int(target_panel["target_event_on__analyst_estimate_raise"].sum()) == 1
     assert int(target_panel["target_event_on__analyst_downgrade"].sum()) == 1
     assert int(target_panel["target_event_on__insider_buy"].sum()) == 1
-    assert int(target_panel["target_event_on__earnings_miss"].sum()) == 1
+    assert int(target_panel["target_event_on__eps_miss"].sum()) == 1
 
 
 def test_old_feature_family_names_are_not_event_family_aliases() -> None:
@@ -275,9 +271,9 @@ def test_summarize_binary_targets_uses_actual_event_rows_for_pair_positive_rate(
 
     summary = summarize_binary_targets(target_panel, target_metadata).set_index("target")
 
-    assert summary.loc["target_event_on__congress_buy", "rate_rows"] == 2
-    assert summary.loc["target_event_on__congress_buy", "positive_rate"] == 0.5
-    assert summary.loc["target_event_on__congress_sell", "positive_rate"] == 0.5
+    assert summary.loc["target_event_on__congress_buy", "rate_rows"] == 5
+    assert summary.loc["target_event_on__congress_buy", "positive_rate"] == 0.2
+    assert summary.loc["target_event_on__congress_sell", "positive_rate"] == 0.2
     assert summary.loc["target_oracle_trade_entry__YE_k1_long", "rate_rows"] == 3
     assert summary.loc["target_oracle_trade_entry__YE_k1_long", "positive_rate"] == 2 / 3
     assert summary.loc["target_oracle_trade_entry__YE_k1_short", "positive_rate"] == 1 / 3
@@ -306,19 +302,19 @@ def test_evaluate_feature_target_matrix_uses_actual_event_rows_for_pair_positive
         {
             "symbol": ["A"] * 5,
             "date": pd.date_range("2024-01-01", periods=5),
-            "target_event_on__congress_buy": [1, 0, 0, 0, 0],
-            "target_event_on__congress_sell": [0, 1, 0, 0, 0],
+            "target_event_on__congressman_buy": [1, 0, 0, 0, 0],
+            "target_event_on__congressman_sell": [0, 1, 0, 0, 0],
         }
     )
     target_metadata = pd.DataFrame(
         [
             {
-                "target": "target_event_on__congress_buy",
+                "target": "target_event_on__congressman_buy",
                 "target_family": "event",
                 "target_type": "binary",
             },
             {
-                "target": "target_event_on__congress_sell",
+                "target": "target_event_on__congressman_sell",
                 "target_family": "event",
                 "target_type": "binary",
             },
@@ -335,10 +331,10 @@ def test_evaluate_feature_target_matrix_uses_actual_event_rows_for_pair_positive
         min_feature_coverage=1.0,
     )
 
-    row = matrix.loc[matrix["target"].eq("target_event_on__congress_buy")].iloc[0]
-    assert row["rows"] == 2
+    row = matrix.loc[matrix["target"].eq("target_event_on__congressman_buy")].iloc[0]
+    assert row["rows"] == 5
     assert row["positive_rows"] == 1
-    assert row["positive_rate"] == 0.5
+    assert row["positive_rate"] == 0.2
 
 
 def test_collapsed_bullish_event_target_uses_event_rows_only() -> None:
@@ -354,9 +350,7 @@ def test_collapsed_bullish_event_target_uses_event_rows_only() -> None:
             "symbol": ["A", "A", "A"],
             "event_date": pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-05"]),
             "event_family": ["congress", "congress", "earnings"],
-            "event_type": ["congress_buy", "congress_sell", "earnings_beat"],
-            "event_side": [1, -1, 1],
-            "mirror_event_type": ["congress_sell", "congress_buy", "earnings_miss"],
+            "event_type": ["congressman_buy", "congressman_sell", "eps_beat"],
             "actor_type": [None, None, None],
             "actor_name": [None, None, None],
             "source": ["unit", "unit", "unit"],

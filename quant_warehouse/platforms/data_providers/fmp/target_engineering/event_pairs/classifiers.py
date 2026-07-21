@@ -87,7 +87,7 @@ def split_event_type(value: Any) -> str | None:
 def earnings_event_type(value: Any) -> str | None:
     if pd.isna(value) or float(value) == 0.0:
         return None
-    return "earnings_beat" if float(value) > 0 else "earnings_miss"
+    return "eps_beat" if float(value) > 0 else "eps_miss"
 
 
 def value_revision_event_type(current: Any, previous: Any, *, positive: str, negative: str) -> str | None:

@@ -9,7 +9,7 @@ import pandas as pd
 
 from quant_warehouse.platforms.data_providers.fmp.target_engineering.event_pairs import (
     EVENT_PAIR_COLUMNS,
-    EVENT_PAIR_TAXONOMY,
+    EVENT_FAMILY_TYPES,
     EventPairStore,
     build_event_pairs_from_historical_data,
 )
@@ -39,12 +39,14 @@ class BinaryTargetConfig:
     oracle_trade_short_exit_price_col: str = "high"
     event_alignment_tolerance_days: int = 7
     collapsed_bullish_event_types: tuple[str, ...] = (
-        "congress_buy",
+        "congressman_buy",
+        "senator_buy",
         "insider_buy",
         "analyst_upgrade",
         "analyst_estimate_raise",
         "price_target_raise",
-        "earnings_beat",
+        "eps_beat",
+        "revenue_beat",
     )
 
 
@@ -398,7 +400,7 @@ def _normalize_symbols(symbols: Iterable[str]) -> tuple[str, ...]:
 
 def _normalize_event_families(families: Sequence[str]) -> tuple[str, ...]:
     normalized = tuple(dict.fromkeys(str(family).strip().lower() for family in families if str(family).strip()))
-    unknown = sorted(set(normalized) - set(EVENT_PAIR_TAXONOMY))
+    unknown = sorted(set(normalized) - set(EVENT_FAMILY_TYPES))
     if unknown:
         raise ValueError(f"Unsupported event families: {unknown}")
     return normalized
@@ -407,8 +409,7 @@ def _normalize_event_families(families: Sequence[str]) -> tuple[str, ...]:
 def _event_types_for_families(families: Sequence[str]) -> list[str]:
     event_types: list[str] = []
     for family in _normalize_event_families(families):
-        pair = EVENT_PAIR_TAXONOMY[family]
-        event_types.extend([pair["positive"], pair["negative"]])
+        event_types.extend(EVENT_FAMILY_TYPES[family])
     return event_types
 
 
@@ -421,7 +422,7 @@ def _target_activity_mask(frame: pd.DataFrame, target: str) -> pd.Series:
     if activity_column in frame.columns:
         return pd.to_numeric(frame[activity_column], errors="coerce").fillna(0).gt(0)
     paired = _paired_target_column(target)
-    if paired is not None and paired in frame.columns:
+    if paired is not None and paired in frame.columns and not str(target).startswith("target_event_on__"):
         target_values = pd.to_numeric(frame[target], errors="coerce").fillna(0)
         paired_values = pd.to_numeric(frame[paired], errors="coerce").fillna(0)
         return target_values.gt(0) | paired_values.gt(0)
@@ -434,13 +435,9 @@ def _target_activity_mask(frame: pd.DataFrame, target: str) -> pd.Series:
 def _paired_target_column(target: str) -> str | None:
     target_name = str(target)
     prefix = "target_event_on__"
+    # Event labels are independent; there is no paired event column.
     if target_name.startswith(prefix):
-        event_type = target_name[len(prefix) :]
-        for pair in EVENT_PAIR_TAXONOMY.values():
-            if event_type == pair["positive"]:
-                return f"{prefix}{pair['negative']}"
-            if event_type == pair["negative"]:
-                return f"{prefix}{pair['positive']}"
+        return None
     oracle_prefix = "target_oracle_trade_entry__"
     if target_name.startswith(oracle_prefix):
         if target_name.endswith("_long"):

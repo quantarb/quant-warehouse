@@ -4,11 +4,9 @@ from typing import Sequence
 
 import pandas as pd
 
-from quant_warehouse.platforms.data_providers.fmp.target_engineering.event_pairs.event_pair_taxonomy import (
-    EVENT_PAIR_TAXONOMY,
-)
+from quant_warehouse.platforms.data_providers.fmp.target_engineering.event_pairs.event_registry import EVENT_FAMILIES
 
-_SUPPORTED_FAMILIES = tuple(EVENT_PAIR_TAXONOMY)
+_SUPPORTED_FAMILIES = EVENT_FAMILIES
 _DIRECT_FETCH_ERROR = (
     "Direct FMP event-pair fetches are disabled. Refresh the corresponding "
     "warehouse source sections and build event pairs from provider-local historical data."

@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-EVENT_PAIR_COLUMNS = [
+EVENT_COLUMNS = [
     "symbol",
     "event_date",
     "event_family",
     "event_type",
-    "event_side",
-    "mirror_event_type",
     "actor_type",
     "actor_name",
     "actor_role",
@@ -22,3 +20,7 @@ EVENT_PAIR_COLUMNS = [
     "disclosure_lag_days",
     "raw_json",
 ]
+
+# Compatibility name for callers that have not yet migrated their imports.
+# The schema itself is generalized and contains no pair fields.
+EVENT_PAIR_COLUMNS = EVENT_COLUMNS

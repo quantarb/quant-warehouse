@@ -22,8 +22,8 @@ def test_event_feature_text_dataset_uses_only_actual_event_rows() -> None:
             "date": pd.to_datetime(["2024-01-01", "2024-01-02", "2024-01-03"]),
             "f1": [1.0, 2.0, 3.0],
             "f2": [1.0, None, 3.0],
-            "target_event_on__congress_buy": [1, 0, 0],
-            "target_event_on__congress_sell": [0, 0, 1],
+            "target_event_on__congressman_buy": [1, 0, 0],
+            "target_event_on__congressman_sell": [0, 0, 1],
         }
     )
     metadata = pd.DataFrame(
@@ -43,7 +43,8 @@ def test_event_feature_text_dataset_uses_only_actual_event_rows() -> None:
 
     assert len(result.rows) == 2
     assert set(result.rows["date"]) == set(pd.to_datetime(["2024-01-01", "2024-01-03"]))
-    assert set(result.rows["label"]) == {"congress_buy", "congress_sell"}
+    assert set(result.rows["event_label"]) == {"congressman_buy", "congressman_sell"}
+    assert set(result.rows["label"]) == {1}
     assert pd.Timestamp("2024-01-02") not in set(result.rows["date"])
 
 
@@ -54,8 +55,8 @@ def test_event_feature_text_dataset_drops_orphan_feature_family_without_coverage
             "date": pd.to_datetime(["2024-01-01", "2024-01-02"]),
             "covered_feature": [1.0, 2.0],
             "orphan_feature": [None, None],
-            "target_event_on__earnings_beat": [1, 0],
-            "target_event_on__earnings_miss": [0, 1],
+            "target_event_on__eps_beat": [1, 0],
+            "target_event_on__eps_miss": [0, 1],
         }
     )
     metadata = pd.DataFrame(
@@ -77,8 +78,8 @@ def test_fmp_event_context_feature_families_are_sparse_by_event_family() -> None
         {
             "symbol": ["AAPL"],
             "date": pd.to_datetime(["2024-01-01"]),
-            "target_event_on__congress_buy": [1],
-            "target_event_on__congress_sell": [0],
+            "target_event_on__congressman_buy": [1],
+            "target_event_on__congressman_sell": [0],
             "target_event_on__analyst_upgrade": [1],
             "target_event_on__analyst_downgrade": [0],
         }
@@ -89,7 +90,7 @@ def test_fmp_event_context_feature_families_are_sparse_by_event_family() -> None
             "symbol": ["AAPL", "AAPL"],
             "event_date": pd.to_datetime(["2024-01-01", "2024-01-01"]),
             "event_family": ["congress", "analyst_rating"],
-            "event_type": ["congress_buy", "analyst_upgrade"],
+            "event_type": ["congressman_buy", "analyst_upgrade"],
             "actor_name": ["Nancy Pelosi", "Example Analyst"],
             "actor_type": ["house", "analyst"],
             "actor_chamber": ["house", None],
@@ -152,8 +153,8 @@ def test_task_family_allowlist_prevents_cross_event_context_mismatch() -> None:
         {
             "symbol": ["AAPL"],
             "date": pd.to_datetime(["2024-01-01"]),
-            "target_event_on__congress_buy": [1],
-            "target_event_on__congress_sell": [0],
+            "target_event_on__congressman_buy": [1],
+            "target_event_on__congressman_sell": [0],
             "target_event_on__analyst_upgrade": [1],
             "target_event_on__analyst_downgrade": [0],
             "fmp_congress_event_context__actor_name": ["Nancy Pelosi"],
@@ -190,8 +191,8 @@ def test_task_family_allowlist_prevents_cross_event_context_mismatch() -> None:
         allowed_feature_families_by_task=by_task,
     )
 
-    congress_rows = result.rows.loc[result.rows["target_task"].eq("event_pair__congress")]
-    analyst_rows = result.rows.loc[result.rows["target_task"].eq("event_pair__analyst_rating")]
+    congress_rows = result.rows.loc[result.rows["event_label"].eq("congressman_buy")]
+    analyst_rows = result.rows.loc[result.rows["event_label"].eq("analyst_upgrade")]
     assert set(congress_rows["feature_family"]) == {"fmp_congress_event_context"}
     assert set(analyst_rows["feature_family"]) == {"fmp_analyst_rating_event_context"}
     assert "Nancy Pelosi" in congress_rows.iloc[0]["text"]

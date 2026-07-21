@@ -9,7 +9,7 @@ from typing import Any, Iterable, Sequence
 import numpy as np
 import pandas as pd
 
-from quant_warehouse.platforms.data_providers.fmp.target_engineering.event_pairs import EVENT_PAIR_TAXONOMY
+from quant_warehouse.platforms.data_providers.fmp.target_engineering.event_pairs import EVENT_FAMILY_TYPES
 from quant_warehouse.research_tools.target_family_eval import BinaryTargetConfig
 from quant_warehouse.warehouse.api import Warehouse
 
@@ -125,7 +125,7 @@ def sanitize_task_name(value: str) -> str:
     return f"task_{text}"
 
 
-def event_pair_task_specs(
+def event_task_specs(
     target_config: BinaryTargetConfig,
     available_targets: Iterable[str],
 ) -> list[dict[str, object]]:
@@ -133,24 +133,22 @@ def event_pair_task_specs(
     specs: list[dict[str, object]] = []
     for family in target_config.event_families:
         family_key = str(family).strip().lower()
-        if family_key not in EVENT_PAIR_TAXONOMY:
+        if family_key not in EVENT_FAMILY_TYPES:
             raise ValueError(f"Unsupported event family: {family!r}")
-        pair = EVENT_PAIR_TAXONOMY[family_key]
-        positive_col = f"target_event_on__{pair['positive']}"
-        negative_col = f"target_event_on__{pair['negative']}"
-        if positive_col not in available or negative_col not in available:
-            continue
-        specs.append(
-            {
-                "target_task": f"event_pair__{family_key}",
-                "task_id": sanitize_task_name(f"event_pair__{family_key}"),
-                "positive_col": positive_col,
-                "negative_col": negative_col,
-                "positive_label": pair["positive"],
-                "negative_label": pair["negative"],
-            }
-        )
+        for event_type in EVENT_FAMILY_TYPES[family_key]:
+            target_column = f"target_event_on__{event_type}"
+            if target_column in available:
+                specs.append({
+                    "target_task": f"event__{event_type}",
+                    "task_id": sanitize_task_name(f"event__{event_type}"),
+                    "target_column": target_column,
+                    "event_label": event_type,
+                })
     return specs
+
+
+# Compatibility name: this now returns one independent task per event label.
+event_pair_task_specs = event_task_specs
 
 
 def oracle_side_task_specs(available_targets: Iterable[str]) -> list[dict[str, object]]:
@@ -236,9 +234,8 @@ def build_event_feature_text_dataset(
                 lambda row: feature_family_text(row, features, source=source_key, family=family_key),
                 axis=1,
             )
-            positive_cols = spec.get("positive_cols", spec.get("positive_col"))
-            negative_cols = spec.get("negative_cols", spec.get("negative_col"))
-            positive = _side_values(panel, selected, positive_cols)
+            target_column = str(spec["target_column"])
+            positive = _side_values(panel, selected, target_column)
             task_frame = pd.DataFrame(
                 {
                     "symbol": base["symbol"].astype(str).str.upper().to_numpy(),
@@ -248,10 +245,10 @@ def build_event_feature_text_dataset(
                     "text": text_values.to_numpy(),
                     "target_task": str(spec["target_task"]),
                     "task_id": str(spec["task_id"]),
-                    "label_type": str(spec["task_id"]),
-                    "label": np.where(positive.gt(0), spec["positive_label"], spec["negative_label"]),
-                    "positive_target_col": _lineage_value(positive_cols),
-                    "negative_target_col": _lineage_value(negative_cols),
+                    "label_type": "independent_binary_event",
+                    "label": positive.to_numpy(dtype="int8"),
+                    "event_label": str(spec["event_label"]),
+                    "target_column": target_column,
                 },
                 index=selected,
             )
@@ -396,7 +393,8 @@ def fmp_event_context_allowed_feature_families_by_task(
         task_id = str(spec["task_id"])
         task_allowed: set[tuple[str, str]] = set()
         for event_family, (feature_family, _) in family_map.items():
-            if target_task == f"event_pair__{event_family}":
+            event_label = target_task.removeprefix("event__")
+            if event_label in EVENT_FAMILY_TYPES.get(event_family, ()):
                 family_key = ("fmp", feature_family)
                 if allowed_feature_families is None or family_key in base_allowed:
                     task_allowed.add(family_key)
@@ -436,7 +434,6 @@ def build_event_context(
         "actor_chamber",
         "actor_firm",
         "actor_title",
-        "event_side",
         "strength",
         "transaction_shares",
         "transaction_price",
@@ -538,13 +535,11 @@ def compact_feature_key(feature: str, family: str) -> str:
 
 
 def _select_task_index(panel: pd.DataFrame, candidate_index: pd.Index, spec: dict[str, object]) -> pd.Index:
-    positive_cols = spec.get("positive_cols", spec.get("positive_col"))
-    negative_cols = spec.get("negative_cols", spec.get("negative_col"))
-    positive = _side_values(panel, candidate_index, positive_cols)
-    negative = _side_values(panel, candidate_index, negative_cols)
-    event_mask = positive.gt(0) | negative.gt(0)
-    ambiguous_mask = positive.gt(0) & negative.gt(0)
-    return candidate_index[event_mask.to_numpy() & ~ambiguous_mask.to_numpy()]
+    target_column = str(spec.get("target_column", ""))
+    if target_column not in panel.columns:
+        return pd.Index([], dtype=panel.index.dtype)
+    values = pd.to_numeric(panel.loc[candidate_index, target_column], errors="coerce").fillna(0)
+    return candidate_index[values.gt(0).to_numpy()]
 
 
 def _side_values(panel: pd.DataFrame, index: pd.Index, columns: Any) -> pd.Series:

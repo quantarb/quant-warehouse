@@ -12,8 +12,6 @@ from quant_warehouse.platforms.data_providers.fmp.target_engineering import (
     build_event_pairs_from_historical_data,
     fetch_fmp_event_pair_family,
     fetch_fmp_event_pairs,
-    get_event_side,
-    get_mirror_event_type,
     normalize_event_pairs,
 )
 from quant_warehouse.platforms.data_providers.thetadata.target_engineering import (
@@ -150,14 +148,6 @@ def test_build_option_mean_variance_labels_score_rank_selection() -> None:
     assert (labels["target_value"] == labels["mv_weight"]).all()
 
 
-def test_event_pair_mirror_lookup() -> None:
-    assert get_mirror_event_type("congress", "congress_buy") == "congress_sell"
-    assert get_mirror_event_type("analyst_rating", "analyst_downgrade") == "analyst_upgrade"
-    assert get_mirror_event_type("analyst_estimate", "analyst_estimate_raise") == "analyst_estimate_cut"
-    assert get_event_side("institutional", "institutional_add") == 1
-    assert get_event_side("institutional", "institutional_reduce") == -1
-
-
 def test_normalize_event_pairs_exact_dates() -> None:
     raw = pd.DataFrame(
         {
@@ -196,15 +186,13 @@ def test_normalize_event_pairs_exact_dates() -> None:
 
     assert list(normalized["symbol"]) == ["AAPL", "MSFT"]
     assert normalized.loc[0, "event_date"] == pd.Timestamp("2024-01-03")
-    assert normalized.loc[0, "event_side"] == 1
-    assert normalized.loc[0, "mirror_event_type"] == "insider_sell"
+    assert set(normalized["event_type"]) == {"insider_buy", "insider_sell"}
     assert normalized.loc[0, "actor_role"] == "ceo"
     assert normalized.loc[0, "actor_firm"] == "Unit Firm"
     assert normalized.loc[0, "transaction_shares"] == 10
     assert normalized.loc[0, "transaction_price"] == 100.0
     assert normalized.loc[0, "reported_date"] == pd.Timestamp("2024-01-05")
     assert normalized.loc[0, "disclosure_lag_days"] == 2
-    assert normalized.loc[1, "event_side"] == -1
     assert "horizon" not in normalized.columns
 
 
@@ -279,7 +267,6 @@ def test_build_insider_event_pairs_uses_stored_acquisition_disposition_codes() -
     )
 
     assert list(events["event_type"]) == ["insider_buy", "insider_sell"]
-    assert list(events["event_side"]) == [1, -1]
 
 
 def test_build_analyst_estimate_event_pairs_from_existing_historical_sections() -> None:
@@ -359,8 +346,6 @@ def test_concat_event_pair_frames_ignores_all_na_columns_without_future_warning(
             "event_date": [pd.Timestamp("2024-01-03")],
             "event_family": ["congress"],
             "event_type": ["congress_buy"],
-            "event_side": [1],
-            "mirror_event_type": ["congress_sell"],
             "actor_type": [np.nan],
             "actor_name": [np.nan],
             "source": ["unit"],
@@ -391,8 +376,6 @@ def test_event_pair_store_uses_cached_labels_without_refetch(monkeypatch) -> Non
             "event_date": [pd.Timestamp("2024-01-03")],
             "event_family": ["insider"],
             "event_type": ["insider_buy"],
-            "event_side": [1],
-            "mirror_event_type": ["insider_sell"],
             "actor_type": ["officer"],
             "actor_name": ["Jane CEO"],
             "source": ["unit"],
