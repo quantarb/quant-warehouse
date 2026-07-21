@@ -290,6 +290,16 @@ class Warehouse:
     ) -> pd.DataFrame:
         return self.macro.read_panel(series_codes, provider=provider, start=start, end=end)
 
+    def read_macro_calendar(
+        self,
+        *,
+        provider: str = "fmp",
+        start: str | None = None,
+        end: str | None = None,
+    ) -> pd.DataFrame:
+        """Read stored macro economic-calendar releases."""
+        return self.macro.read_calendar(provider=provider, start=start, end=end)
+
     def status(self, symbol: str) -> list:
         return self.catalog.list_symbol(symbol)
 

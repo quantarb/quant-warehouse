@@ -32,6 +32,14 @@ from quant_warehouse.platforms.data_providers.fmp.target_engineering.hits import
     HitsLabelSpec,
     build_hits_labels,
 )
+from quant_warehouse.platforms.data_providers.fmp.target_engineering.macro_events import (
+    MACRO_RESPONSE_CLASSES,
+    MacroEventSpec,
+    build_macro_event_label_panel,
+    build_macro_event_targets,
+    build_macro_response_labels,
+    normalize_macro_events,
+)
 from quant_warehouse.platforms.data_providers.fmp.target_engineering.operations import (
     apply_trade_deduplication,
     build_label_rows_from_completed_trades,
@@ -82,6 +90,12 @@ __all__ = [
     "build_cross_sectional_rank_labels",
     "build_forward_return_labels",
     "build_hits_labels",
+    "MACRO_RESPONSE_CLASSES",
+    "MacroEventSpec",
+    "build_macro_event_label_panel",
+    "build_macro_event_targets",
+    "build_macro_response_labels",
+    "normalize_macro_events",
     "build_label_panel",
     "build_label_rows_from_completed_trades",
     "build_label_statistics",
