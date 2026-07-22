@@ -38,10 +38,14 @@ def _slug(value: object) -> str:
 
 
 def _canonical_event_type(event_type: str) -> str:
-    """Collapse recurring calendar names that contain release month/day text."""
+    """Collapse calendar/reporting-cycle decorations into one event family."""
     months = "jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec"
     value = re.sub(rf"_(?:{months})(?:_\d{{1,2}})?$", "", str(event_type))
     value = re.sub(r"_q[1-4]$", "", value)
+    # Reporting frequency describes how the source series is reported; it is
+    # not a separate supervised event class.  Direction is learned solely
+    # from actual versus previous below.
+    value = re.sub(r"_(?:mom|qoq|yoy)$", "", value)
     return value or str(event_type)
 
 
@@ -150,6 +154,7 @@ def build_macro_event_label_panel(
     events: pd.DataFrame,
     *,
     date_column: str = "date",
+    directional_only: bool = False,
 ) -> pd.DataFrame:
     """Add dynamic date-level binary macro labels to token rows.
 
@@ -164,11 +169,76 @@ def build_macro_event_label_panel(
     macro = build_macro_event_targets(events)
     if macro.empty:
         return out
+    if directional_only:
+        # Keep directional outcomes and the explicit Fed decision classes;
+        # drop occurrence-only labels whose actual/previous values were absent.
+        directional = macro["target_name"].astype(str).str.endswith(
+            ("_increase", "_decrease")
+        )
+        fed_decision = macro["target_name"].astype(str).isin(
+            ["fed_rate_cut", "fed_rate_hike", "fed_rate_hold"]
+        )
+        macro = macro.loc[directional | fed_decision].copy()
+        if macro.empty:
+            return out
     dates = macro[["date", "target_column"]].drop_duplicates().assign(value=1.0)
     wide = dates.pivot_table(index="date", columns="target_column", values="value", fill_value=0.0)
     wide.index.name = date_column
     wide = wide.reset_index()
     return out.merge(wide, on=date_column, how="left").fillna({column: 0.0 for column in wide.columns if column != date_column})
+
+
+def build_macro_family_label_panel(
+    tokens: pd.DataFrame,
+    events: pd.DataFrame,
+    *,
+    date_column: str = "date",
+) -> pd.DataFrame:
+    """Build compact multi-event family, direction, and surprise targets.
+
+    A date may activate multiple families.  Presence is therefore multi-label
+    rather than a single softmax class.  Direction is encoded per family as
+    ``0=increase, 1=decrease, 2=unchanged`` and is masked when actual/previous
+    are unavailable.  Surprise is the mean percentage surprise for the family
+    on that date and is masked when no estimate exists.
+    """
+    if date_column not in tokens.columns:
+        raise ValueError(f"tokens must contain {date_column!r}")
+    out = tokens.copy()
+    out[date_column] = pd.to_datetime(out[date_column], errors="coerce").dt.normalize()
+    macro = normalize_macro_events(events)
+    if macro.empty:
+        return out
+    macro = macro.copy()
+    macro["event_family"] = macro.apply(
+        lambda row: f"macro_{str(row.get('country', '')).lower() or 'global'}_{_canonical_event_type(str(row.get('event_type', 'unknown_event')))}",
+        axis=1,
+    )
+    actual = pd.to_numeric(macro.get("actual"), errors="coerce")
+    previous = pd.to_numeric(macro.get("previous"), errors="coerce")
+    macro["direction_code"] = np.select(
+        [actual > previous, actual < previous, actual.eq(previous)],
+        [0, 1, 2],
+        default=-1,
+    ).astype("int8")
+    presence = macro[["date", "event_family"]].drop_duplicates().assign(value=1.0)
+    presence = presence.pivot_table(index="date", columns="event_family", values="value", fill_value=0.0)
+    presence.columns = [f"is_{column}" for column in presence.columns]
+    directions = macro.loc[macro.direction_code.ge(0), ["date", "event_family", "direction_code"]]
+    if not directions.empty:
+        directions = directions.groupby(["date", "event_family"], as_index=False).direction_code.first()
+        directions = directions.pivot(index="date", columns="event_family", values="direction_code")
+        directions.columns = [f"macro_direction_{column}" for column in directions.columns]
+    else:
+        directions = pd.DataFrame(index=presence.index)
+    surprises = macro.dropna(subset=["surprise_pct"]).groupby(["date", "event_family"], as_index=False).surprise_pct.mean()
+    if not surprises.empty:
+        surprises = surprises.pivot(index="date", columns="event_family", values="surprise_pct")
+        surprises.columns = [f"macro_surprise_{column}" for column in surprises.columns]
+    else:
+        surprises = pd.DataFrame(index=presence.index)
+    panel = pd.concat([presence, directions, surprises], axis=1).reset_index()
+    return out.merge(panel, on=date_column, how="left")
 
 
 def build_macro_response_labels(

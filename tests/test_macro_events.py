@@ -90,4 +90,4 @@ def test_recurring_month_suffixes_share_one_macro_target():
         }
     )
     targets = build_macro_event_targets(events)
-    assert targets.target_name.tolist() == ["macro_us_cpi_yoy_increase", "macro_us_cpi_yoy_increase"]
+    assert targets.target_name.tolist() == ["macro_us_cpi_increase", "macro_us_cpi_increase"]

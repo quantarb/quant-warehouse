@@ -38,6 +38,7 @@ def build_hits_labels(
     price_frames: Mapping[str, pd.DataFrame],
     *,
     spec: HitsLabelSpec | None = None,
+    edge_weight_mode: str = "return",
     progress_callback: Callable[..., Any] | None = None,
 ) -> pd.DataFrame:
     """Build sparse long/short HITS labels from per-symbol price frames.
@@ -54,6 +55,8 @@ def build_hits_labels(
     """
 
     cfg = spec or HitsLabelSpec()
+    if edge_weight_mode not in {"return", "inverse_holding_time"}:
+        raise ValueError("edge_weight_mode must be 'return' or 'inverse_holding_time'")
     symbols = [str(symbol).strip().upper() for symbol in price_frames if str(symbol).strip()]
     rows: list[pd.DataFrame] = []
     total = len(symbols)
@@ -68,7 +71,7 @@ def build_hits_labels(
             continue
         symbol_rows: list[pd.DataFrame] = []
         for _, year_frame in normalized.groupby(normalized["date"].dt.year, sort=True):
-            scores = _build_symbol_year_scores(year_frame, cfg)
+            scores = _build_symbol_year_scores(year_frame, cfg, edge_weight_mode=edge_weight_mode)
             if scores is not None:
                 scores.insert(0, "symbol", symbol)
                 symbol_rows.append(scores)
@@ -93,10 +96,9 @@ def build_hold_timing_hits_labels(
 
     The same historical price frames are converted into independent
     symbol-year graphs for each horizon.  A ``*_5d`` target describes the
-    fast graph, while ``*_120d`` describes the slower graph.  This preserves
-    the original nonnegative return-weighted HITS semantics; speed is
-    represented by the graph's allowed holding horizon rather than by
-    dividing returns by time.
+    fast graph, while ``*_120d`` describes the slower graph.  Speed graphs
+    retain only positive-return edges and weight them by inverse holding
+    time, ``1 / days_between(entry, exit)``.
     """
     horizons = tuple(dict.fromkeys(int(days) for days in hold_days))
     if not horizons or any(days <= 0 for days in horizons):
@@ -108,6 +110,7 @@ def build_hold_timing_hits_labels(
         panel = build_hits_labels(
             price_frames,
             spec=horizon_spec,
+            edge_weight_mode="inverse_holding_time",
             progress_callback=progress_callback,
         )
         keep = ["symbol", "date"]
@@ -125,6 +128,26 @@ def build_hold_timing_hits_labels(
     for panel in panels[1:]:
         out = out.merge(panel, on=["symbol", "date"], how="outer")
     return out
+
+
+def build_inverse_holding_time_hits_labels(
+    price_frames: Mapping[str, pd.DataFrame],
+    *,
+    spec: HitsLabelSpec | None = None,
+    progress_callback: Callable[..., Any] | None = None,
+) -> pd.DataFrame:
+    """Build one speed graph with the return graph's topology.
+
+    Positive-return entry/exit pairs retain their graph edge, but the edge
+    weight is ``1 / holding_days``.  The default maximum holding period is
+    inherited from ``HitsLabelSpec`` and is not split into separate horizons.
+    """
+    return build_hits_labels(
+        price_frames,
+        spec=spec,
+        edge_weight_mode="inverse_holding_time",
+        progress_callback=progress_callback,
+    )
 
 
 _OUTPUT_COLUMNS = [
@@ -153,7 +176,12 @@ def _normalize_prices(frame: pd.DataFrame, spec: HitsLabelSpec) -> pd.DataFrame:
     return out[["date", "high", "low"]].sort_values("date").drop_duplicates("date").reset_index(drop=True)
 
 
-def _build_symbol_year_scores(frame: pd.DataFrame, spec: HitsLabelSpec) -> pd.DataFrame | None:
+def _build_symbol_year_scores(
+    frame: pd.DataFrame,
+    spec: HitsLabelSpec,
+    *,
+    edge_weight_mode: str = "return",
+) -> pd.DataFrame | None:
     frame = frame.reset_index(drop=True)
     n = len(frame)
     if n < 2:
@@ -170,7 +198,16 @@ def _build_symbol_year_scores(frame: pd.DataFrame, spec: HitsLabelSpec) -> pd.Da
     }
     output: dict[str, Any] = {"date": frame["date"].to_numpy()}
     for side, future_returns in returns.items():
-        weights = np.where(valid, np.maximum(future_returns, 0.0), 0.0)
+        positive = future_returns > 0.0
+        if edge_weight_mode == "return":
+            weights = np.where(valid, np.maximum(future_returns, 0.0), 0.0)
+        elif edge_weight_mode == "inverse_holding_time":
+            holding_days = index[None, :] - index[:, None]
+            weights = np.zeros_like(future_returns, dtype=float)
+            eligible = valid & positive
+            np.divide(1.0, holding_days, out=weights, where=eligible)
+        else:
+            raise ValueError("edge_weight_mode must be 'return' or 'inverse_holding_time'")
         if not np.any(weights > 0):
             output[f"{side}_hub"] = np.zeros(n, dtype=float)
             output[f"{side}_authority"] = np.zeros(n, dtype=float)
