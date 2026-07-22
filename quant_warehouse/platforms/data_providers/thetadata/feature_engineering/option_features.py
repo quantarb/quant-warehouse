@@ -19,6 +19,35 @@ class OptionFeatureSet:
     family_cols: dict[str, list[str]]
 
 
+def filter_option_instrument_rows(
+    chain: pd.DataFrame,
+    *,
+    require_change_percent: bool = True,
+) -> pd.DataFrame:
+    """Filter executable option rows for downstream instrument modeling.
+
+    This runs after full-chain warehouse reads. ThetaData's reported
+    ``change_percent`` is used as the one-day movement availability signal so
+    a previous option-chain read is not required. The raw ``change`` field is
+    not used because it is commonly zero in stored EOD rows.
+    """
+    if chain is None or chain.empty:
+        return pd.DataFrame() if chain is None else chain.copy()
+    out = chain.copy()
+    required = {"bid", "ask"}
+    if require_change_percent:
+        required.add("change_percent")
+    if not required.issubset(out.columns):
+        return out.iloc[0:0].copy()
+    bid = pd.to_numeric(out["bid"], errors="coerce")
+    ask = pd.to_numeric(out["ask"], errors="coerce")
+    valid = bid.gt(0) & ask.gt(0) & ask.ge(bid)
+    if require_change_percent:
+        change_percent = pd.to_numeric(out["change_percent"], errors="coerce")
+        valid &= change_percent.notna() & change_percent.ne(0)
+    return out.loc[valid].copy()
+
+
 def build_option_contract_features(
     chain: pd.DataFrame,
     *,

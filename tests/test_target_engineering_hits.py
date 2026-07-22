@@ -3,6 +3,7 @@ import pandas as pd
 from quant_warehouse.platforms.data_providers.fmp.target_engineering import (
     HitsLabelSpec,
     build_hits_labels,
+    build_hold_timing_hits_labels,
 )
 
 
@@ -37,3 +38,10 @@ def test_build_hits_labels_respects_year_graph_boundaries() -> None:
 
     assert len(labels) == 16
     assert labels.groupby(labels.date.dt.year).size().to_dict() == {2024: 8, 2025: 8}
+
+
+def test_build_hold_timing_hits_labels_adds_independent_horizons() -> None:
+    labels = build_hold_timing_hits_labels({"A": _prices()}, hold_days=(2, 4))
+
+    assert {"long_hub_2d", "long_authority_2d", "short_hub_4d", "short_authority_4d"}.issubset(labels.columns)
+    assert not labels[["long_hub_2d", "long_hub_4d"]].isna().any().any()

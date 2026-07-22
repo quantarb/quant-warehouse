@@ -31,6 +31,7 @@ from quant_warehouse.platforms.data_providers.fmp.target_engineering.labels impo
 from quant_warehouse.platforms.data_providers.fmp.target_engineering.hits import (
     HitsLabelSpec,
     build_hits_labels,
+    build_hold_timing_hits_labels,
 )
 from quant_warehouse.platforms.data_providers.fmp.target_engineering.macro_events import (
     MACRO_RESPONSE_CLASSES,
@@ -90,6 +91,7 @@ __all__ = [
     "build_cross_sectional_rank_labels",
     "build_forward_return_labels",
     "build_hits_labels",
+    "build_hold_timing_hits_labels",
     "MACRO_RESPONSE_CLASSES",
     "MacroEventSpec",
     "build_macro_event_label_panel",

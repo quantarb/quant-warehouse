@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable, Mapping
 
 import numpy as np
@@ -80,6 +80,51 @@ def build_hits_labels(
     if not rows:
         return pd.DataFrame(columns=_OUTPUT_COLUMNS)
     return pd.concat(rows, ignore_index=True)[_OUTPUT_COLUMNS]
+
+
+def build_hold_timing_hits_labels(
+    price_frames: Mapping[str, pd.DataFrame],
+    *,
+    hold_days: tuple[int, ...] = (5, 20, 60, 120),
+    spec: HitsLabelSpec | None = None,
+    progress_callback: Callable[..., Any] | None = None,
+) -> pd.DataFrame:
+    """Build HITS targets for several maximum holding-time horizons.
+
+    The same historical price frames are converted into independent
+    symbol-year graphs for each horizon.  A ``*_5d`` target describes the
+    fast graph, while ``*_120d`` describes the slower graph.  This preserves
+    the original nonnegative return-weighted HITS semantics; speed is
+    represented by the graph's allowed holding horizon rather than by
+    dividing returns by time.
+    """
+    horizons = tuple(dict.fromkeys(int(days) for days in hold_days))
+    if not horizons or any(days <= 0 for days in horizons):
+        raise ValueError("hold_days must contain positive integers")
+    base_spec = spec or HitsLabelSpec()
+    panels: list[pd.DataFrame] = []
+    for horizon in horizons:
+        horizon_spec = replace(base_spec, max_hold=horizon)
+        panel = build_hits_labels(
+            price_frames,
+            spec=horizon_spec,
+            progress_callback=progress_callback,
+        )
+        keep = ["symbol", "date"]
+        rename: dict[str, str] = {}
+        for side in ("long", "short"):
+            for score in ("hub", "authority"):
+                source = f"{side}_{score}"
+                target = f"{source}_{horizon}d"
+                keep.append(source)
+                rename[source] = target
+        panels.append(panel[keep].rename(columns=rename))
+    if not panels:
+        return pd.DataFrame(columns=["symbol", "date"])
+    out = panels[0]
+    for panel in panels[1:]:
+        out = out.merge(panel, on=["symbol", "date"], how="outer")
+    return out
 
 
 _OUTPUT_COLUMNS = [

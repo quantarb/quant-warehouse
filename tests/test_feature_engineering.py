@@ -11,6 +11,9 @@ from quant_warehouse.platforms.data_providers.fmp.feature_engineering import (
     build_time_features,
     compute_features_worldclass,
 )
+from quant_warehouse.platforms.data_providers.thetadata.feature_engineering import (
+    filter_option_instrument_rows,
+)
 
 
 def _price_frame(rows: int = 260) -> pd.DataFrame:
@@ -26,6 +29,20 @@ def _price_frame(rows: int = 260) -> pd.DataFrame:
         },
         index=index,
     )
+
+
+def test_filter_option_instrument_rows_uses_change_percent_not_raw_change():
+    chain = pd.DataFrame(
+        {
+            "bid": [1.0, 1.0, 0.0, 1.0],
+            "ask": [1.1, 1.1, 1.1, 0.9],
+            "change": [0.0, 0.0, 0.0, 1.0],
+            "change_percent": [0.1, 0.0, 0.2, None],
+        }
+    )
+    filtered = filter_option_instrument_rows(chain)
+    assert len(filtered) == 1
+    assert filtered.iloc[0]["change"] == 0.0
 
 
 def test_build_price_technical_features_is_standalone_and_prefixed():
