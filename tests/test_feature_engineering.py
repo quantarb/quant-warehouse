@@ -8,6 +8,7 @@ from quant_warehouse.platforms.data_providers.fmp.feature_engineering import (
     TA_CLASSIC_FAMILY_PREFIXES,
     build_price_ta_classic_feature_families,
     build_price_technical_features,
+    build_preferred_stock_features,
     build_time_features,
     compute_features_worldclass,
 )
@@ -54,6 +55,28 @@ def test_build_price_technical_features_is_standalone_and_prefixed():
     assert "px__ret_1d" in built.feature_cols
     assert "px__macd" in built.feature_cols
     assert all(column.startswith("px__") for column in built.feature_cols)
+
+
+def test_build_preferred_stock_features_keeps_raw_family_separate():
+    preferred = pd.DataFrame(
+        {
+            "date": ["2025-01-02", "2025-01-02", "2025-01-03"],
+            "symbol": ["ABC-PA", "ABC-PB", "ABC-PA"],
+            "open": [10.0, 12.0, 11.0],
+            "high": [11.0, 13.0, 12.0],
+            "low": [9.0, 11.0, 10.0],
+            "close": [10.5, 12.5, 11.5],
+            "volume": [100.0, 200.0, 150.0],
+        }
+    )
+
+    built = build_preferred_stock_features("ABC", preferred)
+
+    assert built.df.index.names == ["date", "symbol"]
+    assert built.df.loc[(pd.Timestamp("2025-01-02"), "ABC"), "preferred__issue_count"] == 2.0
+    assert built.df.loc[(pd.Timestamp("2025-01-02"), "ABC"), "preferred__close_mean"] == 11.5
+    assert built.df.loc[(pd.Timestamp("2025-01-03"), "ABC"), "preferred__has_data"] == 1.0
+    assert all(column.startswith("preferred__") for column in built.feature_cols)
 
 
 def test_price_technical_cuda_setting_falls_back_without_cudf(monkeypatch):

@@ -33,6 +33,9 @@ FMP_HISTORICAL_EQUITY_SECTIONS: tuple[str, ...] = (
     "revenue_per_geography",
     "revenue_per_segment",
     "employee_count",
+    "ownership_institutional",
+    "estimates_historical",
+    "ratings_historical",
 )
 
 FMP_EXTENDED_EQUITY_SECTIONS: tuple[str, ...] = (
@@ -42,14 +45,12 @@ FMP_EXTENDED_EQUITY_SECTIONS: tuple[str, ...] = (
     "management",
     "filings",
     "compare_peers",
-    "estimates_historical",
     "estimates_consensus",
     "estimates_forward_eps",
     "estimates_forward_ebitda",
     "estimates_price_target",
     "ownership_insider_trading",
     "ownership_government_trades",
-    "ownership_institutional",
     "ownership_share_statistics",
 )
 

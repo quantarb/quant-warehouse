@@ -17,6 +17,11 @@ from quant_warehouse.platforms.data_providers.fmp.feature_engineering.fundamenta
 )
 from quant_warehouse.platforms.data_providers.fmp.feature_engineering.broadcast import broadcast_asof_to_target_index
 from quant_warehouse.platforms.data_providers.fmp.feature_engineering.recipe import recipe_hash
+from quant_warehouse.platforms.data_providers.fmp.feature_engineering.preferred import (
+    PREFERRED_RAW_COLUMNS,
+    build_security_class_features,
+    build_preferred_stock_features,
+)
 from quant_warehouse.platforms.data_providers.fmp.feature_engineering.specs import (
     BuiltFeatureSet,
     FeatureBuildSpec,
@@ -52,12 +57,15 @@ __all__ = [
     "build_fundamental_change_features",
     "build_ownership_features",
     "build_price_ta_classic_feature_families",
+    "build_preferred_stock_features",
+    "build_security_class_features",
     "build_price_technical_features",
     "build_statement_quality_features",
     "build_time_calendar_features",
     "build_time_features",
     "build_ttm_financial_statement_features",
     "compute_features_worldclass",
+    "PREFERRED_RAW_COLUMNS",
     "fetch_fundamentals_data",
     "recipe_hash",
     "section_prefix",

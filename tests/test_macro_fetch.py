@@ -3,6 +3,7 @@ from __future__ import annotations
 import pandas as pd
 
 from quant_warehouse.ingest.macro_fetch import (
+    _fetch_fmp_economic_calendar_direct,
     _fetch_fmp_economic_indicator_series_direct,
     _normalize_treasury_column_name,
     _yield_curve_wide_from_long,
@@ -92,6 +93,57 @@ def test_normalize_calendar_frame_indexes_events_by_date():
     assert out.index.name == "date"
     assert len(out) == 2
     assert "country" in out.columns
+
+
+def test_normalize_calendar_frame_preserves_zero_values_and_aliases():
+    raw = pd.DataFrame(
+        {
+            "date": ["2024-06-01"],
+            "country": ["US"],
+            "event": ["Rate decision"],
+            "importance": ["High"],
+            "consensus": [0],
+            "previous": [0],
+            "actual": [0],
+            "change_percent": [0],
+        }
+    )
+    out = normalize_calendar_frame(raw)
+    row = out.iloc[0]
+    assert row["impact"] == "High"
+    assert row["estimate"] == 0
+    assert row["previous"] == 0
+    assert row["actual"] == 0
+    assert row["changePercentage"] == 0
+
+
+def test_direct_fmp_calendar_fetch_preserves_multiple_events_and_zero_values(monkeypatch):
+    calls = {}
+
+    def fake_key(*, required=False):
+        calls["required"] = required
+        return "test-key"
+
+    class FakeResponse:
+        def raise_for_status(self):
+            calls["raised"] = True
+
+        def json(self):
+            return [
+                {"date": "2024-06-01 08:30:00", "country": "US", "event": "A", "previous": 0, "actual": 0},
+                {"date": "2024-06-01 08:30:00", "country": "US", "event": "B", "previous": 1, "actual": 2},
+            ]
+
+    def fake_get(url, *, params, timeout):
+        calls.update({"url": url, "params": params, "timeout": timeout})
+        return FakeResponse()
+
+    monkeypatch.setattr("quant_warehouse.ingest.macro_fetch.resolve_fmp_api_key", fake_key)
+    monkeypatch.setattr("requests.get", fake_get)
+    out = _fetch_fmp_economic_calendar_direct(start_date="2024-06-01", end_date="2024-06-02")
+    assert len(out) == 2
+    assert list(out["actual"]) == [0, 2]
+    assert calls["params"]["from"] == "2024-06-01"
 
 
 def test_normalize_risk_premium_frame_indexes_by_country():

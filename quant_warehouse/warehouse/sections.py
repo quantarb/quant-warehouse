@@ -38,6 +38,7 @@ EQUITY_FUNDAMENTAL_SECTIONS: tuple[str, ...] = (
     "transcript",
     "compare_peers",
     "estimates_historical",
+    "ratings_historical",
     "estimates_consensus",
     "estimates_forward_eps",
     "estimates_forward_ebitda",
@@ -114,6 +115,7 @@ PERIOD_FUNDAMENTAL_SECTIONS: frozenset[str] = frozenset(
         "reported_financials",
         "revenue_per_geography",
         "revenue_per_segment",
+        "estimates_historical",
     }
 )
 
@@ -162,7 +164,6 @@ DATE_WINDOW_SECTIONS: frozenset[str] = frozenset(
         "employee_count",
         "esg_score",
         "management_compensation",
-        "estimates_historical",
         "estimates_forward_eps",
         "estimates_forward_ebitda",
         "ownership_insider_trading",
@@ -286,6 +287,10 @@ def fundamental_period_for_section(section: str, *, preferred: str = "quarter") 
     """Return the OpenBB period for a section, preferring quarterly when supported."""
     if section not in PERIOD_FUNDAMENTAL_SECTIONS:
         return None
+    if section == "estimates_historical":
+        # This feature family is explicitly quarterly. Do not let a global
+        # annual refresh default silently change its schema.
+        return "quarter"
     return normalize_fundamental_period(preferred)
 
 

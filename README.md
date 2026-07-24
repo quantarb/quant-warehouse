@@ -100,6 +100,7 @@ wh = Warehouse()
 wh.refresh("AAPL", sections=["prices", "income"], providers=["fmp", "yfinance", "sec"])
 prices = wh.read_prices("AAPL", provider="fmp", start="2020-01-01")
 income = wh.read_fundamentals("AAPL", section="income", provider="fmp")
+institutional = wh.read_fundamentals("AAPL", section="ownership_institutional", provider="fmp")
 ```
 
 Provider-owned feature and target code should be imported from the provider package:
@@ -138,6 +139,10 @@ FMP event-pair labels are exact event-date labels only. Congress buy/sell, insid
 10. **No premature global feature/target layer** — feature engineering and target engineering belong to the data provider until multiple provider implementations justify a shared abstraction.
 11. **FMP oracle trade labels are side-specific** — long and short top-k trades are optimized independently. The mixed long/short joint solver and CUDA oracle solver were removed to avoid ambiguous labels. Oracle side classifiers must use one buy/sell task across all configured `k` values. They must use buy/long entry rows versus sell/short entry rows only; no-entry dates are not negative examples.
 12. **FMP event-pair labels are same-day only** — event pairs mark the date the event happened. Do not smear events into future-window event columns, and do not treat no-event rows as negative event labels. Mirrored event-pair classification must use actual positive and negative event dates only.
+13. **Institutional position summaries are an official FMP feature family** — `fmp.fmp_institutional_position_summary` projects the quarterly `ownership_institutional` panel into numeric issuer features, preserves the provider-reported quarter date, and includes current, prior, and change fields for 13F shares, invested value, ownership, positions, calls, puts, and put/call ratio.
+14. **Quarterly financial estimates are an official FMP feature family** — `fmp.fmp_quarterly_financial_estimates` loads OpenBB's `equity.estimates.historical` route with `period="quarter"`, preserves each FMP estimate-period date, and exposes revenue, EBITDA, EBIT, net income, SGA, EPS, and analyst-count low/high/average fields without adding a lag.
+15. **Historical ESG scores are an official FMP feature family** — `fmp.fmp_esg_scores` loads `equity.fundamental.esg_score`, uses the FMP period date as the observation date, and exposes environmental, social, governance, and total ESG scores without shifting to the later accepted date.
+16. **Company news is an official FMP feature family** — `fmp.fmp_company_news` combines same-day article count, distinct source count, and deterministic hashed TF-IDF features from that day's titles/excerpts. It does not materialize hand-engineered 5-day/20-day windows, raw headline NLP, or artificial reporting lag; temporal patterns are learned from the daily document sequence.
 
 ## License
 

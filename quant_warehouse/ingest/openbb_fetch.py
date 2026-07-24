@@ -49,6 +49,7 @@ SECTION_ROUTES: dict[str, str] = {
     "transcript": "equity.fundamental.transcript",
     "compare_peers": "equity.compare.peers",
     "estimates_historical": "equity.estimates.historical",
+    "ratings_historical": "equity.fundamental.ratings_historical",
     "estimates_consensus": "equity.estimates.consensus",
     "estimates_forward_eps": "equity.estimates.forward_eps",
     "estimates_forward_ebitda": "equity.estimates.forward_ebitda",

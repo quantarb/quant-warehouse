@@ -33,6 +33,7 @@ from quant_warehouse.platforms.data_providers.fmp.target_engineering.hits import
     build_hits_labels,
     build_hold_timing_hits_labels,
     build_inverse_holding_time_hits_labels,
+    build_return_and_speed_hits_labels,
 )
 from quant_warehouse.platforms.data_providers.fmp.target_engineering.macro_events import (
     MACRO_RESPONSE_CLASSES,
@@ -41,7 +42,18 @@ from quant_warehouse.platforms.data_providers.fmp.target_engineering.macro_event
     build_macro_event_targets,
     build_macro_family_label_panel,
     build_macro_response_labels,
+    deduplicate_binary_label_columns,
     normalize_macro_events,
+)
+from quant_warehouse.platforms.data_providers.fmp.target_engineering.constituents import (
+    EVENT_COLUMNS as HISTORICAL_CONSTITUENT_EVENT_COLUMNS,
+    SUB_SECTOR_TARGET_COLUMN,
+    build_historical_constituent_event_label_panel,
+    build_historical_sub_sector_target_panel,
+)
+from quant_warehouse.platforms.data_providers.fmp.target_engineering.corporate_events import (
+    CORPORATE_EVENT_COLUMNS,
+    build_corporate_event_label_panel,
 )
 from quant_warehouse.platforms.data_providers.fmp.target_engineering.operations import (
     apply_trade_deduplication,
@@ -95,12 +107,20 @@ __all__ = [
     "build_hits_labels",
     "build_hold_timing_hits_labels",
     "build_inverse_holding_time_hits_labels",
+    "build_return_and_speed_hits_labels",
+    "HISTORICAL_CONSTITUENT_EVENT_COLUMNS",
+    "SUB_SECTOR_TARGET_COLUMN",
+    "build_historical_constituent_event_label_panel",
+    "build_historical_sub_sector_target_panel",
+    "CORPORATE_EVENT_COLUMNS",
+    "build_corporate_event_label_panel",
     "MACRO_RESPONSE_CLASSES",
     "MacroEventSpec",
     "build_macro_event_label_panel",
     "build_macro_event_targets",
     "build_macro_family_label_panel",
     "build_macro_response_labels",
+    "deduplicate_binary_label_columns",
     "normalize_macro_events",
     "build_label_panel",
     "build_label_rows_from_completed_trades",

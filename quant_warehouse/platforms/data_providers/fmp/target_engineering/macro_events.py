@@ -49,6 +49,47 @@ def _canonical_event_type(event_type: str) -> str:
     return value or str(event_type)
 
 
+def _compact_directional_event_type(
+    event_type: str,
+    groups: set[str] | None = None,
+) -> str:
+    """Collapse only high-cardinality release variants into useful families.
+
+    The compact taxonomy deliberately keeps most economic series distinct. It
+    removes option-like fragmentation from Treasury auction tenors, mortgage
+    rate variants, and consumer/retail releases while preserving direction.
+    """
+    value = _canonical_event_type(event_type)
+    groups = groups or {"treasury", "mortgage", "consumer"}
+    if "treasury" in groups and value.endswith("_auction") and any(
+        token in value for token in ("_bill_", "_note_", "_bond_", "_tips_", "_frn_")
+    ):
+        return "treasury_auction"
+    if "mortgage" in groups and value.endswith("_mortgage_rate"):
+        return "mortgage_rate"
+    if "consumer" in groups and value in {"all_car_sales", "all_truck_sales", "total_vehicle_sales"}:
+        return "vehicle_sales"
+    if "consumer" in groups and value == "consumer_credit_change":
+        return "consumer_credit"
+    if "consumer" in groups and value in {
+        "cb_consumer_confidence", "consumer_inflation_expectation",
+        "michigan_consumer_expectations", "michigan_consumer_sentiment",
+    }:
+        return "consumer_sentiment"
+    if "consumer" in groups and value in {
+        "personal_spending", "real_consumer_spending", "retail_sales",
+        "retail_sales_ex_autos", "retail_sales_ex_gas_autos",
+    }:
+        return "consumer_spending"
+    if "consumer" in groups and value == "retail_inventories_ex_autos":
+        return "retail_inventory"
+    if "aliases" in groups and value in {
+        "core_pce_price_index", "core_pce_prices",
+    }:
+        return "core_pce"
+    return value
+
+
 def normalize_macro_events(events: pd.DataFrame) -> pd.DataFrame:
     """Normalize FMP economic-calendar rows into one row per release."""
     if events is None or events.empty:
@@ -66,7 +107,14 @@ def normalize_macro_events(events: pd.DataFrame) -> pd.DataFrame:
         frame = frame.reset_index().rename(columns={frame.index.name or "index": "date"})
     if "date" not in frame.columns or "event" not in frame.columns:
         raise ValueError("macro events require date and event columns")
-    frame["date"] = pd.to_datetime(frame["date"], errors="coerce", utc=True).dt.tz_convert(None)
+    # FMP returns release timestamps such as 20:30. Macro labels describe
+    # the event's trading date, so discard the intraday release time before
+    # joining to midnight-normalized equity tokens.
+    frame["date"] = (
+        pd.to_datetime(frame["date"], errors="coerce", utc=True)
+        .dt.tz_convert(None)
+        .dt.normalize()
+    )
     frame = frame.dropna(subset=["date"]).copy()
     for column in ("previous", "estimate", "actual", "change", "changePercentage"):
         if column in frame.columns:
@@ -155,6 +203,9 @@ def build_macro_event_label_panel(
     *,
     date_column: str = "date",
     directional_only: bool = False,
+    compact_directional: bool = False,
+    compact_groups: tuple[str, ...] | None = None,
+    deduplicate_identical: bool = False,
 ) -> pd.DataFrame:
     """Add dynamic date-level binary macro labels to token rows.
 
@@ -169,6 +220,24 @@ def build_macro_event_label_panel(
     macro = build_macro_event_targets(events)
     if macro.empty:
         return out
+    if compact_directional:
+        if not directional_only:
+            raise ValueError("compact_directional requires directional_only=True")
+        macro = macro.copy()
+        macro["target_name"] = macro.apply(
+            lambda row: (
+                "fed_rate_cut" if row["target_name"] == "fed_rate_cut" else
+                "fed_rate_hike" if row["target_name"] == "fed_rate_hike" else
+                "fed_rate_hold" if row["target_name"] == "fed_rate_hold" else
+                f"macro_{str(row.get('country', '')).lower() or 'global'}_"
+                f"{_compact_directional_event_type(
+                    str(row.get('event_type', 'unknown_event')),
+                    set(compact_groups) if compact_groups else None,
+                )}_"
+                f"{str(row['target_name']).rsplit('_', 1)[-1]}"
+            ), axis=1,
+        )
+        macro["target_column"] = "is_" + macro["target_name"]
     if directional_only:
         # Keep directional outcomes and the explicit Fed decision classes;
         # drop occurrence-only labels whose actual/previous values were absent.
@@ -185,7 +254,41 @@ def build_macro_event_label_panel(
     wide = dates.pivot_table(index="date", columns="target_column", values="value", fill_value=0.0)
     wide.index.name = date_column
     wide = wide.reset_index()
-    return out.merge(wide, on=date_column, how="left").fillna({column: 0.0 for column in wide.columns if column != date_column})
+    out = out.merge(wide, on=date_column, how="left").fillna(
+        {column: 0.0 for column in wide.columns if column != date_column}
+    )
+    if deduplicate_identical:
+        out, _ = deduplicate_binary_label_columns(out)
+    return out
+
+
+def deduplicate_binary_label_columns(
+    panel: pd.DataFrame,
+    *,
+    prefix: str = "is_",
+) -> tuple[pd.DataFrame, dict[str, str]]:
+    """Collapse binary label columns with identical activation vectors.
+
+    The first column in each identical-vector group is retained and the
+    remaining names map to it. This is data-dependent and intentionally
+    separate from semantic taxonomy compaction.
+    """
+    out = panel.copy()
+    labels = [column for column in out.columns if str(column).startswith(prefix)]
+    signatures: dict[tuple[int, ...], list[str]] = {}
+    for column in labels:
+        signature = tuple(pd.to_numeric(out[column], errors="coerce").fillna(0).astype("int8"))
+        signatures.setdefault(signature, []).append(column)
+    mapping: dict[str, str] = {}
+    for columns in signatures.values():
+        if len(columns) < 2:
+            continue
+        keep = columns[0]
+        for duplicate in columns[1:]:
+            mapping[duplicate] = keep
+        out[keep] = out[columns].max(axis=1)
+        out = out.drop(columns=columns[1:])
+    return out, mapping
 
 
 def build_macro_family_label_panel(

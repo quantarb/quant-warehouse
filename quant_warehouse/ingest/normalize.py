@@ -259,7 +259,11 @@ def _coerce_object_strings(frame: pd.DataFrame) -> pd.DataFrame:
 
 def normalize_dated_snapshot_frame(df: pd.DataFrame, *, section: str) -> pd.DataFrame:
     """Normalize cross-sectional snapshots into a dated panel for Arctic storage."""
-    out = normalize_snapshot_frame(df)
+    source = df.copy()
+    if section in {"ownership_institutional", "ownership_share_statistics"} and "date" not in source.columns:
+        if isinstance(source.index, pd.DatetimeIndex) or str(source.index.name).lower() in {"date", "as_of"}:
+            source = source.reset_index()
+    out = normalize_snapshot_frame(source)
     if out.empty:
         return out
 
@@ -268,6 +272,14 @@ def normalize_dated_snapshot_frame(df: pd.DataFrame, *, section: str) -> pd.Data
         out["updated"] = pd.to_datetime(out["updated"], errors="coerce")
         out = out.dropna(subset=["updated"])
         out = out.set_index("updated")
+        out.index.name = as_of_name
+    elif section in {"ownership_institutional", "ownership_share_statistics"} and "date" in out.columns:
+        # These FMP ownership routes return one row per reporting quarter.
+        # Preserve that historical date instead of collapsing all rows onto
+        # the ingestion timestamp.
+        out["date"] = pd.to_datetime(out["date"], errors="coerce", utc=True).dt.tz_convert(None).dt.normalize()
+        out = out.dropna(subset=["date"])
+        out = out.set_index("date")
         out.index.name = as_of_name
     else:
         as_of = pd.Timestamp.utcnow().normalize()

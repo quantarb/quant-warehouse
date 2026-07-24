@@ -132,8 +132,9 @@ def warehouse_section_to_payload_rows(
     working = working.rename(columns={date_col: "date"})
     working["date"] = pd.to_datetime(working["date"], errors="coerce")
     working = working.dropna(subset=["date"])
-    if filing_lag_days:
-        working["date"] = working["date"] + pd.Timedelta(days=int(filing_lag_days))
+    # Preserve the warehouse observation date exactly.  The argument remains
+    # for compatibility with older callers, but feature construction never
+    # applies an implicit filing/reporting lag.
 
     for _, series in working.iterrows():
         ts = pd.Timestamp(series["date"]).normalize()
@@ -200,8 +201,8 @@ def fetch_fundamentals_data(
     period: str = "quarter",
     limit: int = 160,
     verbose: bool = True,
-    use_filing_lag: bool = True,
-    filing_lag_days: int = 45,
+    use_filing_lag: bool = False,
+    filing_lag_days: int = 0,
     provider: str = "fmp",
 ) -> pd.DataFrame:
     """Load sparse key-metric and ratio fundamentals from quant-warehouse."""

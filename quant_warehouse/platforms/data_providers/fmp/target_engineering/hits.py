@@ -150,6 +150,47 @@ def build_inverse_holding_time_hits_labels(
     )
 
 
+def build_return_and_speed_hits_labels(
+    price_frames: Mapping[str, pd.DataFrame],
+    *,
+    spec: HitsLabelSpec | None = None,
+    progress_callback: Callable[..., Any] | None = None,
+) -> pd.DataFrame:
+    """Build return and speed HITS targets from one shared edge topology.
+
+    Each symbol-year constructs the valid directed date-pair set once.  The
+    same positive-return edges then receive two independent weights:
+    realized return and ``1 / holding_days``.  The score families remain
+    separate so return and speed are not collapsed into one objective.
+    """
+    cfg = spec or HitsLabelSpec()
+    symbols = [str(symbol).strip().upper() for symbol in price_frames if str(symbol).strip()]
+    rows: list[pd.DataFrame] = []
+    total = len(symbols)
+    for completed, symbol in enumerate(symbols, start=1):
+        frame = price_frames.get(symbol)
+        if frame is None:
+            frame = price_frames.get(symbol.lower())
+        if frame is None or frame.empty:
+            continue
+        normalized = _normalize_prices(frame, cfg)
+        for _, year_frame in normalized.groupby(normalized["date"].dt.year, sort=True):
+            scores = _build_symbol_year_return_speed_scores(year_frame, cfg)
+            if scores is not None:
+                scores.insert(0, "symbol", symbol)
+                rows.append(scores)
+        if callable(progress_callback):
+            progress_callback(completed=completed, total=total, current_symbol=symbol)
+    if not rows:
+        return pd.DataFrame(columns=[
+            "symbol", "date", "long_hub", "long_authority", "short_hub", "short_authority",
+            "long_hub_tail", "long_authority_tail", "short_hub_tail", "short_authority_tail",
+            "speed_long_hub", "speed_long_authority", "speed_short_hub", "speed_short_authority",
+            "speed_long_hub_tail", "speed_long_authority_tail", "speed_short_hub_tail", "speed_short_authority_tail",
+        ])
+    return pd.concat(rows, ignore_index=True)
+
+
 _OUTPUT_COLUMNS = [
     "symbol", "date",
     "long_hub", "long_authority", "short_hub", "short_authority",
@@ -192,19 +233,14 @@ def _build_symbol_year_scores(
     valid = np.triu(np.ones((n, n), dtype=bool), 1)
     valid &= (index[None, :] - index[:, None]) <= spec.max_hold
 
-    returns = {
-        "long": low[None, :] / high[:, None] - 1.0,
-        "short": low[:, None] / high[None, :] - 1.0,
-    }
+    returns, valid, holding_days = _build_edge_channels(high, low, spec.max_hold)
     output: dict[str, Any] = {"date": frame["date"].to_numpy()}
     for side, future_returns in returns.items():
-        positive = future_returns > 0.0
         if edge_weight_mode == "return":
             weights = np.where(valid, np.maximum(future_returns, 0.0), 0.0)
         elif edge_weight_mode == "inverse_holding_time":
-            holding_days = index[None, :] - index[:, None]
             weights = np.zeros_like(future_returns, dtype=float)
-            eligible = valid & positive
+            eligible = valid & (future_returns > 0.0)
             np.divide(1.0, holding_days, out=weights, where=eligible)
         else:
             raise ValueError("edge_weight_mode must be 'return' or 'inverse_holding_time'")
@@ -227,6 +263,74 @@ def _build_symbol_year_scores(
         output[f"{side}_authority"] = authority
         output[f"{side}_hub_tail"] = _tail_mask(hub, spec.tail_quantile)
         output[f"{side}_authority_tail"] = _tail_mask(authority, spec.tail_quantile)
+    return pd.DataFrame(output)
+
+
+def _build_edge_channels(
+    high: np.ndarray,
+    low: np.ndarray,
+    max_hold: int,
+) -> tuple[dict[str, np.ndarray], np.ndarray, np.ndarray]:
+    """Construct the date-pair topology and all reusable edge quantities once."""
+    n = len(high)
+    index = np.arange(n)
+    valid = np.triu(np.ones((n, n), dtype=bool), 1)
+    holding_days = index[None, :] - index[:, None]
+    valid &= holding_days <= max_hold
+    returns = {
+        "long": low[None, :] / high[:, None] - 1.0,
+        "short": low[:, None] / high[None, :] - 1.0,
+    }
+    return returns, valid, holding_days
+
+
+def _score_weight_matrix(
+    returns: np.ndarray,
+    valid: np.ndarray,
+    holding_days: np.ndarray,
+    iterations: int,
+    mode: str,
+    tail_quantile: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    if mode == "return":
+        weights = np.where(valid, np.maximum(returns, 0.0), 0.0)
+    elif mode == "inverse_holding_time":
+        weights = np.zeros_like(returns, dtype=float)
+        np.divide(1.0, holding_days, out=weights, where=valid & (returns > 0.0))
+    else:
+        raise ValueError("edge weight mode must be 'return' or 'inverse_holding_time'")
+    n = len(returns)
+    if not np.any(weights > 0):
+        return np.zeros(n), np.zeros(n), np.zeros(n, dtype=bool), np.zeros(n, dtype=bool)
+    hub = np.ones(n, dtype=float)
+    authority = np.ones(n, dtype=float)
+    for _ in range(iterations):
+        authority = weights.T @ hub
+        authority /= np.linalg.norm(authority) or 1.0
+        hub = weights @ authority
+        hub /= np.linalg.norm(hub) or 1.0
+    hub = hub / (hub.max() or 1.0)
+    authority = authority / (authority.max() or 1.0)
+    return hub, authority, _tail_mask(hub, tail_quantile), _tail_mask(authority, tail_quantile)
+
+
+def _build_symbol_year_return_speed_scores(frame: pd.DataFrame, spec: HitsLabelSpec) -> pd.DataFrame | None:
+    frame = frame.reset_index(drop=True)
+    if len(frame) < 2:
+        return None
+    high = frame["high"].to_numpy(dtype=float)
+    low = frame["low"].to_numpy(dtype=float)
+    returns, valid, holding_days = _build_edge_channels(high, low, spec.max_hold)
+    output: dict[str, Any] = {"date": frame["date"].to_numpy()}
+    for side in ("long", "short"):
+        for prefix, mode in (("", "return"), ("speed_", "inverse_holding_time")):
+            hub, authority, hub_tail, authority_tail = _score_weight_matrix(
+                returns[side], valid, holding_days, spec.iterations, mode, spec.tail_quantile
+            )
+            output[f"{prefix}{side}_hub"] = hub
+            output[f"{prefix}{side}_authority"] = authority
+            output[f"{prefix}{side}_hub_tail"] = hub_tail
+            output[f"{prefix}{side}_authority_tail"] = authority_tail
     return pd.DataFrame(output)
 
 

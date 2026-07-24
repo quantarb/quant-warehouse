@@ -4,6 +4,7 @@ from quant_warehouse.platforms.data_providers.fmp.target_engineering import (
     HitsLabelSpec,
     build_hits_labels,
     build_hold_timing_hits_labels,
+    build_return_and_speed_hits_labels,
 )
 
 
@@ -45,3 +46,10 @@ def test_build_hold_timing_hits_labels_adds_independent_horizons() -> None:
 
     assert {"long_hub_2d", "long_authority_2d", "short_hub_4d", "short_authority_4d"}.issubset(labels.columns)
     assert not labels[["long_hub_2d", "long_hub_4d"]].isna().any().any()
+
+
+def test_build_return_and_speed_hits_labels_shares_topology() -> None:
+    labels = build_return_and_speed_hits_labels({"A": _prices()}, spec=HitsLabelSpec(max_hold=4, iterations=5))
+
+    assert {"long_hub", "short_authority", "speed_long_hub", "speed_short_authority"}.issubset(labels.columns)
+    assert len(labels) == 8

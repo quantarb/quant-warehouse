@@ -37,7 +37,7 @@ class BinaryTargetConfig:
     oracle_trade_long_exit_price_col: str = "low"
     oracle_trade_short_entry_price_col: str = "low"
     oracle_trade_short_exit_price_col: str = "high"
-    event_alignment_tolerance_days: int = 7
+    event_alignment_tolerance_days: int = 0
     collapsed_bullish_event_types: tuple[str, ...] = (
         "congressman_buy",
         "senator_buy",
@@ -501,30 +501,20 @@ def _base_panel_dates(feature_panel: pd.DataFrame) -> pd.DataFrame:
 
 
 def _align_events_to_panel_dates(base: pd.DataFrame, events: pd.DataFrame, *, tolerance_days: int) -> pd.DataFrame:
+    """Match events only on their exact symbol/date occurrence."""
     events = _dedupe_events(events)
     if base.empty or events.empty:
         return pd.DataFrame(columns=["symbol", "date", "event_type"])
-    aligned_frames: list[pd.DataFrame] = []
-    tolerance = pd.Timedelta(days=int(tolerance_days))
-    for symbol, symbol_events in events.groupby("symbol", sort=False):
-        dates = base.loc[base["symbol"].eq(symbol), ["date"]].sort_values("date")
-        if dates.empty:
-            continue
-        symbol_events = symbol_events.sort_values("event_date")
-        aligned = pd.merge_asof(
-            symbol_events,
-            dates,
-            left_on="event_date",
-            right_on="date",
-            direction="forward",
-            tolerance=tolerance,
-        )
-        aligned = aligned.dropna(subset=["date"])
-        if not aligned.empty:
-            aligned_frames.append(aligned[["symbol", "date", "event_type"]])
-    if not aligned_frames:
+    del tolerance_days
+    exact = events.merge(
+        base[["symbol", "date"]].drop_duplicates(),
+        left_on=["symbol", "event_date"],
+        right_on=["symbol", "date"],
+        how="inner",
+    )
+    if exact.empty:
         return pd.DataFrame(columns=["symbol", "date", "event_type"])
-    return pd.concat(aligned_frames, ignore_index=True).drop_duplicates()
+    return exact[["symbol", "date", "event_type"]].drop_duplicates()
 
 
 def _target_metadata(columns: Sequence[str], family: str) -> pd.DataFrame:

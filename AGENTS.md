@@ -24,6 +24,10 @@
 
 ## Warehouse Responsibility
 
+- Do not apply reporting, disclosure, or filing lags when constructing model features or aligning feature-family observations. Preserve each source observation date exactly unless the user explicitly requests a lag. Forward-fill is permitted only from that recorded date into later dates.
+- Event targets must use exact `(symbol, event_date)` matching. Do not forward-align or smear event labels across a date tolerance window unless the user explicitly requests it.
+- Historical backfills must request `1900-01-01` as the warehouse floor. If a provider has a later availability floor, preserve that provider floor and every returned observation; never replace historical dates with the ingestion timestamp.
+
 - Treat `quant-warehouse` as the opinionated persistence layer over the OpenBB fork SDK.
 - Use it to request vendor data through OpenBB, normalize schemas, compare requested refreshes against what is already stored, and write point-in-time warehouse datasets.
 - Store raw-enough provider datasets first, then filter in downstream feature, label, model, or backtest code after reading from the warehouse. For ThetaData options specifically, warehouse persistence is full-chain-only; selection filters belong in `quant-orchestrator` or in warehouse feature/target builders that operate on already stored full chains.

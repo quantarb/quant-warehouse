@@ -232,6 +232,17 @@ def normalize_calendar_frame(raw: pd.DataFrame) -> pd.DataFrame:
     if raw is None or raw.empty:
         return pd.DataFrame()
     frame = raw.copy()
+    # OpenBB uses the standard-model names while the direct FMP response uses
+    # the endpoint names.  Normalize both into the names consumed by macro
+    # target engineering without discarding either representation.
+    aliases = {
+        "consensus": "estimate",
+        "importance": "impact",
+        "change_percent": "changePercentage",
+    }
+    for source, target in aliases.items():
+        if source in frame.columns and target not in frame.columns:
+            frame = frame.rename(columns={source: target})
     if "date" not in frame.columns:
         if isinstance(frame.index, pd.DatetimeIndex) or str(frame.index.name or "").lower() == "date":
             frame = frame.reset_index().rename(columns={frame.index.name or "index": "date"})
@@ -242,12 +253,39 @@ def normalize_calendar_frame(raw: pd.DataFrame) -> pd.DataFrame:
     for column in frame.columns:
         if column == "date":
             continue
-        if column in {"consensus", "previous", "actual", "change", "change_percent"}:
+        if column in {
+            "estimate", "consensus", "previous", "actual", "change",
+            "changePercentage", "change_percent",
+        }:
             frame[column] = pd.to_numeric(frame[column], errors="coerce")
     frame = frame.set_index("date")
     frame.index = pd.DatetimeIndex(frame.index)
     frame.index.name = "date"
     return clip_to_min_historical_date(frame)
+
+
+def _fetch_fmp_economic_calendar_direct(
+    *,
+    start_date: str,
+    end_date: str,
+) -> pd.DataFrame:
+    """Fetch the raw FMP calendar while preserving zero-valued observations."""
+    import requests
+
+    response = requests.get(
+        "https://financialmodelingprep.com/stable/economic-calendar",
+        params={
+            "apikey": resolve_fmp_api_key(required=True),
+            "from": str(start_date)[:10],
+            "to": str(end_date)[:10],
+        },
+        timeout=(5, 30),
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if not isinstance(payload, list) or not payload:
+        return pd.DataFrame()
+    return normalize_calendar_frame(pd.DataFrame(payload))
 
 
 def fetch_economy_calendar(
@@ -262,6 +300,18 @@ def fetch_economy_calendar(
     configure_openbb_credentials()
     from openbb import obb
 
+    # Prefer the raw endpoint because the provider model historically coerced
+    # valid numeric zeros to missing values.  OpenBB remains a fallback for
+    # environments where direct FMP requests are unavailable.
+    try:
+        direct = _fetch_fmp_economic_calendar_direct(
+            start_date=start_date,
+            end_date=end_date,
+        )
+        if not direct.empty:
+            return direct
+    except Exception:
+        pass
     try:
         result = obb.economy.calendar(
             start_date=str(start_date)[:10],
@@ -282,10 +332,11 @@ def fetch_economy_calendar_range(
     start = pd.Timestamp(start_date or MIN_HISTORICAL_DATE)
     end = pd.Timestamp(end_date or pd.Timestamp.utcnow().tz_convert("America/New_York").date())
     frames: list[pd.DataFrame] = []
-    cursor = start.to_period("M").to_timestamp()
+    cursor = start.normalize()
     while cursor <= end:
-        month_end = (cursor + pd.offsets.MonthEnd(0)).normalize()
-        chunk_end = min(month_end, end)
+        # FMP supports at most a 90-day calendar window.  Monthly requests
+        # create unnecessary rate-limit pressure and can silently lose data.
+        chunk_end = min(cursor + pd.Timedelta(days=89), end)
         chunk = fetch_economy_calendar(
             provider=provider,
             start_date=cursor.strftime("%Y-%m-%d"),
@@ -293,11 +344,12 @@ def fetch_economy_calendar_range(
         )
         if not chunk.empty:
             frames.append(chunk)
-        cursor = (cursor + pd.offsets.MonthBegin(1)).normalize()
+        cursor = (chunk_end + pd.Timedelta(days=1)).normalize()
     if not frames:
         return pd.DataFrame()
-    combined = pd.concat(frames)
-    combined = combined[~combined.index.duplicated(keep="last")].sort_index()
+    # Multiple releases commonly share the same timestamp.  They are distinct
+    # events and must remain separate for target engineering.
+    combined = pd.concat(frames).sort_index()
     return clip_to_min_historical_date(combined)
 
 

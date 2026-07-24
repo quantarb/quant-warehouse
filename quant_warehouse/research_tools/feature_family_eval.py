@@ -6,6 +6,8 @@ from functools import lru_cache
 from time import perf_counter
 from typing import Iterable
 import warnings
+import hashlib
+import re
 
 import numpy as np
 import pandas as pd
@@ -64,7 +66,10 @@ class FamilyEvaluationConfig:
     screen_limit: int = 5_000
     start_date: str = "2018-01-01"
     end_date: str | None = None
-    filing_lag_days: int = 45
+    # Retained for API compatibility; feature-family alignment is date-faithful
+    # and never shifts observations unless the caller explicitly transforms the
+    # source dates before loading them.
+    filing_lag_days: int = 0
     horizons: tuple[int, ...] = (20, 60, 120)
     min_observations: int = 120
     max_features_per_family: int | None = None
@@ -631,9 +636,10 @@ def _align_fundamental(
     if frame is None or frame.empty:
         return pd.DataFrame(index=daily_index)
     sparse = _numeric_frame(frame)
-    sparse.index = pd.DatetimeIndex(pd.to_datetime(sparse.index, errors="coerce")).normalize() + pd.Timedelta(
-        days=int(filing_lag_days)
-    )
+    sparse_dates = pd.to_datetime(sparse.index, errors="coerce", utc=True).tz_convert(None)
+    # Do not apply reporting or filing lags here.  The model consumes the
+    # warehouse's reported observation date exactly as stored.
+    sparse.index = pd.DatetimeIndex(sparse_dates).normalize()
     sparse = sparse.loc[sparse.index.notna()].sort_index()
     sparse = sparse.loc[~sparse.index.duplicated(keep="last")]
     return sparse.reindex(daily_index, method="ffill")
@@ -1062,6 +1068,47 @@ def _feature_token(value: object) -> str:
     return "_".join("".join(chars).split("_")).strip("_")
 
 
+def _daily_news_tfidf(news: pd.DataFrame, daily_index: pd.DatetimeIndex, *, buckets: int = 32) -> pd.DataFrame:
+    """Build leakage-safe hashed TF-IDF from articles published on each day.
+
+    Each (symbol, date) is its own text document. IDF is computed only across
+    articles within that same day; no vocabulary or statistics from future
+    dates are used.
+    """
+    out = pd.DataFrame(0.0, index=daily_index, columns=[f"tfidf_hash_{i:02d}" for i in range(buckets)])
+    if news is None or news.empty or "observation_date" not in news.columns:
+        return out
+    text_columns = [column for column in ("title", "excerpt") if column in news.columns]
+    if not text_columns:
+        return out
+    work = news.copy()
+    work["_news_date"] = pd.to_datetime(work["observation_date"], errors="coerce").dt.normalize()
+    work = work.loc[work["_news_date"].notna()].copy()
+    token_re = re.compile(r"[a-z][a-z0-9]{2,}")
+    by_day: dict[pd.Timestamp, list[list[str]]] = {}
+    for _, row in work.iterrows():
+        values = {str(column): row.get(column, "") for column in text_columns}
+        tokens = token_re.findall(" ".join(values.values()).lower())
+        if tokens:
+            by_day.setdefault(row["_news_date"], []).append(tokens)
+    for day, articles in by_day.items():
+        if day not in out.index:
+            continue
+        document_frequency = np.zeros(buckets, dtype="float64")
+        total = np.zeros(buckets, dtype="float64")
+        for tokens in articles:
+            counts = np.zeros(buckets, dtype="float64")
+            for token in tokens:
+                digest = hashlib.blake2b(token.encode("utf-8"), digest_size=4).digest()
+                counts[int.from_bytes(digest, byteorder="little") % buckets] += 1.0
+            counts /= max(1.0, float(len(tokens)))
+            total += counts
+            document_frequency += (counts > 0).astype("float64")
+        idf = np.log((1.0 + len(articles)) / (1.0 + document_frequency)) + 1.0
+        out.loc[day] = total * idf / max(1.0, float(len(articles)))
+    return out
+
+
 def _build_symbol_fundamental_panel(
     warehouse: Warehouse,
     symbol: str,
@@ -1079,6 +1126,39 @@ def _build_symbol_fundamental_panel(
         )
         for section in FMP_REQUIRED_FUNDAMENTAL_SECTIONS
     }
+    # Employee counts are sparse issuer observations. Keep the warehouse
+    # observation date unchanged and forward-fill only across later dates.
+    inputs["employee_count"] = _slice_frame(
+        _read_section(warehouse, symbol, "employee_count", config.provider),
+        None,
+        config.end_date,
+    )
+    inputs["ownership_institutional"] = _slice_frame(
+        _read_section(warehouse, symbol, "ownership_institutional", config.provider),
+        None,
+        config.end_date,
+    )
+    inputs["estimates_historical"] = _slice_frame(
+        _read_section(warehouse, symbol, "estimates_historical", config.provider),
+        None,
+        config.end_date,
+    )
+    inputs["ratings_historical"] = _slice_frame(
+        _read_section(warehouse, symbol, "ratings_historical", config.provider),
+        None,
+        config.end_date,
+    )
+    inputs["esg_score"] = _slice_frame(
+        _read_section(warehouse, symbol, "esg_score", config.provider),
+        None,
+        config.end_date,
+    )
+    inputs["company_news"] = warehouse.read_news(
+        symbol,
+        provider=config.provider,
+        start=config.start_date,
+        end=config.end_date,
+    )
     prices = inputs["prices"]
     mcap = inputs["historical_market_cap"]
     if prices.empty or mcap.empty or "close" not in prices.columns or "market_cap" not in mcap.columns:
@@ -1107,6 +1187,181 @@ def _build_symbol_fundamental_panel(
     _build_daily_adjusted_features(aligned, daily_mcap, daily_ev, feature_frames, specs, wanted_families=wanted_families)
     _build_statement_mcap_features(aligned, daily_mcap, feature_frames, specs, wanted_families=wanted_families)
     _build_financetoolkit_style_features(aligned, feature_frames, specs, wanted_families=wanted_families)
+
+    if wanted_families is None or "fmp_employee_count" in wanted_families:
+        employee_daily = _align_fundamental(
+            inputs["employee_count"],
+            daily_index,
+            filing_lag_days=config.filing_lag_days,
+        )
+        if "employees" in employee_daily.columns:
+            _add_feature(
+                feature_frames,
+                specs,
+                "employees",
+                pd.to_numeric(employee_daily["employees"], errors="coerce"),
+                family="fmp_employee_count",
+                source="fmp",
+                source_column="employee_count.employees",
+                expected_direction="neutral",
+            )
+
+    if wanted_families is None or "fmp_institutional_position_summary" in wanted_families:
+        position_daily = _align_fundamental(
+            inputs["ownership_institutional"],
+            daily_index,
+            # FMP's position summary is already timestamped by the quarter
+            # being represented. Keep the reported date unchanged per the
+            # model's event-feature contract.
+            filing_lag_days=0,
+        )
+        excluded = {"symbol", "cik"}
+        for column in position_daily.columns:
+            if str(column).lower() in excluded:
+                continue
+            values = pd.to_numeric(position_daily[column], errors="coerce")
+            if values.notna().sum() == 0:
+                continue
+            name = _feature_token(column)
+            _add_feature(
+                feature_frames,
+                specs,
+                name,
+                values,
+                family="fmp_institutional_position_summary",
+                source="fmp",
+                source_column=f"ownership_institutional.{column}",
+                expected_direction="neutral",
+            )
+
+    if wanted_families is None or "fmp_quarterly_financial_estimates" in wanted_families:
+        estimates_daily = _align_fundamental(
+            inputs["estimates_historical"],
+            daily_index,
+            # The estimate record's FMP date is retained exactly.  There is
+            # intentionally no reporting/filing lag or date smearing.
+            filing_lag_days=0,
+        )
+        excluded = {"symbol", "cik", "period"}
+        for column in estimates_daily.columns:
+            if str(column).lower() in excluded:
+                continue
+            values = pd.to_numeric(estimates_daily[column], errors="coerce")
+            if values.notna().sum() == 0:
+                continue
+            name = _feature_token(column)
+            _add_feature(
+                feature_frames,
+                specs,
+                name,
+                values,
+                family="fmp_quarterly_financial_estimates",
+                source="fmp",
+                source_column=f"estimates_historical.{column}",
+                expected_direction="neutral",
+            )
+
+    if wanted_families is None or "fmp_historical_ratings" in wanted_families:
+        ratings_frame = inputs["ratings_historical"]
+        ratings_daily = _align_fundamental(ratings_frame, daily_index, filing_lag_days=0)
+        for column in ratings_daily.columns:
+            if str(column).lower() in {"symbol", "cik"}:
+                continue
+            values = pd.to_numeric(ratings_daily[column], errors="coerce")
+            if values.notna().sum() == 0:
+                continue
+            _add_feature(
+                feature_frames,
+                specs,
+                _feature_token(column),
+                values,
+                family="fmp_historical_ratings",
+                source="fmp",
+                source_column=f"ratings_historical.{column}",
+                expected_direction="neutral",
+            )
+
+    if wanted_families is None or "fmp_esg_scores" in wanted_families:
+        esg_daily = _align_fundamental(inputs["esg_score"], daily_index, filing_lag_days=0)
+        for column in esg_daily.columns:
+            if str(column).lower() in {"symbol", "cik"}:
+                continue
+            values = pd.to_numeric(esg_daily[column], errors="coerce")
+            if values.notna().sum() == 0:
+                continue
+            _add_feature(
+                feature_frames,
+                specs,
+                _feature_token(column),
+                values,
+                family="fmp_esg_scores",
+                source="fmp",
+                source_column=f"esg_score.{column}",
+                expected_direction="neutral",
+            )
+
+    # Counts and daily TF-IDF come from the same endpoint and intentionally
+    # share one family encoder.  Only same-day aggregates are materialized;
+    # temporal persistence is learned from the document sequence rather than
+    # from hand-engineered 5-day/20-day rolling features.
+    if wanted_families is None or {
+        "fmp_company_news", "fmp_company_news_tfidf"
+    } & wanted_families:
+        news = inputs["company_news"]
+        news_dates = (
+            pd.to_datetime(news["observation_date"], errors="coerce").dt.normalize()
+            if news is not None and not news.empty and "observation_date" in news.columns
+            else pd.Series(dtype="datetime64[ns]")
+        )
+        daily_count = news_dates.value_counts().reindex(daily_index, fill_value=0).astype("float64")
+        if news is not None and not news.empty and "source" in news.columns:
+            source_count = (
+                news.assign(_news_date=news_dates)
+                .groupby("_news_date")["source"]
+                .nunique()
+                .reindex(daily_index, fill_value=0)
+                .astype("float64")
+            )
+        else:
+            source_count = daily_count.copy()
+        for name, values, source_column in (
+            ("news_count_1d", daily_count, "company_news.article_count"),
+            ("news_source_count_1d", source_count, "company_news.distinct_source_count"),
+        ):
+            _add_feature(
+                feature_frames, specs, name, values,
+                family="fmp_company_news", source="fmp",
+                source_column=source_column, expected_direction="neutral",
+            )
+        news_tfidf = _daily_news_tfidf(news, daily_index)
+        for column in news_tfidf.columns:
+            _add_feature(
+                feature_frames, specs, column, news_tfidf[column],
+                family="fmp_company_news", source="fmp",
+                source_column=f"company_news.{column}", expected_direction="neutral",
+            )
+        if ratings_frame is not None and not ratings_frame.empty and "rating" in ratings_frame.columns:
+            rating_dates = pd.DatetimeIndex(pd.to_datetime(ratings_frame.index, errors="coerce")).normalize()
+            rating_values = (
+                ratings_frame.assign(_rating_date=rating_dates)
+                .set_index("_rating_date")["rating"]
+                .astype(str)
+                .str.upper()
+                .map({"A+": 6.0, "A": 5.0, "A-": 4.0, "B+": 3.0, "B": 2.0, "B-": 1.0, "C": 0.0, "D": -1.0, "F": -2.0})
+                .groupby(level=0)
+                .last()
+                .reindex(daily_index, method="ffill")
+            )
+            _add_feature(
+                feature_frames,
+                specs,
+                "rating_ordinal",
+                rating_values,
+                family="fmp_historical_ratings",
+                source="fmp",
+                source_column="ratings_historical.rating",
+                expected_direction="higher_is_better",
+            )
 
     if strategy_sources:
         keep_features = {
