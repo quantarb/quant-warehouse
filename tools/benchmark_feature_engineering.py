@@ -18,7 +18,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from quant_warehouse.platforms.data_providers.fmp.feature_engineering import build_price_technical_features  # noqa: E402
+from quant_warehouse.platforms.data_providers.fmp.feature_engineering import build_historical_price_eod_features  # noqa: E402
 from quant_warehouse.platforms.data_providers.fmp.feature_engineering.specs import BuiltFeatureSet  # noqa: E402
 
 
@@ -153,7 +153,7 @@ def run_benchmark(
     validate: bool = True,
 ) -> BenchmarkReport:
     frames = make_price_frames(config)
-    baseline_builder = build_price_technical_features
+    baseline_builder = build_historical_price_eod_features
     if candidate_builder is not None and validate:
         validate_candidate(baseline_builder, candidate_builder, frames[0][0], frames[0][1])
 

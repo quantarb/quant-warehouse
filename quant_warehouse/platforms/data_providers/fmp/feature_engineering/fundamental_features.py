@@ -125,6 +125,7 @@ def build_passthrough_section_features(
     prefix: str,
     filing_lag_days: int = 45,
     sparse_loader: SparseLoader | None = None,
+    broadcast_to_target: bool = True,
 ) -> BuiltFeatureSet:
     sparse = load_section_payload(
         symbol_obj,
@@ -139,8 +140,15 @@ def build_passthrough_section_features(
     numeric_cols = [c for c in sparse.columns if c.startswith(prefix) and pd.api.types.is_numeric_dtype(sparse[c])]
     if not numeric_cols:
         return BuiltFeatureSet(df=pd.DataFrame(index=target_index), feature_cols=[])
-    daily = broadcast_sparse(sparse[numeric_cols].sort_index(), target_index)
-    return BuiltFeatureSet(df=daily, feature_cols=[c for c in daily.columns if c.startswith(prefix)])
+    source = sparse[numeric_cols].sort_index()
+    daily = broadcast_sparse(source, target_index) if broadcast_to_target else source
+    return BuiltFeatureSet(
+        df=daily,
+        feature_cols=[c for c in daily.columns if c.startswith(prefix)],
+        family_name=section_key,
+        endpoint_name=section_key,
+        source_asset_class="equity",
+    )
 
 
 def add_daily_price_linked_features(
@@ -219,11 +227,21 @@ def add_growth_adjusted_valuation_features(
     return out, added
 
 
-def merge_feature_sets(parts: Sequence[BuiltFeatureSet], target_index: pd.MultiIndex) -> BuiltFeatureSet:
+def merge_feature_sets(
+    parts: Sequence[BuiltFeatureSet], target_index: pd.MultiIndex | None = None
+) -> BuiltFeatureSet:
+    """Outer-merge endpoint families while preserving endpoint coverage masks."""
     frames = [part.df for part in parts if part is not None and not part.df.empty]
     if not frames:
-        return BuiltFeatureSet(df=pd.DataFrame(index=target_index), feature_cols=[])
-    merged = pd.concat(frames, axis=1).reindex(target_index)
+        empty_index = target_index if target_index is not None else pd.MultiIndex.from_tuples([], names=["date", "symbol"])
+        return BuiltFeatureSet(df=pd.DataFrame(index=empty_index), feature_cols=[], family_name="combined")
+    indexes = [frame.index for frame in frames]
+    if target_index is not None:
+        indexes.insert(0, target_index)
+    union_index = indexes[0]
+    for index in indexes[1:]:
+        union_index = union_index.union(index)
+    merged = pd.concat(frames, axis=1, join="outer").reindex(union_index)
     if merged.columns.has_duplicates:
         merged = merged.loc[:, ~merged.columns.duplicated(keep="last")]
     cols: list[str] = []
@@ -231,7 +249,31 @@ def merge_feature_sets(parts: Sequence[BuiltFeatureSet], target_index: pd.MultiI
         for col in getattr(part, "feature_cols", []) or []:
             if col in merged.columns and col not in cols:
                 cols.append(col)
-    return BuiltFeatureSet(df=merged, feature_cols=cols)
+    family_columns: dict[str, list[str]] = {}
+    family_presence: dict[str, pd.Series] = {}
+    for position, part in enumerate(parts):
+        if part is None or part.df.empty:
+            continue
+        family = part.family_name or part.endpoint_name or f"family_{position}"
+        columns = [column for column in part.feature_cols if column in merged.columns]
+        family_columns[family] = list(dict.fromkeys([*family_columns.get(family, []), *columns]))
+        observed = part.presence
+        if observed is None:
+            observed = part.df.loc[:, columns].notna().any(axis=1)
+        observed = observed.reindex(union_index, fill_value=False).astype(bool)
+        if family in family_presence:
+            family_presence[family] = family_presence[family] | observed
+        else:
+            family_presence[family] = observed
+    presence_frame = pd.DataFrame(family_presence, index=union_index)
+    return BuiltFeatureSet(
+        df=merged,
+        feature_cols=cols,
+        family_name="combined",
+        endpoint_name="combined",
+        family_columns=family_columns,
+        family_presence=presence_frame,
+    )
 
 
 def build_key_metrics_features(

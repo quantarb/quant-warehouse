@@ -2,16 +2,15 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-import pytest
 
 from quant_warehouse.platforms.data_providers.fmp.feature_engineering import (
-    TA_CLASSIC_FAMILY_PREFIXES,
-    build_price_ta_classic_feature_families,
-    build_price_technical_features,
+    build_historical_price_eod_features,
     build_preferred_stock_features,
     build_time_features,
     compute_features_worldclass,
 )
+from quant_warehouse.platforms.data_providers.fmp.feature_engineering.fundamental_features import merge_feature_sets
+from quant_warehouse.platforms.data_providers.fmp.feature_engineering.specs import BuiltFeatureSet
 from quant_warehouse.platforms.data_providers.thetadata.feature_engineering import (
     filter_option_instrument_rows,
 )
@@ -46,15 +45,49 @@ def test_filter_option_instrument_rows_uses_change_percent_not_raw_change():
     assert filtered.iloc[0]["change"] == 0.0
 
 
-def test_build_price_technical_features_is_standalone_and_prefixed():
-    built = build_price_technical_features("aapl", _price_frame())
+def test_build_historical_price_eod_features_is_endpoint_native():
+    built = build_historical_price_eod_features("aapl", _price_frame())
 
     assert not built.df.empty
     assert built.df.index.names == ["date", "symbol"]
     assert built.df.index.get_level_values("symbol").unique().tolist() == ["AAPL"]
-    assert "px__ret_1d" in built.feature_cols
-    assert "px__macd" in built.feature_cols
-    assert all(column.startswith("px__") for column in built.feature_cols)
+    assert "eod__adjusted_open" in built.feature_cols
+    assert "eod__adjusted_close" in built.feature_cols
+    assert "eod__volume" in built.feature_cols
+    assert all(column.startswith("eod__") for column in built.feature_cols)
+    assert built.family_name == "equity-historical-price-eod"
+    assert built.endpoint_name == "historical-price-eod"
+    assert not any("macd" in column or "ret" in column for column in built.feature_cols)
+
+
+def test_passthrough_feature_set_can_remain_sparse():
+    from quant_warehouse.platforms.data_providers.fmp.feature_engineering.fundamental_features import (
+        build_passthrough_section_features,
+    )
+
+    target = pd.MultiIndex.from_tuples(
+        [("2024-01-01", "AAPL"), ("2024-01-02", "AAPL")],
+        names=["date", "symbol"],
+    )
+    source = pd.DataFrame(
+        {"revenue": [10.0]},
+        index=pd.MultiIndex.from_tuples(
+            [("2024-01-01", "AAPL")], names=["date", "symbol"]
+        ),
+    )
+    built = build_passthrough_section_features(
+        "AAPL",
+        target,
+        section_key="income",
+        prefix="income__",
+        sparse_loader=lambda *args, **kwargs: source.rename(columns={"revenue": "income__revenue"}),
+        broadcast_to_target=False,
+    )
+    assert len(built.df) == 1
+    assert built.df.index.equals(source.index)
+    assert built.endpoint_name == "income"
+    assert built.source_asset_class == "equity"
+    assert built.presence is not None
 
 
 def test_build_preferred_stock_features_keeps_raw_family_separate():
@@ -79,13 +112,53 @@ def test_build_preferred_stock_features_keeps_raw_family_separate():
     assert all(column.startswith("preferred__") for column in built.feature_cols)
 
 
-def test_price_technical_cuda_setting_falls_back_without_cudf(monkeypatch):
+def test_merge_feature_sets_preserves_endpoint_union_and_presence_masks():
+    index_a = pd.MultiIndex.from_tuples(
+        [(pd.Timestamp("2025-01-01"), "A")], names=["date", "symbol"]
+    )
+    index_b = pd.MultiIndex.from_tuples(
+        [(pd.Timestamp("2025-01-02"), "A")], names=["date", "symbol"]
+    )
+    prices = BuiltFeatureSet(
+        pd.DataFrame({"px__close": [10.0]}, index=index_a),
+        ["px__close"],
+        family_name="equity_ohlcv",
+        endpoint_name="prices",
+        source_asset_class="equity",
+    )
+    options = BuiltFeatureSet(
+        pd.DataFrame({"opt__delta": [0.5]}, index=index_b),
+        ["opt__delta"],
+        family_name="option_greeks",
+        endpoint_name="option_history_greeks_eod",
+        source_asset_class="option",
+    )
+
+    merged = merge_feature_sets([prices, options])
+
+    assert set(merged.df.index) == set(index_a) | set(index_b)
+    assert merged.family_columns == {
+        "equity_ohlcv": ["px__close"],
+        "option_greeks": ["opt__delta"],
+    }
+    assert merged.family_presence.loc[index_a[0], "equity_ohlcv"]
+    assert not merged.family_presence.loc[index_a[0], "option_greeks"]
+    assert merged.family_presence.loc[index_b[0], "option_greeks"]
+
+
+def test_historical_price_eod_ignores_ta_cuda_setting(monkeypatch):
     monkeypatch.setenv("QW_FEATURE_ENGINEERING_CUDA", "always")
 
-    built = build_price_technical_features("MSFT", _price_frame())
+    built = build_historical_price_eod_features("MSFT", _price_frame())
 
     assert not built.df.empty
-    assert "px__dollar_vol" in built.feature_cols
+    assert built.feature_cols == [
+        "eod__adjusted_open",
+        "eod__adjusted_high",
+        "eod__adjusted_low",
+        "eod__adjusted_close",
+        "eod__volume",
+    ]
 
 
 def test_price_engine_matches_pandas_reference_for_core_features(monkeypatch):
@@ -130,33 +203,6 @@ def test_price_engine_matches_pandas_reference_for_core_features(monkeypatch):
         rtol=1e-10,
         atol=1e-10,
     )
-
-
-def test_ta_classic_feature_families_are_split_and_prefixed():
-    built_by_family = build_price_ta_classic_feature_families("AAPL", _price_frame(90))
-
-    assert set(built_by_family) == set(TA_CLASSIC_FAMILY_PREFIXES)
-    assert any(built.feature_cols for built in built_by_family.values())
-    for family_name, built in built_by_family.items():
-        assert all(
-            column.startswith(TA_CLASSIC_FAMILY_PREFIXES[family_name])
-            for column in built.feature_cols
-        )
-
-
-def test_ta_classic_exposes_only_the_bounded_v1_indicator_set():
-    from quant_warehouse.platforms.data_providers.fmp.feature_engineering.ta_classic_technical import (
-        _import_pandas_ta_classic,
-        _indicator_specs,
-    )
-
-    ta = _import_pandas_ta_classic()
-    curated_names = {spec.fn_name for specs in _indicator_specs(ta).values() for spec in specs}
-
-    assert {"rsi", "macd", "stoch", "bbands", "drawdown"}.issubset(curated_names)
-    assert {"macdext", "macdfix", "stochf", "dema", "tema", "alma"}.isdisjoint(curated_names)
-    with pytest.raises(TypeError, match="unexpected keyword argument 'mode'"):
-        build_price_ta_classic_feature_families("AAPL", _price_frame(90), mode="all")
 
 
 def test_build_time_features_matches_target_index():

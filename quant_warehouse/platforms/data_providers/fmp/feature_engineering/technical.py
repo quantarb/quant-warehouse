@@ -14,6 +14,14 @@ from quant_warehouse.platforms.data_providers.fmp.feature_engineering.specs impo
 BASE_PRICE_COLS = ("open", "high", "low", "close", "volume")
 
 
+def historical_price_eod_family(asset_class: str) -> str:
+    """Return the canonical EOD price family for an asset class."""
+    normalized = str(asset_class).strip().lower().replace("_", "-")
+    if not normalized:
+        raise ValueError("asset_class must not be empty")
+    return f"{normalized}-historical-price-eod"
+
+
 def normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
     """Normalize common feature frames to a sorted datetime index."""
     if df is None or len(df) == 0:
@@ -357,23 +365,56 @@ def load_or_compute_features_daily(
     return FeaturesResult(df_daily=df_daily, feature_cols=feature_cols)
 
 
-def build_price_technical_features(symbol: str, df_prices: pd.DataFrame) -> BuiltFeatureSet:
-    """Build prefixed price/technical features for a single symbol."""
+def build_historical_price_eod_features(
+    symbol: str,
+    df_prices: pd.DataFrame,
+    *,
+    asset_class: str = "equity",
+) -> BuiltFeatureSet:
+    """Build the sparse endpoint payload for FMP ``historical-price-eod``.
+
+    This family intentionally contains endpoint-native price fields only.  It
+    does not calculate moving averages, returns, indicators, or other TA
+    features; those belong to learned feature engineering in the model layer.
+    Adjusted OHLC is preferred when the endpoint supplies it, with raw OHLC as
+    a fallback for providers or historical rows that do not include adjusted
+    values.
+    """
 
     if df_prices.empty:
         return BuiltFeatureSet(df=pd.DataFrame(), feature_cols=[])
-    df_daily = compute_features_worldclass(df_prices.copy())
-    feature_cols = [
-        column
-        for column in df_daily.columns
-        if column not in BASE_PRICE_COLS and column != "symbol" and pd.api.types.is_numeric_dtype(df_daily[column])
-    ]
-    rename_map = {column: f"px__{_to_snake(column)}" for column in feature_cols}
-    out = df_daily[feature_cols].rename(columns=rename_map).copy()
+    df_daily = _ensure_dt_index(normalize_cols(df_prices))
+    source_columns = {
+        "eod__adjusted_open": ("adj_open", "open"),
+        "eod__adjusted_high": ("adj_high", "high"),
+        "eod__adjusted_low": ("adj_low", "low"),
+        "eod__adjusted_close": ("adj_close", "close"),
+        "eod__volume": ("volume",),
+    }
+    optional_columns = {
+        "eod__vwap": ("vwap",),
+        "eod__change": ("change",),
+        "eod__change_percent": ("change_percent", "change_pct"),
+    }
+    selected: dict[str, pd.Series] = {}
+    for output, candidates in {**source_columns, **optional_columns}.items():
+        for candidate in candidates:
+            if candidate in df_daily.columns:
+                selected[output] = pd.to_numeric(df_daily[candidate], errors="coerce")
+                break
+    feature_cols = list(selected)
+    if not feature_cols:
+        return BuiltFeatureSet(df=pd.DataFrame(), feature_cols=[])
+    out = pd.DataFrame(selected, index=df_daily.index)
     out["symbol"] = str(symbol).strip().upper()
     out = out.reset_index().rename(columns={out.index.name or "index": "date"}).set_index(["date", "symbol"]).sort_index()
-    renamed_feature_cols = [rename_map[column] for column in feature_cols]
-    return BuiltFeatureSet(df=out, feature_cols=renamed_feature_cols)
+    return BuiltFeatureSet(
+        df=out,
+        feature_cols=feature_cols,
+        family_name=historical_price_eod_family(asset_class),
+        endpoint_name="historical-price-eod",
+        source_asset_class="equity",
+    )
 
 
 def _to_snake(value: str) -> str:

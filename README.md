@@ -32,7 +32,6 @@ quant_warehouse/platforms/data_providers/fmp/
         fundamentals.py
         fundamental_features.py
         technical.py
-        ta_classic_technical.py
         time_features.py
     target_engineering/
         event_pairs/
