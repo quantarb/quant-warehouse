@@ -283,8 +283,9 @@ def build_fundamental_feature_panel(
     warehouse: Warehouse | None = None,
     strategy_sources: Iterable[str] | None = None,
     observation_dates: pd.DataFrame | None = None,
+    broadcast_to_target: bool = True,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, float]]:
-    """Build only the requested fundamental feature families when supplied."""
+    """Build requested fundamental families, optionally without as-of broadcast."""
 
     wh = warehouse or Warehouse()
     wanted = {str(value).strip() for value in strategy_sources or () if str(value).strip()}
@@ -294,12 +295,17 @@ def build_fundamental_feature_panel(
     all_specs: list[FeatureSpec] = []
     diagnostics: list[dict[str, object]] = []
     for symbol in symbols:
+        build_kwargs = {
+            "strategy_sources": wanted or None,
+            "observation_dates": None if dates is None else dates.loc[dates["symbol"].eq(str(symbol).strip().upper()), "date"],
+        }
+        if not broadcast_to_target:
+            build_kwargs["broadcast_to_target"] = False
         frame, specs, diag = _build_symbol_fundamental_panel(
             wh,
             symbol,
             config,
-            strategy_sources=wanted or None,
-            observation_dates=None if dates is None else dates.loc[dates["symbol"].eq(str(symbol).strip().upper()), "date"],
+            **build_kwargs,
         )
         diagnostics.append(diag)
         if not frame.empty:
@@ -337,18 +343,13 @@ def build_technical_feature_panel(
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, float]]:
     """Build requested technical families and optionally retain only required symbol/dates."""
 
-    from quant_warehouse.platforms.data_providers.fmp.feature_engineering.ta_classic_technical import (
-        TA_CLASSIC_FAMILY_PREFIXES,
-    )
-
     requested = {str(value).strip() for value in strategy_sources if str(value).strip()}
-    allowed = {"fmp.price_technicals", *(f"fmp.{name}" for name in TA_CLASSIC_FAMILY_PREFIXES)}
+    allowed = {"fmp.equity-historical-price-eod"}
     unknown = sorted(requested.difference(allowed))
     if unknown:
         raise ValueError(f"Unknown technical strategy sources: {unknown}")
     if not requested:
         raise ValueError("At least one technical strategy source is required")
-    wanted_ta = {value.split(".", 1)[1] for value in requested if value != "fmp.price_technicals"}
     dates = _normalize_observation_dates(observation_dates)
     wh = warehouse or Warehouse()
     started = perf_counter()
@@ -365,7 +366,7 @@ def build_technical_feature_panel(
                 symbol,
                 config,
                 requested=requested,
-                wanted_ta=wanted_ta,
+                wanted_ta=set(),
                 observation_dates=None
                 if dates is None
                 else dates.loc[dates["symbol"].eq(symbol), "date"],
@@ -378,7 +379,7 @@ def build_technical_feature_panel(
                 symbol,
                 config,
                 tuple(sorted(requested)),
-                tuple(sorted(wanted_ta)),
+                (),
                 None
                 if dates is None
                 else tuple(dates.loc[dates["symbol"].eq(symbol), "date"].tolist()),
@@ -439,11 +440,8 @@ def _build_symbol_technical_panel(
     wanted_ta: set[str],
     observation_dates: pd.Series | None,
 ) -> tuple[pd.DataFrame | None, list[FeatureSpec], dict[str, object]]:
-    from quant_warehouse.platforms.data_providers.fmp.feature_engineering.ta_classic_technical import (
-        build_price_ta_classic_feature_families,
-    )
     from quant_warehouse.platforms.data_providers.fmp.feature_engineering.technical import (
-        build_price_technical_features,
+        build_historical_price_eod_features,
     )
 
     prices = _slice_frame(
@@ -452,12 +450,8 @@ def _build_symbol_technical_panel(
     if prices.empty:
         return None, [], {"symbol": symbol, "status": "missing_prices"}
     built_sets = {}
-    if "fmp.price_technicals" in requested:
-        built_sets["price_technicals"] = build_price_technical_features(symbol, prices)
-    if wanted_ta:
-        built_sets.update(
-            build_price_ta_classic_feature_families(symbol, prices, families=wanted_ta)
-        )
+    if "fmp.equity-historical-price-eod" in requested:
+        built_sets["equity-historical-price-eod"] = build_historical_price_eod_features(symbol, prices)
     symbol_frames = []
     symbol_specs: list[FeatureSpec] = []
     for family, built in built_sets.items():
@@ -632,6 +626,7 @@ def _align_fundamental(
     daily_index: pd.DatetimeIndex,
     *,
     filing_lag_days: int,
+    broadcast_to_target: bool = True,
 ) -> pd.DataFrame:
     if frame is None or frame.empty:
         return pd.DataFrame(index=daily_index)
@@ -642,6 +637,8 @@ def _align_fundamental(
     sparse.index = pd.DatetimeIndex(sparse_dates).normalize()
     sparse = sparse.loc[sparse.index.notna()].sort_index()
     sparse = sparse.loc[~sparse.index.duplicated(keep="last")]
+    if not broadcast_to_target:
+        return sparse
     return sparse.reindex(daily_index, method="ffill")
 
 
@@ -1116,6 +1113,7 @@ def _build_symbol_fundamental_panel(
     *,
     strategy_sources: set[str] | None = None,
     observation_dates: pd.Series | None = None,
+    broadcast_to_target: bool = True,
 ) -> tuple[pd.DataFrame, list[FeatureSpec], dict[str, object]]:
     start = perf_counter()
     inputs = {
@@ -1171,7 +1169,11 @@ def _build_symbol_fundamental_panel(
     specs: list[FeatureSpec] = []
     feature_frames: dict[str, pd.Series] = {}
     aligned = {
-        section: _align_fundamental(inputs[section], daily_index, filing_lag_days=config.filing_lag_days)
+        section: _align_fundamental(
+            inputs[section], daily_index,
+            filing_lag_days=config.filing_lag_days,
+            broadcast_to_target=broadcast_to_target,
+        )
         for section in ("income", "balance", "cash", "ratios", "metrics", "income_growth", "balance_growth", "cash_growth")
     }
     aligned["balance"] = _add_tangible_book(aligned["balance"])
@@ -1193,6 +1195,7 @@ def _build_symbol_fundamental_panel(
             inputs["employee_count"],
             daily_index,
             filing_lag_days=config.filing_lag_days,
+            broadcast_to_target=broadcast_to_target,
         )
         if "employees" in employee_daily.columns:
             _add_feature(
@@ -1214,6 +1217,7 @@ def _build_symbol_fundamental_panel(
             # being represented. Keep the reported date unchanged per the
             # model's event-feature contract.
             filing_lag_days=0,
+            broadcast_to_target=broadcast_to_target,
         )
         excluded = {"symbol", "cik"}
         for column in position_daily.columns:
@@ -1241,6 +1245,7 @@ def _build_symbol_fundamental_panel(
             # The estimate record's FMP date is retained exactly.  There is
             # intentionally no reporting/filing lag or date smearing.
             filing_lag_days=0,
+            broadcast_to_target=broadcast_to_target,
         )
         excluded = {"symbol", "cik", "period"}
         for column in estimates_daily.columns:
@@ -1263,7 +1268,10 @@ def _build_symbol_fundamental_panel(
 
     if wanted_families is None or "fmp_historical_ratings" in wanted_families:
         ratings_frame = inputs["ratings_historical"]
-        ratings_daily = _align_fundamental(ratings_frame, daily_index, filing_lag_days=0)
+        ratings_daily = _align_fundamental(
+            ratings_frame, daily_index, filing_lag_days=0,
+            broadcast_to_target=broadcast_to_target,
+        )
         for column in ratings_daily.columns:
             if str(column).lower() in {"symbol", "cik"}:
                 continue
@@ -1282,7 +1290,10 @@ def _build_symbol_fundamental_panel(
             )
 
     if wanted_families is None or "fmp_esg_scores" in wanted_families:
-        esg_daily = _align_fundamental(inputs["esg_score"], daily_index, filing_lag_days=0)
+        esg_daily = _align_fundamental(
+            inputs["esg_score"], daily_index, filing_lag_days=0,
+            broadcast_to_target=broadcast_to_target,
+        )
         for column in esg_daily.columns:
             if str(column).lower() in {"symbol", "cik"}:
                 continue

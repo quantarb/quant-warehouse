@@ -12,11 +12,26 @@ IV_COLUMNS: tuple[str, ...] = ("iv", "implied_volatility", "implied_vol")
 
 @dataclass(frozen=True)
 class OptionFeatureSet:
-    """ThetaData option features aligned one row per contract snapshot."""
+    """Option market fields aligned one row per contract snapshot.
+
+    Options use the asset-specific ``option-historical-price-eod`` family.
+    The provider endpoint remains separate so provenance and coverage are not
+    lost.
+    """
 
     df: pd.DataFrame
     feature_cols: list[str]
     family_cols: dict[str, list[str]]
+    family_name: str = "option-historical-price-eod"
+    endpoint_name: str = "option_history_greeks_eod"
+    source_asset_class: str = "option"
+    presence: pd.Series | None = None
+
+    def __post_init__(self) -> None:
+        if self.presence is None and not self.df.empty:
+            columns = [column for column in self.feature_cols if column in self.df.columns]
+            observed = self.df.loc[:, columns].notna().any(axis=1) if columns else pd.Series(False, index=self.df.index)
+            object.__setattr__(self, "presence", observed.astype(bool))
 
 
 def filter_option_instrument_rows(

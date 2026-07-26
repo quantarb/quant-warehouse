@@ -36,7 +36,13 @@ def build_security_class_features(
     prefix = str(security_class).strip().lower()
     renamed = {column: column.replace("preferred__", f"{prefix}__", 1) for column in built.feature_cols}
     frame = built.df.rename(columns=renamed)
-    return BuiltFeatureSet(df=frame, feature_cols=[renamed[column] for column in built.feature_cols])
+    return BuiltFeatureSet(
+        df=frame,
+        feature_cols=[renamed[column] for column in built.feature_cols],
+        family_name=f"{prefix}-historical-price-eod",
+        endpoint_name="prices",
+        source_asset_class=prefix,
+    )
 
 
 def build_preferred_stock_features(
@@ -82,4 +88,10 @@ def build_preferred_stock_features(
     out["symbol"] = str(issuer_symbol).strip().upper()
     out = out.reset_index().set_index(["date", "symbol"]).sort_index()
     feature_cols = [column for column in out.columns if column.startswith("preferred__")]
-    return BuiltFeatureSet(df=out[feature_cols], feature_cols=feature_cols)
+    return BuiltFeatureSet(
+        df=out[feature_cols],
+        feature_cols=feature_cols,
+        family_name="preferred-historical-price-eod",
+        endpoint_name="prices",
+        source_asset_class="preferred",
+    )

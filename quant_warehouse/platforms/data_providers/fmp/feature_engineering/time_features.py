@@ -6,17 +6,13 @@ from typing import Any, Optional, Sequence
 import numpy as np
 import pandas as pd
 
+from quant_warehouse.platforms.data_providers.fmp.feature_engineering.specs import BuiltFeatureSet
+
 @dataclass(frozen=True)
 class TimeFeatureConfig:
     include_day_of_week_one_hot: bool = True
     include_month_one_hot: bool = True
     prefix: str = ""
-
-
-@dataclass(frozen=True)
-class BuiltFeatureSet:
-    df: pd.DataFrame
-    feature_cols: list[str]
 
 
 def _extract_dates(target_index: pd.Index) -> pd.DatetimeIndex:
@@ -226,4 +222,10 @@ def build_time_calendar_features(symbol_obj, target_index: pd.MultiIndex, config
         col for col in dict.fromkeys(feature_cols)
         if col in out.columns and pd.api.types.is_numeric_dtype(out[col])
     ]
-    return BuiltFeatureSet(df=out, feature_cols=feature_cols)
+    return BuiltFeatureSet(
+        df=out,
+        feature_cols=feature_cols,
+        family_name="time_calendar",
+        endpoint_name="calendar",
+        source_asset_class="issuer",
+    )

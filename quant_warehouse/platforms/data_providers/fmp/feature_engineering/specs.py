@@ -8,18 +8,37 @@ import pandas as pd
 
 @dataclass(frozen=True)
 class BuiltFeatureSet:
-    """A named set of engineered features aligned on a shared index."""
+    """An endpoint-level feature family produced by a data provider.
+
+    ``presence`` is captured from the returned values before downstream
+    imputation.  ``family_presence`` and ``family_columns`` are populated by
+    family merges so a combined panel can still expose endpoint-level masks.
+    """
 
     df: pd.DataFrame
     feature_cols: list[str]
+    family_name: str | None = None
+    endpoint_name: str | None = None
+    source_asset_class: str | None = None
+    presence: pd.Series | None = None
+    family_columns: dict[str, list[str]] = field(default_factory=dict)
+    family_presence: pd.DataFrame | None = None
+
+    def __post_init__(self) -> None:
+        if self.presence is None and not self.df.empty:
+            columns = [column for column in self.feature_cols if column in self.df.columns]
+            observed = self.df.loc[:, columns].notna().any(axis=1) if columns else pd.Series(False, index=self.df.index)
+            object.__setattr__(self, "presence", observed.astype(bool))
+        if self.family_name and not self.family_columns:
+            object.__setattr__(self, "family_columns", {self.family_name: list(self.feature_cols)})
+
 
 
 @dataclass(frozen=True)
 class FeatureToggleSpec:
     """Feature-family toggles for a research panel build."""
 
-    include_price_technicals: bool = True
-    include_ta_classic_technicals: bool = False
+    include_historical_price_eod: bool = True
     include_time_calendar_features: bool = True
     include_fundamental_change: bool = True
     include_statement_quality: bool = True
@@ -39,10 +58,8 @@ class FeatureToggleSpec:
         raw = dict(source or {})
         defaults = cls()
         return cls(
-            include_price_technicals=_as_bool(raw.get("include_price_technicals"), defaults.include_price_technicals),
-            include_ta_classic_technicals=_as_bool(
-                raw.get("include_ta_classic_technicals"),
-                defaults.include_ta_classic_technicals,
+            include_historical_price_eod=_as_bool(
+                raw.get("include_historical_price_eod"), defaults.include_historical_price_eod
             ),
             include_time_calendar_features=_as_bool(
                 raw.get("include_time_calendar_features"),
@@ -74,8 +91,7 @@ class FeatureToggleSpec:
 
     def to_dict(self) -> dict[str, bool]:
         return {
-            "include_price_technicals": bool(self.include_price_technicals),
-            "include_ta_classic_technicals": bool(self.include_ta_classic_technicals),
+            "include_historical_price_eod": bool(self.include_historical_price_eod),
             "include_time_calendar_features": bool(self.include_time_calendar_features),
             "include_fundamental_change": bool(self.include_fundamental_change),
             "include_statement_quality": bool(self.include_statement_quality),

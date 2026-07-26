@@ -28,14 +28,11 @@ from quant_warehouse.platforms.data_providers.fmp.feature_engineering.specs impo
     FeatureToggleSpec,
     RepresentationEmbeddingSpec,
 )
-from quant_warehouse.platforms.data_providers.fmp.feature_engineering.ta_classic_technical import (
-    TA_CLASSIC_FAMILY_PREFIXES,
-    build_price_ta_classic_feature_families,
-)
 from quant_warehouse.platforms.data_providers.fmp.feature_engineering.technical import (
     FeaturesResult,
-    build_price_technical_features,
+    build_historical_price_eod_features,
     compute_features_worldclass,
+    historical_price_eod_family,
 )
 from quant_warehouse.platforms.data_providers.fmp.feature_engineering.time_features import (
     TimeFeatureConfig,
@@ -49,17 +46,16 @@ __all__ = [
     "FeatureToggleSpec",
     "FeaturesResult",
     "RepresentationEmbeddingSpec",
-    "TA_CLASSIC_FAMILY_PREFIXES",
     "TimeFeatureConfig",
     "broadcast_asof_to_target_index",
     "broadcast_fundamentals_to_daily",
     "build_event_features",
     "build_fundamental_change_features",
     "build_ownership_features",
-    "build_price_ta_classic_feature_families",
     "build_preferred_stock_features",
     "build_security_class_features",
-    "build_price_technical_features",
+    "build_historical_price_eod_features",
+    "historical_price_eod_family",
     "build_statement_quality_features",
     "build_time_calendar_features",
     "build_time_features",

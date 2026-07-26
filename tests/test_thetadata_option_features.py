@@ -31,6 +31,10 @@ def test_build_option_contract_features_adds_liquidity_greeks_and_iv() -> None:
 
     result = build_option_contract_features(chain, underlying_price=100.0, target_dte=45)
 
+    assert result.family_name == "option-historical-price-eod"
+    assert result.endpoint_name == "option_history_greeks_eod"
+    assert result.source_asset_class == "option"
+    assert result.presence is not None
     assert "contract_static" in result.family_cols
     assert "liquidity" in result.family_cols
     assert "greeks" in result.family_cols
