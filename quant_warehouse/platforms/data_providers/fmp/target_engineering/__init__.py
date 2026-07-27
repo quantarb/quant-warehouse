@@ -79,6 +79,23 @@ from quant_warehouse.platforms.data_providers.fmp.target_engineering.strategy_so
     solve_side_trades_by_frequency_batched_multi_k,
     solve_trades_by_frequency,
 )
+from quant_warehouse.platforms.data_providers.fmp.target_engineering.target_families import (
+    ANALYST_ESTIMATE_TARGET_FAMILY,
+    ANALYST_RATING_TARGET_FAMILY,
+    CAPITAL_ACTION_TARGET_FAMILY,
+    DIVIDEND_TARGET_FAMILY,
+    EARNINGS_REPORT_TARGET_FAMILY,
+    FILING_TARGET_FAMILY,
+    GOVERNMENT_TRADING_TARGET_FAMILY,
+    INSTITUTIONAL_OWNERSHIP_TARGET_FAMILY,
+    INSIDER_TRADING_TARGET_FAMILY,
+    PRICE_TARGET_TARGET_FAMILY,
+    PROFILE_TARGET_FAMILY,
+    SPLIT_TARGET_FAMILY,
+    TARGET_FAMILY_REGISTRY,
+    TargetFamilySpec,
+    get_target_family,
+)
 
 __all__ = [
     "EVENT_PAIR_COLUMNS",
@@ -140,4 +157,19 @@ __all__ = [
     "solve_side_trades_by_frequency_batched_multi_k",
     "solve_trades_by_frequency",
     "trade_return_pct",
+    "INSIDER_TRADING_TARGET_FAMILY",
+    "ANALYST_ESTIMATE_TARGET_FAMILY",
+    "ANALYST_RATING_TARGET_FAMILY",
+    "CAPITAL_ACTION_TARGET_FAMILY",
+    "DIVIDEND_TARGET_FAMILY",
+    "EARNINGS_REPORT_TARGET_FAMILY",
+    "FILING_TARGET_FAMILY",
+    "GOVERNMENT_TRADING_TARGET_FAMILY",
+    "INSTITUTIONAL_OWNERSHIP_TARGET_FAMILY",
+    "PRICE_TARGET_TARGET_FAMILY",
+    "PROFILE_TARGET_FAMILY",
+    "SPLIT_TARGET_FAMILY",
+    "TARGET_FAMILY_REGISTRY",
+    "TargetFamilySpec",
+    "get_target_family",
 ]
