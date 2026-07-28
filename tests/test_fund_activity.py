@@ -1,0 +1,43 @@
+import pandas as pd
+
+from quant_warehouse.research_tools.fund_activity import (
+    build_fund_holding_activity_events,
+    build_institutional_activity_events,
+)
+
+
+def test_fund_holding_activity_emits_buy_add_reduce_and_exit():
+    holdings = pd.DataFrame(
+        [
+            {"fund_symbol": "F1", "symbol": "AAA", "date": "2024-01-01", "shares": 10},
+            {"fund_symbol": "F1", "symbol": "AAA", "date": "2024-04-01", "shares": 15},
+            {"fund_symbol": "F1", "symbol": "AAA", "date": "2024-07-01", "shares": 5},
+            {"fund_symbol": "F1", "symbol": "AAA", "date": "2024-10-01", "shares": 0},
+        ]
+    )
+    events = build_fund_holding_activity_events(holdings, fund_type="etf")
+    assert set(events["target_family"]) == {
+        "fund_activity.etf_buy",
+        "fund_activity.add",
+        "fund_activity.reduce",
+        "fund_activity.exit",
+    }
+
+
+def test_institutional_activity_uses_aggregate_position_counts():
+    summary = pd.DataFrame(
+        [{
+            "symbol": "AAA",
+            "date": "2024-06-30",
+            "new_positions": 2,
+            "increased_positions": 3,
+            "reduced_positions": 1,
+            "closed_positions": 0,
+        }]
+    )
+    events = build_institutional_activity_events(summary)
+    assert set(events["target_family"]) == {
+        "fund_activity.institutional_buy",
+        "fund_activity.add",
+        "fund_activity.reduce",
+    }
