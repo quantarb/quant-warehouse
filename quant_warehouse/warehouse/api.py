@@ -214,6 +214,7 @@ class Warehouse:
         provider: str = "fmp",
         start: str | None = None,
         end: str | None = None,
+        period: str | None = None,
     ) -> pd.DataFrame:
         if section in ETF_FUNDAMENTAL_SECTIONS:
             return self.etf.read_fundamentals(
@@ -229,6 +230,7 @@ class Warehouse:
             provider=provider,
             start=start,
             end=end,
+            period=period,
         )
 
     def read_features(

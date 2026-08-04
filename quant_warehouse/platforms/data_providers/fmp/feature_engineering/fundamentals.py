@@ -27,7 +27,6 @@ SECTION_PREFIXES: dict[str, str] = {
     "earnings": "earn__",
     "analyst_estimates": "ae__",
     "ratings_historical": "rating__",
-    "grades_historical": "grade__",
     "insider_trading": "insider__",
     "positions_summary": "ps__",
 }

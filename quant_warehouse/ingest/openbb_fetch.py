@@ -5,7 +5,7 @@ from typing import Any
 
 import pandas as pd
 
-from quant_warehouse.ingest.credentials import configure_openbb_credentials
+from quant_warehouse.ingest.credentials import configure_openbb_credentials, resolve_fmp_api_key
 from quant_warehouse.warehouse.sections import (
     EQUITY_FUNDAMENTAL_SECTIONS,
     ETF_FUNDAMENTAL_SECTIONS,
@@ -95,6 +95,35 @@ def _is_empty_fetch_error(exc: BaseException) -> bool:
     )
 
 
+def _fetch_fmp_statement_direct(section: str, *, symbol: str, **kwargs: Any) -> pd.DataFrame:
+    """Fetch FMP statement JSON when OpenBB rejects fractional values.
+
+    FMP statement fields are numeric and may legitimately contain cents. Some
+    OpenBB releases validate several fields as integers before the response
+    reaches ``to_df()``, so the direct FMP response is the lossless fallback.
+    """
+    import requests
+
+    params: dict[str, str] = {
+        "symbol": str(symbol).strip().upper(),
+        "apikey": resolve_fmp_api_key(required=True),
+    }
+    for key in ("period", "limit", "from", "to", "calendar_year", "calendar_years"):
+        value = kwargs.get(key)
+        if value is not None:
+            params[key] = str(value)
+    response = requests.get(
+        f"https://financialmodelingprep.com/stable/{ {'income': 'income-statement', 'balance': 'balance-sheet-statement', 'cash': 'cash-flow-statement'}[section] }",
+        params=params,
+        timeout=(5, 30),
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if isinstance(payload, dict):
+        payload = payload.get("historical", payload.get("data", []))
+    return pd.DataFrame(payload if isinstance(payload, list) else [])
+
+
 def _call_route(route: str, *, symbol: str | None, provider: str, **kwargs: Any):
     try:
         from openbb import obb
@@ -129,6 +158,16 @@ def fetch_openbb(
     try:
         result = _call_route(route, symbol=symbol, provider=provider, **call_kwargs)
     except Exception as exc:
+        if section in {"income", "balance", "cash"} and str(provider).strip().lower() == "fmp":
+            direct = _fetch_fmp_statement_direct(section, symbol=symbol, **call_kwargs)
+            return OpenBBFetchResult(
+                section=section,
+                symbol=symbol.strip().upper(),
+                provider_requested="fmp",
+                provider_used="fmp",
+                df=direct,
+                records=tuple(direct.to_dict("records")),
+            )
         if _is_empty_fetch_error(exc):
             return OpenBBFetchResult(
                 section=section,
