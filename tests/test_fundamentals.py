@@ -72,4 +72,43 @@ def test_fundamentals_store_per_section_libraries(tmp_path: Path):
 
 def test_fundamental_library_names():
     assert fundamental_library("income") == "fundamental_income"
+    assert fundamental_library("income", "quarter") == "fundamental_income_quarter"
+    assert fundamental_library("income", "annual") == "fundamental_income_annual"
     assert fundamental_library("etf_holdings") == "etf_holdings"
+
+
+def test_fundamentals_store_keeps_quarterly_and_annual_refreshes_separate(tmp_path: Path, monkeypatch):
+    config = WarehouseConfig(
+        home=tmp_path / "home",
+        arctic_uri=f"lmdb://{tmp_path / 'arctic'}",
+        catalog_path=tmp_path / "catalog.sqlite",
+    )
+    backend = ArcticBackend(config.arctic_uri)
+    catalog = CatalogStore(config.catalog_path)
+    store = FundamentalsStore(config, backend=backend, catalog=catalog)
+
+    def fake_fetch(section, *, symbol, provider, **kwargs):
+        assert section == "income"
+        period = kwargs["period"]
+        value = 10.0 if period == "quarter" else 100.0
+        frame = pd.DataFrame(
+            {"total_revenue": [value]},
+            index=pd.to_datetime(["2024-03-31" if period == "quarter" else "2024-12-31"]),
+        )
+        frame.index.name = "period_ending"
+        return frame
+
+    monkeypatch.setattr("quant_warehouse.warehouse.fundamentals.fetch_dataframe", fake_fetch)
+    stats = store.refresh(
+        "AAPL",
+        sections=["income"],
+        providers=["fmp"],
+        period=("quarter", "annual"),
+    )
+
+    assert stats == {"income_quarter:fmp": 1, "income_annual:fmp": 1}
+    quarter = store.read("AAPL", section="income", provider="fmp", period="quarter")
+    annual = store.read("AAPL", section="income", provider="fmp", period="annual")
+    assert quarter.iloc[0]["total_revenue"] == 10.0
+    assert annual.iloc[0]["total_revenue"] == 100.0
+    assert {row.section for row in catalog.list_symbol("AAPL")} == {"income_quarter", "income_annual"}

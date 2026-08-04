@@ -27,6 +27,7 @@ from quant_warehouse.warehouse.sections import (
     DATED_SNAPSHOT_SECTIONS,
     EQUITY_FUNDAMENTAL_SECTIONS,
     PANEL_FUNDAMENTAL_SECTIONS,
+    PERIOD_FUNDAMENTAL_SECTIONS,
     SNAPSHOT_FUNDAMENTAL_SECTIONS,
     fundamental_library,
     fundamental_period_for_section,
@@ -56,81 +57,98 @@ class FundamentalsStore:
         *,
         sections: Sequence[str] | None = None,
         providers: Sequence[str] | None = None,
-        period: str = "quarter",
+        period: str | Sequence[str] = "quarter",
         **fetch_kwargs: object,
     ) -> dict[str, int]:
         symbol = symbol.strip().upper()
         section_list = list(sections or EQUITY_FUNDAMENTAL_SECTIONS)
         provider_list = [validate_fundamental_provider(p) for p in (providers or DEFAULT_FUNDAMENTAL_PROVIDERS)]
-        preferred_period = normalize_fundamental_period(period)
         history_floor = self.catalog.equity_historical_start(symbol)
         stats: dict[str, int] = {}
 
+        requested_periods = (
+            [period] if isinstance(period, str) else list(period)
+        )
+        if not requested_periods:
+            raise ValueError("at least one fundamental period is required")
+        requested_periods = list(dict.fromkeys(normalize_fundamental_period(value) for value in requested_periods))
+
         for section in section_list:
             self._validate_section(section)
-            for provider in provider_list:
-                key = f"{section}:{provider}"
-                kwargs = dict(fetch_kwargs)
-                section_period = fundamental_period_for_section(section, preferred=preferred_period)
-                if section_period is not None:
-                    kwargs.setdefault("period", provider_period(provider, section_period))
-
-                raw = fetch_dataframe(section, symbol=symbol, provider=provider, **kwargs)
-                if section in DATED_SNAPSHOT_SECTIONS:
-                    frame = normalize_dated_snapshot_frame(raw, section=section)
-                elif section in SNAPSHOT_FUNDAMENTAL_SECTIONS:
-                    frame = normalize_snapshot_frame(raw)
-                elif section in PANEL_FUNDAMENTAL_SECTIONS:
-                    frame = normalize_panel_frame(
-                        raw,
-                        provider=provider,
-                        vendor_only_prefix=None,
-                        min_date=history_floor,
+            section_periods = (
+                requested_periods
+                if section in PERIOD_FUNDAMENTAL_SECTIONS
+                else [None]
+            )
+            for section_period in section_periods:
+                for provider in provider_list:
+                    effective_period = (
+                        None
+                        if section_period is None
+                        else fundamental_period_for_section(section, preferred=section_period)
                     )
-                else:
-                    frame = normalize_vendor_frame(
-                        raw,
+                    stored_section = section if effective_period is None else f"{section}_{effective_period}"
+                    key = f"{stored_section}:{provider}"
+                    kwargs = dict(fetch_kwargs)
+                    if effective_period is not None:
+                        kwargs.setdefault("period", provider_period(provider, effective_period))
+
+                    raw = fetch_dataframe(section, symbol=symbol, provider=provider, **kwargs)
+                    if section in DATED_SNAPSHOT_SECTIONS:
+                        frame = normalize_dated_snapshot_frame(raw, section=section)
+                    elif section in SNAPSHOT_FUNDAMENTAL_SECTIONS:
+                        frame = normalize_snapshot_frame(raw)
+                    elif section in PANEL_FUNDAMENTAL_SECTIONS:
+                        frame = normalize_panel_frame(
+                            raw,
+                            provider=provider,
+                            vendor_only_prefix=None,
+                            min_date=history_floor,
+                        )
+                    else:
+                        frame = normalize_vendor_frame(
+                            raw,
+                            provider=provider,
+                            vendor_only_prefix=None,
+                            min_date=history_floor,
+                        )
+
+                    base_library = fundamental_library(section, effective_period)
+                    library = provider_library(base_library, provider)
+                    storage_symbol = symbol_provider_key(symbol, provider)
+                    existing = read_provider_frame(
+                        self.backend,
+                        base_library=base_library,
                         provider=provider,
-                        vendor_only_prefix=None,
-                        min_date=history_floor,
+                        symbol=storage_symbol,
                     )
 
-                base_library = fundamental_library(section)
-                library = provider_library(base_library, provider)
-                storage_symbol = symbol_provider_key(symbol, provider)
-                existing = read_provider_frame(
-                    self.backend,
-                    base_library=base_library,
-                    provider=provider,
-                    symbol=storage_symbol,
-                )
+                    if section in PANEL_FUNDAMENTAL_SECTIONS or section in DATED_SNAPSHOT_SECTIONS:
+                        merged = merge_panel_upsert(existing, frame)
+                    elif isinstance(frame.index, pd.DatetimeIndex):
+                        merged = merge_upsert(existing, frame)
+                    else:
+                        merged = frame
 
-                if section in PANEL_FUNDAMENTAL_SECTIONS or section in DATED_SNAPSHOT_SECTIONS:
-                    merged = merge_panel_upsert(existing, frame)
-                elif isinstance(frame.index, pd.DatetimeIndex):
-                    merged = merge_upsert(existing, frame)
-                else:
-                    merged = frame
+                    if not merged.empty:
+                        self.backend.write(library, storage_symbol, merged)
 
-                if not merged.empty:
-                    self.backend.write(library, storage_symbol, merged)
+                    min_date = None
+                    max_date = None
+                    if not merged.empty and isinstance(merged.index, pd.DatetimeIndex):
+                        min_date = merged.index.min().strftime("%Y-%m-%d")
+                        max_date = merged.index.max().strftime("%Y-%m-%d")
 
-                min_date = None
-                max_date = None
-                if not merged.empty and isinstance(merged.index, pd.DatetimeIndex):
-                    min_date = merged.index.min().strftime("%Y-%m-%d")
-                    max_date = merged.index.max().strftime("%Y-%m-%d")
-
-                self.catalog.upsert(
-                    symbol=symbol,
-                    section=section,
-                    provider=provider,
-                    min_date=min_date,
-                    max_date=max_date,
-                    row_count=len(merged),
-                    columns_present=[c for c in merged.columns],
-                )
-                stats[key] = len(merged)
+                    self.catalog.upsert(
+                        symbol=symbol,
+                        section=stored_section,
+                        provider=provider,
+                        min_date=min_date,
+                        max_date=max_date,
+                        row_count=len(merged),
+                        columns_present=[c for c in merged.columns],
+                    )
+                    stats[key] = len(merged)
 
         return stats
 
@@ -169,13 +187,19 @@ class FundamentalsStore:
         *,
         section: str,
         provider: str = "fmp",
+        period: str | None = None,
         start: str | None = None,
         end: str | None = None,
     ) -> pd.DataFrame:
         self._validate_section(section)
         provider = validate_fundamental_provider(provider)
         storage_symbol = symbol_provider_key(symbol, provider)
-        library = fundamental_library(section)
+        effective_period = (
+            None
+            if period is None
+            else fundamental_period_for_section(section, preferred=normalize_fundamental_period(period))
+        )
+        library = fundamental_library(section, effective_period)
         df = read_provider_frame(
             self.backend,
             base_library=library,
@@ -190,6 +214,8 @@ class FundamentalsStore:
             out = _slice_dates(df, start=start, end=end)
         out.attrs["section"] = section
         out.attrs["provider"] = provider
+        if effective_period is not None:
+            out.attrs["period"] = effective_period
         return out
 
     def ingest_frame(
@@ -200,6 +226,7 @@ class FundamentalsStore:
         provider: str,
         frame: pd.DataFrame,
         merge: bool = True,
+        period: str | None = None,
     ) -> dict[str, object]:
         self._validate_section(section)
         provider = validate_fundamental_provider(provider)
@@ -216,7 +243,12 @@ class FundamentalsStore:
         else:
             normalized = normalize_vendor_frame(frame, provider=provider, vendor_only_prefix=None)
 
-        base_library = fundamental_library(section)
+        effective_period = (
+            None
+            if period is None
+            else fundamental_period_for_section(section, preferred=normalize_fundamental_period(period))
+        )
+        base_library = fundamental_library(section, effective_period)
         library = provider_library(base_library, provider)
         storage_symbol = symbol_provider_key(symbol, provider)
         merged = normalized
@@ -245,7 +277,7 @@ class FundamentalsStore:
 
         self.catalog.upsert(
             symbol=symbol,
-            section=section,
+            section=section if effective_period is None else f"{section}_{effective_period}",
             provider=provider,
             min_date=min_date,
             max_date=max_date,

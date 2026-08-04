@@ -124,6 +124,24 @@ Oracle-trade side classification should use one buy/sell task across all configu
 
 FMP event-pair labels are exact event-date labels only. Congress buy/sell, insider buy/sell, analyst upgrades/downgrades, price target raises/cuts, and earnings beats/misses should be labeled on the date the event happened. Event-model datasets must start from actual event rows, then inner join feature-family rows on `(symbol, date)`. A feature family must not appear in event training unless that exact event row exists and the feature family has coverage for the event. Do not create future-window labels for event pairs; future return horizons and oracle-trade labels are separate target families. Do not use no-event dates as negative examples for event-pair classification. The negative class for an event-pair task must be the mirrored negative event, such as sell for buy, downgrade for upgrade, cut for raise, or miss for beat. Company guidance raise/cut labels are not currently supported because the warehouse does not store true company-issued guidance revision history.
 
+## Bulk training materialization
+
+Use `scripts/materialize_raw_dataset.py` to export raw point-in-time sections
+once for a group of issuers. It writes Zstandard-compressed Parquet partitions
+by `symbol/year/section`, preserving ArcticDB as the canonical store while
+giving downstream model pipelines an Arrow-native scan path.
+
+```bash
+python scripts/materialize_raw_dataset.py \
+  --symbols NVDA,MSFT,AAPL \
+  --start 1962-01-01 \
+  --end 2026-12-31 \
+  --output artifacts/raw-arrow
+```
+
+The materializer uses ArcticDB date and column projection before converting to
+Arrow, so it avoids loading unrelated history and fields into pandas.
+
 ## Design rules
 
 1. **ArcticDB is canonical for historical series** — prices, ETF prices, macro series, fundamentals, event pairs, features, calendars, and ThetaData option chains are stored in ArcticDB libraries.

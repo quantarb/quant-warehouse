@@ -294,8 +294,16 @@ def fundamental_period_for_section(section: str, *, preferred: str = "quarter") 
     return normalize_fundamental_period(preferred)
 
 
-def fundamental_library(section: str) -> str:
-    """Arctic library name mirroring the OpenBB route grouping."""
+def fundamental_library(section: str, period: str | None = None) -> str:
+    """Arctic library name mirroring the OpenBB route grouping.
+
+    Period-aware fundamental routes are physically isolated so annual and
+    quarterly provider responses cannot overwrite one another.
+    """
     if section.startswith("etf_"):
         return section
-    return f"fundamental_{section}"
+    base = f"fundamental_{section}"
+    if section not in PERIOD_FUNDAMENTAL_SECTIONS or period is None:
+        return base
+    normalized = normalize_fundamental_period(period)
+    return f"{base}_{normalized}"

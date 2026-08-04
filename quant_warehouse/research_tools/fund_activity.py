@@ -11,10 +11,15 @@ FUND_ACTIVITY_TARGET_FAMILIES = (
     "fund_activity.etf_buy",
     "fund_activity.mutual_fund_buy",
     "fund_activity.institutional_buy",
-    "fund_activity.hedge_fund_buy",
     "fund_activity.add",
     "fund_activity.reduce",
     "fund_activity.exit",
+)
+HOLDER_ACTIVITY_TARGET_FAMILIES = (
+    "holder_activity.buy",
+    "holder_activity.add",
+    "holder_activity.reduce",
+    "holder_activity.exit",
 )
 
 
@@ -129,9 +134,40 @@ def build_fund_holding_activity_events(
     return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
 
 
+def build_holder_activity_events(analytics: pd.DataFrame) -> pd.DataFrame:
+    """Create holder-level events from FMP extract-analytics rows."""
+    if analytics.empty or "symbol" not in analytics.columns:
+        return pd.DataFrame()
+    work = analytics.copy().rename(columns={
+        "investorName": "investor_name",
+        "changeInSharesNumber": "change_in_shares",
+        "isNew": "is_new",
+        "isSoldOut": "is_sold_out",
+    })
+    work["holder_id"] = work.get("cik", "").astype(str).str.strip()
+    work["holder_name"] = work.get("investor_name", "").astype(str).str.strip()
+    change = pd.to_numeric(work.get("change_in_shares", 0), errors="coerce").fillna(0.0)
+    is_new = work.get("is_new", False).astype(str).str.lower().isin({"true", "1", "yes"})
+    is_exit = work.get("is_sold_out", False).astype(str).str.lower().isin({"true", "1", "yes"})
+    work["signal_value"] = change.abs().astype("float32")
+    rows: list[pd.DataFrame] = []
+    for family, mask in (
+        ("holder_activity.buy", is_new | change.gt(0)),
+        ("holder_activity.add", change.gt(0) & ~is_new),
+        ("holder_activity.reduce", change.lt(0) & ~is_exit),
+        ("holder_activity.exit", is_exit),
+    ):
+        selected = work.loc[mask].copy()
+        if not selected.empty:
+            rows.append(_event_rows(selected, family=family, text_columns=("holder_id", "holder_name")))
+    return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
+
+
 __all__ = [
     "FUND_ACTIVITY_TARGET_FAMILY",
     "FUND_ACTIVITY_TARGET_FAMILIES",
+    "HOLDER_ACTIVITY_TARGET_FAMILIES",
     "build_fund_holding_activity_events",
+    "build_holder_activity_events",
     "build_institutional_activity_events",
 ]

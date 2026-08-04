@@ -748,42 +748,12 @@ def build_ratings_historical_features(symbol_obj: Any, target_index: pd.MultiInd
     return BuiltFeatureSet(df=daily, feature_cols=cols)
 
 
-GRADE_COLS = [
-    "grade__analystratingsstrongbuy",
-    "grade__analystratingsbuy",
-    "grade__analystratingshold",
-    "grade__analystratingssell",
-    "grade__analystratingsstrongsell",
-]
-
-
-def build_grades_historical_features(symbol_obj: Any, target_index: pd.MultiIndex, *, sparse_loader: SparseLoader | None = None) -> BuiltFeatureSet:
-    sparse = load_section_payload(symbol_obj, "grades_historical", prefix="grade__", filing_lag_days=0, sparse_loader=sparse_loader)
-    if sparse.empty:
-        return BuiltFeatureSet(df=pd.DataFrame(index=target_index), feature_cols=[])
-    work = sparse.reset_index().sort_values(["symbol", "date"])
-    for col in GRADE_COLS:
-        work[col] = pd.to_numeric(work.get(col), errors="coerce")
-    total = sum((work[col].fillna(0.0) for col in GRADE_COLS))
-    bullish = work["grade__analystratingsstrongbuy"].fillna(0.0) + work["grade__analystratingsbuy"].fillna(0.0)
-    bearish = work["grade__analystratingssell"].fillna(0.0) + work["grade__analystratingsstrongsell"].fillna(0.0)
-    out = work[["date", "symbol"]].copy()
-    out["evt__grade_bullish_ratio"] = safe_ratio(bullish, total.replace(0.0, np.nan))
-    out["evt__grade_bearish_ratio"] = safe_ratio(bearish, total.replace(0.0, np.nan))
-    out["evt__grade_net_bullish"] = safe_ratio(bullish - bearish, total.replace(0.0, np.nan))
-    daily = broadcast_sparse(out.set_index(["date", "symbol"]).sort_index(), target_index)
-    daily["evt__grade_days_since"] = days_since_for_target(target_index, days_since_last_event(target_dates(target_index), work["date"]))
-    cols = ["evt__grade_bullish_ratio", "evt__grade_bearish_ratio", "evt__grade_net_bullish", "evt__grade_days_since"]
-    return BuiltFeatureSet(df=daily, feature_cols=cols)
-
-
 def build_event_features(symbol_obj: Any, target_index: pd.MultiIndex, df_prices: pd.DataFrame | None = None, *, sparse_loader: SparseLoader | None = None) -> BuiltFeatureSet:
     return merge_feature_sets(
         [
             build_earnings_features(symbol_obj, target_index, sparse_loader=sparse_loader),
             build_analyst_estimates_features(symbol_obj, target_index, df_prices=df_prices, sparse_loader=sparse_loader),
             build_ratings_historical_features(symbol_obj, target_index, sparse_loader=sparse_loader),
-            build_grades_historical_features(symbol_obj, target_index, sparse_loader=sparse_loader),
         ],
         target_index,
     )
@@ -926,7 +896,6 @@ __all__ = [
     "build_event_features",
     "build_financial_growth_features",
     "build_fundamental_change_features",
-    "build_grades_historical_features",
     "build_income_statement_features",
     "build_income_statement_growth_features",
     "build_income_statement_ttm_features",

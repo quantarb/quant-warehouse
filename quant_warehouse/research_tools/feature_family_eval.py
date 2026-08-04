@@ -284,6 +284,8 @@ def build_fundamental_feature_panel(
     strategy_sources: Iterable[str] | None = None,
     observation_dates: pd.DataFrame | None = None,
     broadcast_to_target: bool = True,
+    fundamental_period: str | None = None,
+    family_suffix: str | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, float]]:
     """Build requested fundamental families, optionally without as-of broadcast."""
 
@@ -298,6 +300,8 @@ def build_fundamental_feature_panel(
         build_kwargs = {
             "strategy_sources": wanted or None,
             "observation_dates": None if dates is None else dates.loc[dates["symbol"].eq(str(symbol).strip().upper()), "date"],
+            "fundamental_period": fundamental_period,
+            "family_suffix": family_suffix,
         }
         if not broadcast_to_target:
             build_kwargs["broadcast_to_target"] = False
@@ -318,7 +322,13 @@ def build_fundamental_feature_panel(
     all_specs.extend(_add_macro_context_features(wh, panel, config))
     all_specs.extend(_add_cross_symbol_context_features(wh, panel, config))
     if wanted:
-        all_specs = [spec for spec in all_specs if f"{spec.source}.{spec.family}" in wanted]
+        wanted_metadata = set(wanted)
+        if family_suffix:
+            wanted_metadata.update(
+                f"{source}.{family}_{family_suffix}"
+                for source, family in (value.split(".", 1) for value in wanted)
+            )
+        all_specs = [spec for spec in all_specs if f"{spec.source}.{spec.family}" in wanted_metadata]
         selected_columns = [spec.feature for spec in all_specs if spec.feature in panel.columns]
         panel = panel[["symbol", "date", *dict.fromkeys(selected_columns)]].copy()
     metadata = (
@@ -596,10 +606,20 @@ def _has_required_history(
     return True, "ok"
 
 
-def _read_section(warehouse: Warehouse, symbol: str, section: str, provider: str) -> pd.DataFrame:
+def _read_section(
+    warehouse: Warehouse,
+    symbol: str,
+    section: str,
+    provider: str,
+    *,
+    period: str | None = None,
+) -> pd.DataFrame:
     if section == "prices":
         return warehouse.read_prices(symbol, provider=provider)
-    return warehouse.read_fundamentals(symbol, section=section, provider=provider)
+    kwargs: dict[str, object] = {"section": section, "provider": provider}
+    if period is not None:
+        kwargs["period"] = period
+    return warehouse.read_fundamentals(symbol, **kwargs)
 
 
 def _slice_frame(frame: pd.DataFrame, start: str | None, end: str | None) -> pd.DataFrame:
@@ -1084,7 +1104,7 @@ def _daily_news_tfidf(news: pd.DataFrame, daily_index: pd.DatetimeIndex, *, buck
     token_re = re.compile(r"[a-z][a-z0-9]{2,}")
     by_day: dict[pd.Timestamp, list[list[str]]] = {}
     for _, row in work.iterrows():
-        values = {str(column): row.get(column, "") for column in text_columns}
+        values = {str(column): str(row.get(column) or "") for column in text_columns}
         tokens = token_re.findall(" ".join(values.values()).lower())
         if tokens:
             by_day.setdefault(row["_news_date"], []).append(tokens)
@@ -1114,11 +1134,13 @@ def _build_symbol_fundamental_panel(
     strategy_sources: set[str] | None = None,
     observation_dates: pd.Series | None = None,
     broadcast_to_target: bool = True,
+    fundamental_period: str | None = None,
+    family_suffix: str | None = None,
 ) -> tuple[pd.DataFrame, list[FeatureSpec], dict[str, object]]:
     start = perf_counter()
     inputs = {
         section: _slice_frame(
-            _read_section(warehouse, symbol, section, config.provider),
+            _read_section(warehouse, symbol, section, config.provider, period=fundamental_period),
             config.start_date if section in {"prices", "historical_market_cap"} else None,
             config.end_date,
         )
@@ -1127,17 +1149,17 @@ def _build_symbol_fundamental_panel(
     # Employee counts are sparse issuer observations. Keep the warehouse
     # observation date unchanged and forward-fill only across later dates.
     inputs["employee_count"] = _slice_frame(
-        _read_section(warehouse, symbol, "employee_count", config.provider),
+        _read_section(warehouse, symbol, "employee_count", config.provider, period=fundamental_period),
         None,
         config.end_date,
     )
     inputs["ownership_institutional"] = _slice_frame(
-        _read_section(warehouse, symbol, "ownership_institutional", config.provider),
+        _read_section(warehouse, symbol, "ownership_institutional", config.provider, period=fundamental_period),
         None,
         config.end_date,
     )
     inputs["estimates_historical"] = _slice_frame(
-        _read_section(warehouse, symbol, "estimates_historical", config.provider),
+        _read_section(warehouse, symbol, "estimates_historical", config.provider, period=fundamental_period),
         None,
         config.end_date,
     )
@@ -1386,6 +1408,28 @@ def _build_symbol_fundamental_panel(
             if feature in keep_features
         }
         specs = [spec for spec in specs if spec.feature in keep_features]
+
+    # A provider-period feature is a distinct feature family.  Keep the
+    # period in both the metadata family identity and the encoded column name
+    # so quarterly and annual values can coexist in one feature panel.
+    if family_suffix:
+        renamed_frames: dict[str, pd.Series] = {}
+        renamed_specs: list[FeatureSpec] = []
+        for spec in specs:
+            new_family = f"{spec.family}_{family_suffix}"
+            new_feature = f"{new_family}__{spec.feature.split('__', 1)[1]}"
+            renamed_frames[new_feature] = feature_frames[spec.feature]
+            renamed_specs.append(
+                FeatureSpec(
+                    new_feature,
+                    new_family,
+                    spec.source,
+                    spec.source_column,
+                    spec.expected_direction,
+                )
+            )
+        feature_frames = renamed_frames
+        specs = renamed_specs
 
     if not feature_frames:
         return pd.DataFrame(), [], {"symbol": symbol, "status": "no_features"}
