@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import polars as pl
+
 from dataclasses import dataclass, replace
+from datetime import datetime
 from typing import Any, Callable, Mapping
 
-import numpy as np
-import pandas as pd
+import torch
+
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 @dataclass(frozen=True)
@@ -35,12 +39,12 @@ class HitsLabelSpec:
 
 
 def build_hits_labels(
-    price_frames: Mapping[str, pd.DataFrame],
+    price_frames: Mapping[str, pl.DataFrame],
     *,
     spec: HitsLabelSpec | None = None,
     edge_weight_mode: str = "return",
     progress_callback: Callable[..., Any] | None = None,
-) -> pd.DataFrame:
+) -> pl.DataFrame:
     """Build sparse long/short HITS labels from per-symbol price frames.
 
     Each symbol-year is a separate directed graph.  For a long graph, the
@@ -58,22 +62,23 @@ def build_hits_labels(
     if edge_weight_mode not in {"return", "inverse_holding_time"}:
         raise ValueError("edge_weight_mode must be 'return' or 'inverse_holding_time'")
     symbols = [str(symbol).strip().upper() for symbol in price_frames if str(symbol).strip()]
-    rows: list[pd.DataFrame] = []
+    rows: list[pl.DataFrame] = []
     total = len(symbols)
     for completed, symbol in enumerate(symbols, start=1):
         frame = price_frames.get(symbol)
         if frame is None:
             frame = price_frames.get(symbol.lower())
-        if frame is None or frame.empty:
+        if frame is None or frame.is_empty():
             continue
         normalized = _normalize_prices(frame, cfg)
-        if normalized.empty:
+        if normalized.is_empty():
             continue
-        symbol_rows: list[pd.DataFrame] = []
-        for _, year_frame in normalized.groupby(normalized["date"].dt.year, sort=True):
+        symbol_rows: list[pl.DataFrame] = []
+        for year_frame in normalized.with_columns(pl.col("date").dt.year().alias("_year")).partition_by("_year", maintain_order=True):
+            year_frame = year_frame.drop("_year")
             scores = _build_symbol_year_scores(year_frame, cfg, edge_weight_mode=edge_weight_mode)
             if scores is not None:
-                scores.insert(0, "symbol", symbol)
+                scores = scores.with_columns(pl.lit(symbol).alias("symbol")).select(["symbol", *[c for c in scores.columns if c != "symbol"]])
                 symbol_rows.append(scores)
         if symbol_rows:
             rows.extend(symbol_rows)
@@ -81,17 +86,17 @@ def build_hits_labels(
             progress_callback(completed=completed, total=total, current_symbol=symbol)
 
     if not rows:
-        return pd.DataFrame(columns=_OUTPUT_COLUMNS)
-    return pd.concat(rows, ignore_index=True)[_OUTPUT_COLUMNS]
+        return pl.DataFrame(schema={column: pl.Null for column in _OUTPUT_COLUMNS})
+    return pl.concat(rows, how="diagonal_relaxed").select(_OUTPUT_COLUMNS)
 
 
 def build_hold_timing_hits_labels(
-    price_frames: Mapping[str, pd.DataFrame],
+    price_frames: Mapping[str, pl.DataFrame],
     *,
     hold_days: tuple[int, ...] = (5, 20, 60, 120),
     spec: HitsLabelSpec | None = None,
     progress_callback: Callable[..., Any] | None = None,
-) -> pd.DataFrame:
+) -> pl.DataFrame:
     """Build HITS targets for several maximum holding-time horizons.
 
     The same historical price frames are converted into independent
@@ -104,7 +109,7 @@ def build_hold_timing_hits_labels(
     if not horizons or any(days <= 0 for days in horizons):
         raise ValueError("hold_days must contain positive integers")
     base_spec = spec or HitsLabelSpec()
-    panels: list[pd.DataFrame] = []
+    panels: list[pl.DataFrame] = []
     for horizon in horizons:
         horizon_spec = replace(base_spec, max_hold=horizon)
         panel = build_hits_labels(
@@ -121,21 +126,21 @@ def build_hold_timing_hits_labels(
                 target = f"{source}_{horizon}d"
                 keep.append(source)
                 rename[source] = target
-        panels.append(panel[keep].rename(columns=rename))
+        panels.append(panel.select(keep).rename(rename))
     if not panels:
-        return pd.DataFrame(columns=["symbol", "date"])
+        return pl.DataFrame(schema={"symbol": pl.String, "date": pl.Datetime})
     out = panels[0]
     for panel in panels[1:]:
-        out = out.merge(panel, on=["symbol", "date"], how="outer")
+        out = out.join(panel, on=["symbol", "date"], how="full", coalesce=True)
     return out
 
 
 def build_inverse_holding_time_hits_labels(
-    price_frames: Mapping[str, pd.DataFrame],
+    price_frames: Mapping[str, pl.DataFrame],
     *,
     spec: HitsLabelSpec | None = None,
     progress_callback: Callable[..., Any] | None = None,
-) -> pd.DataFrame:
+) -> pl.DataFrame:
     """Build one speed graph with the return graph's topology.
 
     Positive-return entry/exit pairs retain their graph edge, but the edge
@@ -151,11 +156,11 @@ def build_inverse_holding_time_hits_labels(
 
 
 def build_return_and_speed_hits_labels(
-    price_frames: Mapping[str, pd.DataFrame],
+    price_frames: Mapping[str, pl.DataFrame],
     *,
     spec: HitsLabelSpec | None = None,
     progress_callback: Callable[..., Any] | None = None,
-) -> pd.DataFrame:
+) -> pl.DataFrame:
     """Build return and speed HITS targets from one shared edge topology.
 
     Each symbol-year constructs the valid directed date-pair set once.  The
@@ -165,30 +170,31 @@ def build_return_and_speed_hits_labels(
     """
     cfg = spec or HitsLabelSpec()
     symbols = [str(symbol).strip().upper() for symbol in price_frames if str(symbol).strip()]
-    rows: list[pd.DataFrame] = []
+    rows: list[pl.DataFrame] = []
     total = len(symbols)
     for completed, symbol in enumerate(symbols, start=1):
         frame = price_frames.get(symbol)
         if frame is None:
             frame = price_frames.get(symbol.lower())
-        if frame is None or frame.empty:
+        if frame is None or frame.is_empty():
             continue
         normalized = _normalize_prices(frame, cfg)
-        for _, year_frame in normalized.groupby(normalized["date"].dt.year, sort=True):
+        for year_frame in normalized.with_columns(pl.col("date").dt.year().alias("_year")).partition_by("_year", maintain_order=True):
+            year_frame = year_frame.drop("_year")
             scores = _build_symbol_year_return_speed_scores(year_frame, cfg)
             if scores is not None:
-                scores.insert(0, "symbol", symbol)
+                scores = scores.with_columns(pl.lit(symbol).alias("symbol")).select(["symbol", *[c for c in scores.columns if c != "symbol"]])
                 rows.append(scores)
         if callable(progress_callback):
             progress_callback(completed=completed, total=total, current_symbol=symbol)
     if not rows:
-        return pd.DataFrame(columns=[
+        return pl.DataFrame(schema={column: pl.Null for column in [
             "symbol", "date", "long_hub", "long_authority", "short_hub", "short_authority",
             "long_hub_tail", "long_authority_tail", "short_hub_tail", "short_authority_tail",
             "speed_long_hub", "speed_long_authority", "speed_short_hub", "speed_short_authority",
             "speed_long_hub_tail", "speed_long_authority_tail", "speed_short_hub_tail", "speed_short_authority_tail",
-        ])
-    return pd.concat(rows, ignore_index=True)
+        ]})
+    return pl.concat(rows, how="diagonal_relaxed")
 
 
 _OUTPUT_COLUMNS = [
@@ -198,142 +204,136 @@ _OUTPUT_COLUMNS = [
 ]
 
 
-def _normalize_prices(frame: pd.DataFrame, spec: HitsLabelSpec) -> pd.DataFrame:
-    out = frame.copy()
-    out.columns = [str(column).strip().lower() for column in out.columns]
+def _normalize_prices(frame: pl.DataFrame, spec: HitsLabelSpec) -> pl.DataFrame:
+    out = frame.rename({column: str(column).strip().lower() for column in frame.columns})
     required = {"date", "high", "low"}
     missing = required.difference(out.columns)
     if missing:
         raise ValueError(f"HITS price frame is missing columns: {sorted(missing)}")
-    out["date"] = pd.to_datetime(out["date"], errors="coerce").dt.normalize()
-    out["high"] = pd.to_numeric(out["high"], errors="coerce")
-    out["low"] = pd.to_numeric(out["low"], errors="coerce")
-    out = out.dropna(subset=["date", "high", "low"])
-    out = out.loc[(out["high"] > 0) & (out["low"] > 0)]
+    date_expr = pl.col("date").str.to_datetime(strict=False) if out.schema["date"] == pl.String else pl.col("date").cast(pl.Datetime, strict=False)
+    out = out.with_columns([date_expr.dt.truncate("1d").alias("date"), pl.col("high").cast(pl.Float64, strict=False), pl.col("low").cast(pl.Float64, strict=False)]).drop_nulls(["date", "high", "low"]).filter((pl.col("high") > 0) & (pl.col("low") > 0))
     if spec.start_date is not None:
-        out = out.loc[out["date"] >= pd.Timestamp(spec.start_date).normalize()]
+        out = out.filter(pl.col("date") >= datetime.fromisoformat(spec.start_date[:10]))
     if spec.end_date is not None:
-        out = out.loc[out["date"] <= pd.Timestamp(spec.end_date).normalize()]
-    return out[["date", "high", "low"]].sort_values("date").drop_duplicates("date").reset_index(drop=True)
+        out = out.filter(pl.col("date") <= datetime.fromisoformat(spec.end_date[:10]))
+    return out.select(["date", "high", "low"]).sort("date").unique("date", keep="last")
 
 
 def _build_symbol_year_scores(
-    frame: pd.DataFrame,
+    frame: pl.DataFrame,
     spec: HitsLabelSpec,
     *,
     edge_weight_mode: str = "return",
-) -> pd.DataFrame | None:
-    frame = frame.reset_index(drop=True)
-    n = len(frame)
+) -> pl.DataFrame | None:
+    n = frame.height
     if n < 2:
         return None
-    high = frame["high"].to_numpy(dtype=float)
-    low = frame["low"].to_numpy(dtype=float)
-    index = np.arange(n)
-    valid = np.triu(np.ones((n, n), dtype=bool), 1)
-    valid &= (index[None, :] - index[:, None]) <= spec.max_hold
-
-    returns, valid, holding_days = _build_edge_channels(high, low, spec.max_hold)
-    output: dict[str, Any] = {"date": frame["date"].to_numpy()}
+    high = torch.tensor(frame["high"].to_list(), dtype=torch.float64, device=DEVICE)
+    low = torch.tensor(frame["low"].to_list(), dtype=torch.float64, device=DEVICE)
+    returns, valid, holding_days = _build_edge_channels_torch(high, low, spec.max_hold)
+    output: dict[str, Any] = {"date": frame["date"].to_list()}
     for side, future_returns in returns.items():
         if edge_weight_mode == "return":
-            weights = np.where(valid, np.maximum(future_returns, 0.0), 0.0)
+            weights = torch.where(valid, future_returns.clamp_min(0.0), torch.zeros_like(future_returns))
         elif edge_weight_mode == "inverse_holding_time":
-            weights = np.zeros_like(future_returns, dtype=float)
+            weights = torch.zeros_like(future_returns)
             eligible = valid & (future_returns > 0.0)
-            np.divide(1.0, holding_days, out=weights, where=eligible)
+            weights = torch.where(eligible, 1.0 / holding_days.clamp_min(1.0), weights)
         else:
             raise ValueError("edge_weight_mode must be 'return' or 'inverse_holding_time'")
-        if not np.any(weights > 0):
-            output[f"{side}_hub"] = np.zeros(n, dtype=float)
-            output[f"{side}_authority"] = np.zeros(n, dtype=float)
-            output[f"{side}_hub_tail"] = np.zeros(n, dtype=bool)
-            output[f"{side}_authority_tail"] = np.zeros(n, dtype=bool)
+        if not bool(torch.any(weights > 0)):
+            output[f"{side}_hub"] = [0.0] * n
+            output[f"{side}_authority"] = [0.0] * n
+            output[f"{side}_hub_tail"] = [False] * n
+            output[f"{side}_authority_tail"] = [False] * n
             continue
-        hub = np.ones(n, dtype=float)
-        authority = np.ones(n, dtype=float)
+        hub = torch.ones(n, dtype=torch.float64, device=DEVICE)
+        authority = torch.ones(n, dtype=torch.float64, device=DEVICE)
         for _ in range(spec.iterations):
             authority = weights.T @ hub
-            authority /= np.linalg.norm(authority) or 1.0
+            authority = authority / torch.linalg.vector_norm(authority).clamp_min(1.0)
             hub = weights @ authority
-            hub /= np.linalg.norm(hub) or 1.0
-        hub = hub / (hub.max() or 1.0)
-        authority = authority / (authority.max() or 1.0)
-        output[f"{side}_hub"] = hub
-        output[f"{side}_authority"] = authority
-        output[f"{side}_hub_tail"] = _tail_mask(hub, spec.tail_quantile)
-        output[f"{side}_authority_tail"] = _tail_mask(authority, spec.tail_quantile)
-    return pd.DataFrame(output)
+            hub = hub / torch.linalg.vector_norm(hub).clamp_min(1.0)
+        hub = hub / hub.max().clamp_min(1.0)
+        authority = authority / authority.max().clamp_min(1.0)
+        output[f"{side}_hub"] = hub.tolist()
+        output[f"{side}_authority"] = authority.tolist()
+        output[f"{side}_hub_tail"] = _tail_mask_torch(hub, spec.tail_quantile).tolist()
+        output[f"{side}_authority_tail"] = _tail_mask_torch(authority, spec.tail_quantile).tolist()
+    return pl.DataFrame(output)
 
 
-def _build_edge_channels(
-    high: np.ndarray,
-    low: np.ndarray,
+def _build_edge_channels_torch(
+    high: torch.Tensor,
+    low: torch.Tensor,
     max_hold: int,
-) -> tuple[dict[str, np.ndarray], np.ndarray, np.ndarray]:
-    """Construct the date-pair topology and all reusable edge quantities once."""
-    n = len(high)
-    index = np.arange(n)
-    valid = np.triu(np.ones((n, n), dtype=bool), 1)
+) -> tuple[dict[str, torch.Tensor], torch.Tensor, torch.Tensor]:
+    """Build HITS graph channels without materializing NumPy matrices."""
+    n = int(high.numel())
+    index = torch.arange(n, dtype=torch.int64, device=DEVICE)
     holding_days = index[None, :] - index[:, None]
-    valid &= holding_days <= max_hold
+    valid = torch.triu(torch.ones((n, n), dtype=torch.bool, device=DEVICE), diagonal=1)
+    valid = valid & (holding_days <= max_hold)
     returns = {
         "long": low[None, :] / high[:, None] - 1.0,
         "short": low[:, None] / high[None, :] - 1.0,
     }
-    return returns, valid, holding_days
+    return returns, valid, holding_days.to(torch.float64)
 
 
-def _score_weight_matrix(
-    returns: np.ndarray,
-    valid: np.ndarray,
-    holding_days: np.ndarray,
+def _build_symbol_year_return_speed_scores(frame: pl.DataFrame, spec: HitsLabelSpec) -> pl.DataFrame | None:
+    if frame.height < 2:
+        return None
+    high = torch.tensor(frame["high"].to_list(), dtype=torch.float64, device=DEVICE)
+    low = torch.tensor(frame["low"].to_list(), dtype=torch.float64, device=DEVICE)
+    returns, valid, holding_days = _build_edge_channels_torch(high, low, spec.max_hold)
+    output: dict[str, Any] = {"date": frame["date"].to_list()}
+    for side in ("long", "short"):
+        for prefix, mode in (("", "return"), ("speed_", "inverse_holding_time")):
+            hub, authority, hub_tail, authority_tail = _score_weight_matrix_torch(
+                returns[side], valid, holding_days, spec.iterations, mode, spec.tail_quantile
+            )
+            output[f"{prefix}{side}_hub"] = hub.detach().cpu().tolist()
+            output[f"{prefix}{side}_authority"] = authority.detach().cpu().tolist()
+            output[f"{prefix}{side}_hub_tail"] = hub_tail.detach().cpu().tolist()
+            output[f"{prefix}{side}_authority_tail"] = authority_tail.detach().cpu().tolist()
+    return pl.DataFrame(output)
+
+
+def _tail_mask_torch(values: torch.Tensor, quantile: float) -> torch.Tensor:
+    """Torch equivalent of the stable first-rank tail selection."""
+    n = int(values.numel())
+    order = torch.argsort(values, stable=True)
+    ranks = torch.empty(n, dtype=torch.float64, device=DEVICE)
+    ranks[order] = (torch.arange(n, dtype=torch.float64, device=DEVICE) + 1.0) / n
+    return (ranks <= quantile) | (ranks >= 1.0 - quantile)
+
+
+def _score_weight_matrix_torch(
+    returns: torch.Tensor,
+    valid: torch.Tensor,
+    holding_days: torch.Tensor,
     iterations: int,
     mode: str,
     tail_quantile: float,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     if mode == "return":
-        weights = np.where(valid, np.maximum(returns, 0.0), 0.0)
+        weights = torch.where(valid, returns.clamp_min(0.0), torch.zeros_like(returns))
     elif mode == "inverse_holding_time":
-        weights = np.zeros_like(returns, dtype=float)
-        np.divide(1.0, holding_days, out=weights, where=valid & (returns > 0.0))
+        eligible = valid & (returns > 0.0)
+        weights = torch.where(eligible, 1.0 / holding_days.clamp_min(1.0), torch.zeros_like(returns))
     else:
         raise ValueError("edge weight mode must be 'return' or 'inverse_holding_time'")
-    n = len(returns)
-    if not np.any(weights > 0):
-        return np.zeros(n), np.zeros(n), np.zeros(n, dtype=bool), np.zeros(n, dtype=bool)
-    hub = np.ones(n, dtype=float)
-    authority = np.ones(n, dtype=float)
+    n = int(returns.shape[0])
+    if not bool(torch.any(weights > 0)):
+        zero = torch.zeros(n, dtype=torch.float64, device=DEVICE)
+        false = torch.zeros(n, dtype=torch.bool, device=DEVICE)
+        return zero, zero, false, false
+    hub = torch.ones(n, dtype=torch.float64, device=DEVICE)
+    authority = torch.ones(n, dtype=torch.float64, device=DEVICE)
     for _ in range(iterations):
-        authority = weights.T @ hub
-        authority /= np.linalg.norm(authority) or 1.0
-        hub = weights @ authority
-        hub /= np.linalg.norm(hub) or 1.0
-    hub = hub / (hub.max() or 1.0)
-    authority = authority / (authority.max() or 1.0)
-    return hub, authority, _tail_mask(hub, tail_quantile), _tail_mask(authority, tail_quantile)
-
-
-def _build_symbol_year_return_speed_scores(frame: pd.DataFrame, spec: HitsLabelSpec) -> pd.DataFrame | None:
-    frame = frame.reset_index(drop=True)
-    if len(frame) < 2:
-        return None
-    high = frame["high"].to_numpy(dtype=float)
-    low = frame["low"].to_numpy(dtype=float)
-    returns, valid, holding_days = _build_edge_channels(high, low, spec.max_hold)
-    output: dict[str, Any] = {"date": frame["date"].to_numpy()}
-    for side in ("long", "short"):
-        for prefix, mode in (("", "return"), ("speed_", "inverse_holding_time")):
-            hub, authority, hub_tail, authority_tail = _score_weight_matrix(
-                returns[side], valid, holding_days, spec.iterations, mode, spec.tail_quantile
-            )
-            output[f"{prefix}{side}_hub"] = hub
-            output[f"{prefix}{side}_authority"] = authority
-            output[f"{prefix}{side}_hub_tail"] = hub_tail
-            output[f"{prefix}{side}_authority_tail"] = authority_tail
-    return pd.DataFrame(output)
-
-
-def _tail_mask(values: np.ndarray, quantile: float) -> np.ndarray:
-    ranks = pd.Series(values).rank(method="first", pct=True).to_numpy()
-    return (ranks <= quantile) | (ranks >= 1.0 - quantile)
+        authority = (weights.T @ hub) / torch.linalg.vector_norm(weights.T @ hub).clamp_min(1.0)
+        hub = (weights @ authority) / torch.linalg.vector_norm(weights @ authority).clamp_min(1.0)
+    hub = hub / hub.max().clamp_min(1.0)
+    authority = authority / authority.max().clamp_min(1.0)
+    return hub, authority, _tail_mask_torch(hub, tail_quantile), _tail_mask_torch(authority, tail_quantile)

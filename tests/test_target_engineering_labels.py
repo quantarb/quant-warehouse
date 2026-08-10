@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-import pandas as pd
+import polars as pl
+from datetime import datetime, timedelta
 
 from quant_warehouse.platforms.data_providers.fmp.target_engineering import (
     LabelBuildSpec,
@@ -14,12 +15,12 @@ from quant_warehouse.platforms.data_providers.fmp.target_engineering import (
 )
 
 
-def _price_frame(offset: float = 0.0) -> pd.DataFrame:
-    index = pd.date_range("2024-01-01", periods=5, freq="D")
+def _price_frame(offset: float = 0.0) -> pl.DataFrame:
+    index = pl.Series("date", [datetime(2024, 1, 1) + timedelta(days=i) for i in range(5)])
     lows = [10 + offset, 14 + offset, 9 + offset, 7 + offset, 13 + offset]
     highs = [11 + offset, 15 + offset, 10 + offset, 8 + offset, 14 + offset]
     closes = [10.5 + offset, 14.5 + offset, 9.5 + offset, 7.5 + offset, 13.5 + offset]
-    return pd.DataFrame(
+    return pl.DataFrame(
         {
             "adj_low": lows,
             "adj_high": highs,
@@ -27,8 +28,7 @@ def _price_frame(offset: float = 0.0) -> pd.DataFrame:
             "close": closes,
             "volume": [100, 110, 120, 130, 140],
         },
-        index=index,
-    )
+    ).with_columns(index.alias("date"))
 
 
 def test_label_build_spec_from_mapping_parses_percent_profit() -> None:
@@ -59,7 +59,7 @@ def test_generate_optimal_events_and_label_helpers() -> None:
 
     assert list(events["event"]) == ["entry", "exit", "entry", "entry", "exit", "exit"]
     assert list(events["side"]) == ["long", "long", "short", "long", "short", "long"]
-    assert events["trade_id"].nunique() == 3
+    assert events["trade_id"].n_unique() == 3
 
     actions = add_action_labels(events)
     binary = add_binary_classification_labels(events, use_sample_weight=False)
@@ -68,7 +68,7 @@ def test_generate_optimal_events_and_label_helpers() -> None:
     assert list(actions["label"]) == ["buy", "sell", "short", "buy", "cover", "sell"]
     assert list(binary["target"]) == [1, 0, 0, 1, 1, 0]
     assert "rank_y" in ranked.columns
-    assert ranked["rank_y"].notna().all()
+    assert ranked["rank_y"].is_not_null().all()
 
 
 def test_build_trade_results_and_oracle_labels_from_price_frames() -> None:
@@ -134,10 +134,6 @@ def test_build_label_panel_parallel_matches_sequential() -> None:
     sequential = build_label_panel(frames, max_workers=1, **kwargs)
     parallel = build_label_panel(frames, max_workers=2, **kwargs)
 
-    pd.testing.assert_frame_equal(
-        sequential.sort_index().sort_index(axis=1),
-        parallel.sort_index().sort_index(axis=1),
-    )
-    assert set(sequential.index.get_level_values("symbol")) == {"AAPL", "MSFT"}
+    assert sequential.sort(sorted(sequential.columns)).equals(parallel.sort(sorted(parallel.columns)))
+    assert set(sequential["symbol"]) == {"AAPL", "MSFT"}
     assert {"label", "target", "rank_y", "trade_id"}.issubset(sequential.columns)
-

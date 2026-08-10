@@ -1,4 +1,5 @@
-import pandas as pd
+import polars as pl
+from datetime import datetime, timedelta
 
 from quant_warehouse.export.agent_evidence import build_agent_evidence
 
@@ -6,23 +7,19 @@ from quant_warehouse.export.agent_evidence import build_agent_evidence
 class FakeWarehouse:
     class News:
         def ensure_date(self, *args, **kwargs):
-            return pd.DataFrame()
+            return pl.DataFrame()
 
     news = News()
     def read_prices(self, symbol, **kwargs):
-        return pd.DataFrame(
-            {"close": range(100, 170), "open": range(99, 169), "volume": [1000] * 70},
-            index=pd.date_range("2026-04-01", periods=70),
-        )
+        return pl.DataFrame({"date": [datetime(2026, 4, 1) + timedelta(days=i) for i in range(70)],
+                             "close": range(100, 170), "open": range(99, 169), "volume": [1000] * 70})
 
     def read_fundamentals(self, symbol, *, section, **kwargs):
-        return pd.DataFrame({"value": [1.0]}, index=pd.to_datetime(["2026-03-31"]))
+        return pl.DataFrame({"date": ["2026-03-31"], "value": [1.0]})
 
     def read_news(self, symbol, **kwargs):
-        return pd.DataFrame(
-            {"title": ["Headline"], "source": ["FMP"], "excerpt": ["Evidence"]},
-            index=pd.DatetimeIndex(["2026-06-09T12:00:00"], name="published_at"),
-        )
+        return pl.DataFrame({"published_at": ["2026-06-09T12:00:00"], "title": ["Headline"],
+                             "source": ["FMP"], "excerpt": ["Evidence"]})
 
 
 def test_build_agent_evidence_is_compact_and_point_in_time():

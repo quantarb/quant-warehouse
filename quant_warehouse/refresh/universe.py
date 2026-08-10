@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import polars as pl
+
 from datetime import date
 from typing import Callable, Sequence
 
-import pandas as pd
 
 from quant_warehouse.refresh.parallel import run_symbol_workers
 from quant_warehouse.refresh.planner import (
@@ -394,7 +395,7 @@ def refresh_universe_macro(
     target_end_date = target_end_date or expected_latest_price_date()
     end_text = target_end_date.isoformat()
     start_text = str(macro_start_date or MIN_HISTORICAL_DATE)[:10]
-    history_start = pd.Timestamp(start_text).date()
+    history_start = date.fromisoformat(start_text[:10])
     provider_name = str(provider or "fmp").strip().lower()
     results: list[dict[str, object]] = []
     series_list = list(economic_series or DEFAULT_ECONOMIC_SERIES)

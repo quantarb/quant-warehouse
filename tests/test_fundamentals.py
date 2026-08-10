@@ -1,6 +1,7 @@
 from pathlib import Path
 
-import pandas as pd
+import polars as pl
+from datetime import datetime
 
 from quant_warehouse.catalog.store import CatalogStore
 from quant_warehouse.config import WarehouseConfig
@@ -12,9 +13,9 @@ from quant_warehouse.warehouse.storage import provider_library
 
 
 def test_normalize_vendor_frame_without_provider_prefix():
-    raw = pd.DataFrame(
+    raw = pl.DataFrame(
         {
-            "period_ending": pd.to_datetime(["2023-12-31", "2024-12-31"]),
+            "period_ending": [datetime(2023, 12, 31), datetime(2024, 12, 31)],
             "total_revenue": [100.0, 120.0],
             "symbol": ["AAPL", "AAPL"],
         }
@@ -22,7 +23,7 @@ def test_normalize_vendor_frame_without_provider_prefix():
     out = normalize_vendor_frame(raw, provider="fmp", vendor_only_prefix=None)
     assert "total_revenue" in out.columns
     assert "fmp__total_revenue" not in out.columns
-    assert out.index.name == "period_ending"
+    assert "period_ending" in out.columns
     assert len(out) == 2
 
 
@@ -36,18 +37,10 @@ def test_fundamentals_store_per_section_libraries(tmp_path: Path):
     catalog = CatalogStore(config.catalog_path)
     store = FundamentalsStore(config, backend=backend, catalog=catalog)
 
-    income = pd.DataFrame(
-        {"total_revenue": [100.0, 120.0]},
-        index=pd.to_datetime(["2023-12-31", "2024-12-31"]),
-    )
-    income.index.name = "period_ending"
+    income = pl.DataFrame({"total_revenue": [100.0, 120.0], "period_ending": [datetime(2023, 12, 31), datetime(2024, 12, 31)]})
     store.ingest_frame("AAPL", section="income", provider="fmp", frame=income, merge=False)
 
-    balance = pd.DataFrame(
-        {"total_assets": [500.0, 550.0]},
-        index=pd.to_datetime(["2023-12-31", "2024-12-31"]),
-    )
-    balance.index.name = "period_ending"
+    balance = pl.DataFrame({"total_assets": [500.0, 550.0], "period_ending": [datetime(2023, 12, 31), datetime(2024, 12, 31)]})
     store.ingest_frame("AAPL", section="balance", provider="fmp", frame=balance, merge=False)
 
     income_lib = fundamental_library("income")
@@ -58,11 +51,11 @@ def test_fundamentals_store_per_section_libraries(tmp_path: Path):
     assert backend.read(balance_vendor_lib, "AAPL__fmp") is not None
     assert backend.read(income_lib, "AAPL__fmp") is None
     assert backend.read(balance_lib, "AAPL__fmp") is None
-    assert backend.read(income_vendor_lib, "AAPL__fmp").shape[1] == 1
-    assert backend.read(balance_vendor_lib, "AAPL__fmp").shape[1] == 1
+    assert backend.read(income_vendor_lib, "AAPL__fmp").shape[1] == 2
+    assert backend.read(balance_vendor_lib, "AAPL__fmp").shape[1] == 2
 
     out = store.read("AAPL", section="income", provider="fmp")
-    assert out.loc["2024-12-31", "total_revenue"] == 120.0
+    assert out.filter(pl.col("period_ending") == datetime(2024, 12, 31)).item(0, "total_revenue") == 120.0
 
     rows = catalog.list_symbol("AAPL")
     sections = {row.section for row in rows}
@@ -91,11 +84,7 @@ def test_fundamentals_store_keeps_quarterly_and_annual_refreshes_separate(tmp_pa
         assert section == "income"
         period = kwargs["period"]
         value = 10.0 if period == "quarter" else 100.0
-        frame = pd.DataFrame(
-            {"total_revenue": [value]},
-            index=pd.to_datetime(["2024-03-31" if period == "quarter" else "2024-12-31"]),
-        )
-        frame.index.name = "period_ending"
+        frame = pl.DataFrame({"total_revenue": [value], "period_ending": [datetime(2024, 3, 31) if period == "quarter" else datetime(2024, 12, 31)]})
         return frame
 
     monkeypatch.setattr("quant_warehouse.warehouse.fundamentals.fetch_dataframe", fake_fetch)
@@ -109,6 +98,6 @@ def test_fundamentals_store_keeps_quarterly_and_annual_refreshes_separate(tmp_pa
     assert stats == {"income_quarter:fmp": 1, "income_annual:fmp": 1}
     quarter = store.read("AAPL", section="income", provider="fmp", period="quarter")
     annual = store.read("AAPL", section="income", provider="fmp", period="annual")
-    assert quarter.iloc[0]["total_revenue"] == 10.0
-    assert annual.iloc[0]["total_revenue"] == 100.0
+    assert quarter.item(0, "total_revenue") == 10.0
+    assert annual.item(0, "total_revenue") == 100.0
     assert {row.section for row in catalog.list_symbol("AAPL")} == {"income_quarter", "income_annual"}

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import pandas as pd
+import polars as pl
 import pytest
 
 from quant_warehouse.platforms.data_providers.thetadata.feature_engineering import (
@@ -10,7 +10,7 @@ from quant_warehouse.platforms.data_providers.thetadata.feature_engineering impo
 
 
 def test_build_option_contract_features_adds_liquidity_greeks_and_iv() -> None:
-    chain = pd.DataFrame(
+    chain = pl.DataFrame(
         {
             "underlying_symbol": ["AAPL", "AAPL"],
             "snapshot_date": ["2025-01-02", "2025-01-02"],
@@ -39,17 +39,17 @@ def test_build_option_contract_features_adds_liquidity_greeks_and_iv() -> None:
     assert "liquidity" in result.family_cols
     assert "greeks" in result.family_cols
     assert "iv_surface" in result.family_cols
-    assert result.df.loc[0, "dte"] == 50
-    assert result.df.loc[0, "dte_gap"] == 5
-    assert result.df.loc[0, "moneyness"] == 0.0
-    assert result.df.loc[0, "spread_pct"] == pytest.approx(0.08)
-    assert result.df.loc[0, "abs_delta"] == 0.55
-    assert result.df.loc[0, "theta_to_mid"] == pytest.approx(-0.01)
+    assert result.df[0, "dte"] == 50
+    assert result.df[0, "dte_gap"] == 5
+    assert result.df[0, "moneyness"] == 0.0
+    assert result.df[0, "spread_pct"] == pytest.approx(0.08)
+    assert result.df[0, "abs_delta"] == 0.55
+    assert result.df[0, "theta_to_mid"] == pytest.approx(-0.01)
     assert "iv_expiration_z" in result.feature_cols
 
 
 def test_option_ranker_feature_columns_prefers_available_greeks() -> None:
-    frame = pd.DataFrame(
+    frame = pl.DataFrame(
         {
             "dte": [30],
             "delta": [0.5],
@@ -73,7 +73,7 @@ def test_option_ranker_feature_columns_prefers_available_greeks() -> None:
 
 
 def test_build_option_contract_features_does_not_impute_missing_vendor_greeks() -> None:
-    chain = pd.DataFrame(
+    chain = pl.DataFrame(
         {
             "underlying_symbol": ["AAPL"],
             "snapshot_date": ["2025-01-02"],
@@ -92,7 +92,7 @@ def test_build_option_contract_features_does_not_impute_missing_vendor_greeks() 
         underlying_price=100.0,
         compute_model_greeks=True,
     )
-    row = result.df.iloc[0]
+    row = result.df.row(0, named=True)
 
     assert "iv" not in result.df.columns
     assert "iv_model_source" not in result.df.columns
@@ -102,3 +102,20 @@ def test_build_option_contract_features_does_not_impute_missing_vendor_greeks() 
     assert "delta" not in option_ranker_feature_columns(result.df)
     assert row["dte"] == 30
     assert row["spread_pct"] == pytest.approx((2.3743012561 - 2.20) / ((2.20 + 2.3743012561) / 2.0))
+
+
+def test_option_features_keep_polars_native_input_and_output() -> None:
+    chain = pl.DataFrame(
+        {
+            "underlying_symbol": ["AAPL"],
+            "snapshot_date": ["2025-01-02"],
+            "expiration": ["2025-02-01"],
+            "option_type": ["call"],
+            "strike": [100.0],
+            "bid": [2.2],
+            "ask": [2.4],
+        }
+    )
+    result = build_option_contract_features(chain, underlying_price=100.0)
+    assert isinstance(result.df, pl.DataFrame)
+    assert result.df.item(0, result.df.columns.index("dte")) == 30

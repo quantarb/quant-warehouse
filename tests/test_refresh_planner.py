@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-import pandas as pd
 
 from quant_warehouse.catalog.store import SectionState
 from quant_warehouse.refresh.planner import (
@@ -61,7 +60,7 @@ def test_price_refresh_needs_update_when_max_date_stale():
         catalog,  # type: ignore[arg-type]
         "AAPL",
         "fmp",
-        target_end_date=pd.Timestamp("2026-06-17").date(),
+        target_end_date=datetime(2026, 6, 17).date(),
         skip_recent_hours=0.0,
     )
     assert needs is True
@@ -87,7 +86,7 @@ def test_price_refresh_skips_when_fresh_and_recent():
         catalog,  # type: ignore[arg-type]
         "AAPL",
         "fmp",
-        target_end_date=pd.Timestamp("2026-06-17").date(),
+        target_end_date=datetime(2026, 6, 17).date(),
         skip_recent_hours=24.0,
     )
     assert needs is False
@@ -123,7 +122,7 @@ def test_symbol_has_fresh_prices_when_any_provider_current():
         catalog,  # type: ignore[arg-type]
         "AAPL",
         ("fmp", "yfinance"),
-        target_end_date=pd.Timestamp("2026-06-17").date(),
+        target_end_date=datetime(2026, 6, 17).date(),
     )
 
 
@@ -235,7 +234,7 @@ def test_price_refresh_flags_below_min_historical_date():
         catalog,  # type: ignore[arg-type]
         "AAPL",
         "fmp",
-        target_end_date=pd.Timestamp("2026-06-17").date(),
+        target_end_date=datetime(2026, 6, 17).date(),
         skip_recent_hours=0.0,
     )
     assert needs is True
@@ -262,8 +261,8 @@ def test_macro_refresh_flags_incomplete_early_history():
         "GDP",
         "macro_economic",
         "fmp",
-        target_end_date=pd.Timestamp("2026-06-17").date(),
-        history_start_date=pd.Timestamp(MIN_HISTORICAL_DATE).date(),
+        target_end_date=datetime(2026, 6, 17).date(),
+        history_start_date=datetime.fromisoformat(MIN_HISTORICAL_DATE).date(),
         skip_recent_hours=0.0,
     )
     assert needs is True
@@ -290,8 +289,8 @@ def test_macro_refresh_skips_recent_incomplete_early_history_retry():
         "GDP",
         "macro_economic",
         "fmp",
-        target_end_date=pd.Timestamp("2026-06-17").date(),
-        history_start_date=pd.Timestamp(MIN_HISTORICAL_DATE).date(),
+        target_end_date=datetime(2026, 6, 17).date(),
+        history_start_date=datetime.fromisoformat(MIN_HISTORICAL_DATE).date(),
         skip_recent_hours=24.0,
     )
     assert needs is False
@@ -357,7 +356,7 @@ def test_price_backfill_flags_incomplete_history_when_ipo_known():
         catalog,  # type: ignore[arg-type]
         "RIVN",
         "fmp",
-        target_end_date=pd.Timestamp("2026-06-17").date(),
+        target_end_date=datetime(2026, 6, 17).date(),
         skip_recent_hours=0.0,
     )
     assert needs is True
@@ -384,7 +383,7 @@ def test_historical_fetch_plan_tail_when_max_date_stale():
         "AAPL",
         "income",
         "fmp",
-        target_end_date=pd.Timestamp("2026-06-17").date(),
+        target_end_date=datetime(2026, 6, 17).date(),
         skip_recent_hours=0.0,
     )
     assert plan.needs_refresh is True
@@ -414,7 +413,7 @@ def test_historical_fetch_plan_skips_period_fundamental_inside_reporting_buffer(
         "AAPL",
         "income",
         "fmp",
-        target_end_date=pd.Timestamp("2026-06-17").date(),
+        target_end_date=datetime(2026, 6, 17).date(),
         skip_recent_hours=0.0,
     )
     assert plan.needs_refresh is False
@@ -443,7 +442,7 @@ def test_historical_fetch_plan_head_when_early_history_missing():
         "RIVN",
         "income",
         "fmp",
-        target_end_date=pd.Timestamp("2026-06-17").date(),
+        target_end_date=datetime(2026, 6, 17).date(),
         skip_recent_hours=0.0,
     )
     assert plan.needs_refresh is True
@@ -473,7 +472,7 @@ def test_historical_fetch_plan_skips_when_fresh():
         "AAPL",
         "income",
         "fmp",
-        target_end_date=pd.Timestamp("2026-06-17").date(),
+        target_end_date=datetime(2026, 6, 17).date(),
         skip_recent_hours=24.0,
     )
     assert plan.needs_refresh is False
@@ -501,7 +500,7 @@ def test_historical_fetch_plan_defers_recent_incomplete_retry():
         "AAPL",
         "income",
         "fmp",
-        target_end_date=pd.Timestamp("2026-06-17").date(),
+        target_end_date=datetime(2026, 6, 17).date(),
         skip_recent_hours=24.0,
     )
     assert plan.needs_refresh is False
@@ -529,7 +528,7 @@ def test_historical_fetch_plan_skips_sparse_fundamental_recent_attempt():
         "MSFT",
         "historical_splits",
         "fmp",
-        target_end_date=pd.Timestamp("2026-06-17").date(),
+        target_end_date=datetime(2026, 6, 17).date(),
         skip_recent_hours=24.0,
     )
     assert plan.needs_refresh is False
@@ -556,7 +555,7 @@ def test_price_backfill_skips_when_fresh():
         catalog,  # type: ignore[arg-type]
         "AAPL",
         "fmp",
-        target_end_date=pd.Timestamp("2026-06-17").date(),
+        target_end_date=datetime(2026, 6, 17).date(),
         skip_recent_hours=24.0,
     )
     assert needs is False

@@ -1,406 +1,154 @@
-"""Macro event normalization and company-response target engineering.
-
-Macro events are global observations.  They are stored once per release and
-joined to company prices only when constructing the company-specific response
-target; callers should not broadcast the raw event row into the source table.
-"""
-
+"""Polars-only macro event normalization and response targets."""
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+import polars as pl
 
-import numpy as np
-import pandas as pd
-
-
-MACRO_RESPONSE_CLASSES = (
-    "strong_negative",
-    "negative",
-    "neutral",
-    "positive",
-    "strong_positive",
-)
-
+MACRO_RESPONSE_CLASSES = ("strong_negative", "negative", "neutral", "positive", "strong_positive")
 
 @dataclass(frozen=True)
 class MacroEventSpec:
-    """Configuration for company-specific macro response labels."""
-
     horizons: tuple[int, ...] = (1, 5, 20)
     minimum_cross_section: int = 5
     require_actual: bool = True
-
 
 def _slug(value: object) -> str:
     text = re.sub(r"[^a-z0-9]+", "_", str(value or "").lower()).strip("_")
     return text or "unknown_event"
 
-
 def _canonical_event_type(event_type: str) -> str:
-    """Collapse calendar/reporting-cycle decorations into one event family."""
     months = "jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec"
     value = re.sub(rf"_(?:{months})(?:_\d{{1,2}})?$", "", str(event_type))
     value = re.sub(r"_q[1-4]$", "", value)
-    # Reporting frequency describes how the source series is reported; it is
-    # not a separate supervised event class.  Direction is learned solely
-    # from actual versus previous below.
-    value = re.sub(r"_(?:mom|qoq|yoy)$", "", value)
-    return value or str(event_type)
+    return re.sub(r"_(?:mom|qoq|yoy)$", "", value) or str(event_type)
 
-
-def _compact_directional_event_type(
-    event_type: str,
-    groups: set[str] | None = None,
-) -> str:
-    """Collapse only high-cardinality release variants into useful families.
-
-    The compact taxonomy deliberately keeps most economic series distinct. It
-    removes option-like fragmentation from Treasury auction tenors, mortgage
-    rate variants, and consumer/retail releases while preserving direction.
-    """
+def _compact_directional_event_type(event_type: str, groups: set[str] | None = None) -> str:
     value = _canonical_event_type(event_type)
     groups = groups or {"treasury", "mortgage", "consumer"}
-    if "treasury" in groups and value.endswith("_auction") and any(
-        token in value for token in ("_bill_", "_note_", "_bond_", "_tips_", "_frn_")
-    ):
+    if "treasury" in groups and value.endswith("_auction") and any(x in value for x in ("_bill_", "_note_", "_bond_", "_tips_", "_frn_")):
         return "treasury_auction"
     if "mortgage" in groups and value.endswith("_mortgage_rate"):
         return "mortgage_rate"
     if "consumer" in groups and value in {"all_car_sales", "all_truck_sales", "total_vehicle_sales"}:
         return "vehicle_sales"
-    if "consumer" in groups and value == "consumer_credit_change":
-        return "consumer_credit"
-    if "consumer" in groups and value in {
-        "cb_consumer_confidence", "consumer_inflation_expectation",
-        "michigan_consumer_expectations", "michigan_consumer_sentiment",
-    }:
-        return "consumer_sentiment"
-    if "consumer" in groups and value in {
-        "personal_spending", "real_consumer_spending", "retail_sales",
-        "retail_sales_ex_autos", "retail_sales_ex_gas_autos",
-    }:
-        return "consumer_spending"
-    if "consumer" in groups and value == "retail_inventories_ex_autos":
-        return "retail_inventory"
-    if "aliases" in groups and value in {
-        "core_pce_price_index", "core_pce_prices",
-    }:
-        return "core_pce"
+    if "consumer" in groups and value == "consumer_credit_change": return "consumer_credit"
+    if "consumer" in groups and value in {"cb_consumer_confidence", "consumer_inflation_expectation", "michigan_consumer_expectations", "michigan_consumer_sentiment"}: return "consumer_sentiment"
+    if "consumer" in groups and value in {"personal_spending", "real_consumer_spending", "retail_sales", "retail_sales_ex_autos", "retail_sales_ex_gas_autos"}: return "consumer_spending"
+    if "consumer" in groups and value == "retail_inventories_ex_autos": return "retail_inventory"
+    if "aliases" in groups and value in {"core_pce_price_index", "core_pce_prices"}: return "core_pce"
     return value
 
+def _date_expr(frame: pl.DataFrame, name: str) -> pl.Expr:
+    return ((pl.col(name).str.to_datetime(strict=False, time_zone="UTC") if frame.schema[name] == pl.String else pl.col(name).cast(pl.Datetime, strict=False))
+            .dt.replace_time_zone(None).dt.truncate("1d"))
 
-def normalize_macro_events(events: pd.DataFrame) -> pd.DataFrame:
-    """Normalize FMP economic-calendar rows into one row per release."""
-    if events is None or events.empty:
-        return pd.DataFrame(
-            columns=[
-                "macro_event_id", "date", "country", "currency", "event_type",
-                "impact", "previous", "estimate", "actual", "unit", "surprise",
-                "surprise_pct",
-            ]
-        )
-    frame = events.copy()
-    if "date" not in frame.columns and (
-        isinstance(frame.index, pd.DatetimeIndex) or str(frame.index.name or "").lower() == "date"
-    ):
-        frame = frame.reset_index().rename(columns={frame.index.name or "index": "date"})
-    if "date" not in frame.columns or "event" not in frame.columns:
+def normalize_macro_events(events: pl.DataFrame) -> pl.DataFrame:
+    columns = ["macro_event_id", "date", "country", "currency", "event", "event_type", "impact", "previous", "estimate", "actual", "unit", "surprise", "surprise_pct"]
+    if events is None or events.is_empty():
+        return pl.DataFrame(schema={column: pl.String for column in columns})
+    if "date" not in events.columns or "event" not in events.columns:
         raise ValueError("macro events require date and event columns")
-    # FMP returns release timestamps such as 20:30. Macro labels describe
-    # the event's trading date, so discard the intraday release time before
-    # joining to midnight-normalized equity tokens.
-    frame["date"] = (
-        pd.to_datetime(frame["date"], errors="coerce", utc=True)
-        .dt.tz_convert(None)
-        .dt.normalize()
-    )
-    frame = frame.dropna(subset=["date"]).copy()
+    out = events.with_columns(_date_expr(events, "date").alias("date"))
     for column in ("previous", "estimate", "actual", "change", "changePercentage"):
-        if column in frame.columns:
-            frame[column] = pd.to_numeric(frame[column], errors="coerce")
+        if column in out.columns: out = out.with_columns(pl.col(column).cast(pl.Float64, strict=False))
     for column in ("country", "currency", "impact", "unit"):
-        if column not in frame.columns:
-            frame[column] = ""
-    frame["country"] = frame["country"].fillna("").astype(str).str.upper()
-    frame["currency"] = frame["currency"].fillna("").astype(str).str.upper()
-    frame["event_type"] = frame["event"].map(_slug)
-    frame["impact"] = frame["impact"].fillna("").astype(str).str.lower()
-    frame["unit"] = frame["unit"].fillna("").astype(str)
-    actual = pd.to_numeric(frame.get("actual", pd.Series(np.nan, index=frame.index)), errors="coerce")
-    estimate = pd.to_numeric(frame.get("estimate", pd.Series(np.nan, index=frame.index)), errors="coerce")
-    frame["surprise"] = actual - estimate
-    estimate = estimate.abs()
-    frame["surprise_pct"] = frame["surprise"] / estimate.replace(0, np.nan)
-    identity = ["date", "country", "currency", "event_type"]
-    frame["macro_event_id"] = frame[identity].astype(str).agg("|".join, axis=1)
-    columns = [
-        "macro_event_id", "date", "country", "currency", "event", "event_type",
-        "impact", "previous", "estimate", "actual", "unit", "surprise", "surprise_pct",
-    ]
-    return frame[[column for column in columns if column in frame.columns]].sort_values("date").reset_index(drop=True)
+        if column not in out.columns: out = out.with_columns(pl.lit("", dtype=pl.String).alias(column))
+    for column in ("previous", "estimate", "actual"):
+        if column not in out.columns: out = out.with_columns(pl.lit(None, dtype=pl.Float64).alias(column))
+    out = out.with_columns(
+        pl.col("country").cast(pl.String, strict=False).fill_null("").str.to_uppercase(),
+        pl.col("currency").cast(pl.String, strict=False).fill_null("").str.to_uppercase(),
+        pl.col("event").map_elements(_slug, return_dtype=pl.String).alias("event_type"),
+        pl.col("impact").cast(pl.String, strict=False).fill_null("").str.to_lowercase(),
+        pl.col("unit").cast(pl.String, strict=False).fill_null(""),
+    ).filter(pl.col("date").is_not_null()).with_columns(
+        (pl.col("actual") - pl.col("estimate")).alias("surprise"),
+        pl.when(pl.col("estimate").abs() != 0).then((pl.col("actual") - pl.col("estimate")) / pl.col("estimate").abs()).otherwise(None).alias("surprise_pct"),
+    ).with_columns(pl.concat_str([pl.col("date").cast(pl.String), pl.col("country"), pl.col("currency"), pl.col("event_type")], separator="|").alias("macro_event_id"))
+    return out.select([column for column in columns if column in out.columns]).sort("date")
 
-
-def _macro_target_name(row: pd.Series) -> str:
-    """Return a stable binary target name for one calendar release.
-
-    US interest-rate decisions are directionalized from actual minus previous
-    so rate cuts, hikes, and holds remain independent event labels. Other
-    releases retain a country/event-type target, allowing new FMP event names
-    without expanding a restrictive taxonomy.
-    """
-    country = str(row.get("country", "")).lower()
-    event_type = _canonical_event_type(str(row.get("event_type", "unknown_event")))
-    is_rate_decision = country == "us" and (
-        "interest_rate_decision" in event_type
-        or "federal_funds_rate" in event_type
-        or "fed_funds_rate" in event_type
-    )
-    if is_rate_decision:
-        actual = pd.to_numeric(pd.Series([row.get("actual")]), errors="coerce").iloc[0]
-        previous = pd.to_numeric(pd.Series([row.get("previous")]), errors="coerce").iloc[0]
-        if pd.notna(actual) and pd.notna(previous):
-            if actual < previous:
-                return "fed_rate_cut"
-            if actual > previous:
-                return "fed_rate_hike"
-            return "fed_rate_hold"
-        return "fed_rate_decision"
-    actual = pd.to_numeric(pd.Series([row.get("actual")]), errors="coerce").iloc[0]
-    previous = pd.to_numeric(pd.Series([row.get("previous")]), errors="coerce").iloc[0]
-    if pd.notna(actual) and pd.notna(previous):
-        if actual > previous:
-            direction = "increase"
-        elif actual < previous:
-            direction = "decrease"
-        else:
-            direction = "unchanged"
+def _macro_target_name_from_mapping(row: dict[str, object]) -> str:
+    country = str(row.get("country") or "").lower()
+    event_type = _canonical_event_type(str(row.get("event_type") or "unknown_event"))
+    try:
+        actual, previous = float(row["actual"]), float(row["previous"])
+        rate = country == "us" and any(x in event_type for x in ("interest_rate_decision", "federal_funds_rate", "fed_funds_rate"))
+        if rate: return "fed_rate_cut" if actual < previous else "fed_rate_hike" if actual > previous else "fed_rate_hold"
+        direction = "increase" if actual > previous else "decrease" if actual < previous else "unchanged"
         return f"macro_{country or 'global'}_{event_type}_{direction}"
-    return f"macro_{country or 'global'}_{event_type}"
+    except (TypeError, ValueError):
+        return f"macro_{country or 'global'}_{event_type}"
 
-
-def build_macro_event_targets(events: pd.DataFrame) -> pd.DataFrame:
-    """Create one dynamic binary event target row per macro release.
-
-    The returned ``target_name`` values are suitable for shared independent
-    event heads, e.g. ``fed_rate_cut``, ``fed_rate_hike``,
-    ``macro_us_cpi_yoy``, or ``macro_eu_gdp_growth_qoq``.
-    """
+def build_macro_event_targets(events: pl.DataFrame) -> pl.DataFrame:
     macro = normalize_macro_events(events)
-    if macro.empty:
-        macro["target_name"] = pd.Series(dtype="string")
-        macro["target_column"] = pd.Series(dtype="string")
-        return macro
-    macro = macro.copy()
-    macro["target_name"] = macro.apply(_macro_target_name, axis=1)
-    macro["target_column"] = "is_" + macro["target_name"]
-    return macro
+    if macro.is_empty():
+        return macro.with_columns(pl.lit(None, dtype=pl.String).alias("target_name"), pl.lit(None, dtype=pl.String).alias("target_column"))
+    names = [_macro_target_name_from_mapping(row) for row in macro.iter_rows(named=True)]
+    return macro.with_columns(pl.Series("target_name", names), pl.Series("target_column", [f"is_{name}" for name in names]))
 
-
-def build_macro_event_label_panel(
-    tokens: pd.DataFrame,
-    events: pd.DataFrame,
-    *,
-    date_column: str = "date",
-    directional_only: bool = False,
-    compact_directional: bool = False,
-    compact_groups: tuple[str, ...] | None = None,
-    deduplicate_identical: bool = False,
-) -> pd.DataFrame:
-    """Add dynamic date-level binary macro labels to token rows.
-
-    Macro releases are global, so a release label is broadcast to every
-    symbol token on that release date. The event response labels remain a
-    separate company-specific target produced by ``build_macro_response_labels``.
-    """
-    if date_column not in tokens.columns:
-        raise ValueError(f"tokens must contain {date_column!r}")
-    out = tokens.copy()
-    out[date_column] = pd.to_datetime(out[date_column], errors="coerce").dt.normalize()
+def build_macro_event_label_panel(tokens: pl.DataFrame, events: pl.DataFrame, *, date_column: str = "date",
+                                  directional_only: bool = False, compact_directional: bool = False,
+                                  compact_groups: tuple[str, ...] | None = None, deduplicate_identical: bool = False) -> pl.DataFrame:
+    if date_column not in tokens.columns: raise ValueError(f"tokens must contain {date_column!r}")
+    out = tokens.with_columns(_date_expr(tokens, date_column).alias(date_column))
     macro = build_macro_event_targets(events)
-    if macro.empty:
-        return out
+    if macro.is_empty(): return out
     if compact_directional:
-        if not directional_only:
-            raise ValueError("compact_directional requires directional_only=True")
-        macro = macro.copy()
-        macro["target_name"] = macro.apply(
-            lambda row: (
-                "fed_rate_cut" if row["target_name"] == "fed_rate_cut" else
-                "fed_rate_hike" if row["target_name"] == "fed_rate_hike" else
-                "fed_rate_hold" if row["target_name"] == "fed_rate_hold" else
-                f"macro_{str(row.get('country', '')).lower() or 'global'}_"
-                f"{_compact_directional_event_type(
-                    str(row.get('event_type', 'unknown_event')),
-                    set(compact_groups) if compact_groups else None,
-                )}_"
-                f"{str(row['target_name']).rsplit('_', 1)[-1]}"
-            ), axis=1,
-        )
-        macro["target_column"] = "is_" + macro["target_name"]
+        if not directional_only: raise ValueError("compact_directional requires directional_only=True")
+        macro = macro.with_columns(pl.struct(macro.columns).map_elements(lambda row: row["target_name"] if row["target_name"] in {"fed_rate_cut", "fed_rate_hike", "fed_rate_hold"} else f"macro_{str(row.get('country','')).lower() or 'global'}_{_compact_directional_event_type(str(row.get('event_type','unknown_event')), set(compact_groups) if compact_groups else None)}_{str(row['target_name']).rsplit('_',1)[-1]}", return_dtype=pl.String).alias("target_name")).with_columns(pl.concat_str([pl.lit("is_"), pl.col("target_name")]).alias("target_column"))
     if directional_only:
-        # Keep directional outcomes and the explicit Fed decision classes;
-        # drop occurrence-only labels whose actual/previous values were absent.
-        directional = macro["target_name"].astype(str).str.endswith(
-            ("_increase", "_decrease")
-        )
-        fed_decision = macro["target_name"].astype(str).isin(
-            ["fed_rate_cut", "fed_rate_hike", "fed_rate_hold"]
-        )
-        macro = macro.loc[directional | fed_decision].copy()
-        if macro.empty:
-            return out
-    dates = macro[["date", "target_column"]].drop_duplicates().assign(value=1.0)
-    wide = dates.pivot_table(index="date", columns="target_column", values="value", fill_value=0.0)
-    wide.index.name = date_column
-    wide = wide.reset_index()
-    out = out.merge(wide, on=date_column, how="left").fillna(
-        {column: 0.0 for column in wide.columns if column != date_column}
-    )
-    if deduplicate_identical:
-        out, _ = deduplicate_binary_label_columns(out)
-    return out
+        macro = macro.filter(pl.col("target_name").str.ends_with("_increase") | pl.col("target_name").str.ends_with("_decrease") | pl.col("target_name").is_in(["fed_rate_cut", "fed_rate_hike", "fed_rate_hold"]))
+        if macro.is_empty(): return out
+    wide = macro.select(["date", "target_column"]).unique().with_columns(pl.lit(1.0).alias("value")).pivot(on="target_column", index="date", values="value", aggregate_function="max").fill_null(0.0)
+    out = out.join(wide, left_on=date_column, right_on="date", how="left")
+    label_cols = [c for c in wide.columns if c != "date"]
+    return out.with_columns([pl.col(c).fill_null(0.0) for c in label_cols])
 
-
-def deduplicate_binary_label_columns(
-    panel: pd.DataFrame,
-    *,
-    prefix: str = "is_",
-) -> tuple[pd.DataFrame, dict[str, str]]:
-    """Collapse binary label columns with identical activation vectors.
-
-    The first column in each identical-vector group is retained and the
-    remaining names map to it. This is data-dependent and intentionally
-    separate from semantic taxonomy compaction.
-    """
-    out = panel.copy()
-    labels = [column for column in out.columns if str(column).startswith(prefix)]
+def deduplicate_binary_label_columns(panel: pl.DataFrame, *, prefix: str = "is_") -> tuple[pl.DataFrame, dict[str, str]]:
+    labels = [c for c in panel.columns if str(c).startswith(prefix)]
     signatures: dict[tuple[int, ...], list[str]] = {}
     for column in labels:
-        signature = tuple(pd.to_numeric(out[column], errors="coerce").fillna(0).astype("int8"))
+        signature = tuple(panel.get_column(column).cast(pl.Float64, strict=False).fill_null(0).cast(pl.Int8).to_list())
         signatures.setdefault(signature, []).append(column)
-    mapping: dict[str, str] = {}
+    mapping: dict[str, str] = {}; out = panel
     for columns in signatures.values():
-        if len(columns) < 2:
-            continue
+        if len(columns) < 2: continue
         keep = columns[0]
-        for duplicate in columns[1:]:
-            mapping[duplicate] = keep
-        out[keep] = out[columns].max(axis=1)
-        out = out.drop(columns=columns[1:])
+        for duplicate in columns[1:]: mapping[duplicate] = keep
+        out = out.with_columns(pl.max_horizontal(columns).alias(keep)).drop(columns[1:])
     return out, mapping
 
-
-def build_macro_family_label_panel(
-    tokens: pd.DataFrame,
-    events: pd.DataFrame,
-    *,
-    date_column: str = "date",
-) -> pd.DataFrame:
-    """Build compact multi-event family, direction, and surprise targets.
-
-    A date may activate multiple families.  Presence is therefore multi-label
-    rather than a single softmax class.  Direction is encoded per family as
-    ``0=increase, 1=decrease, 2=unchanged`` and is masked when actual/previous
-    are unavailable.  Surprise is the mean percentage surprise for the family
-    on that date and is masked when no estimate exists.
-    """
-    if date_column not in tokens.columns:
-        raise ValueError(f"tokens must contain {date_column!r}")
-    out = tokens.copy()
-    out[date_column] = pd.to_datetime(out[date_column], errors="coerce").dt.normalize()
+def build_macro_family_label_panel(tokens: pl.DataFrame, events: pl.DataFrame, *, date_column: str = "date") -> pl.DataFrame:
+    if date_column not in tokens.columns: raise ValueError(f"tokens must contain {date_column!r}")
+    out = tokens.with_columns(_date_expr(tokens, date_column).alias(date_column))
     macro = normalize_macro_events(events)
-    if macro.empty:
-        return out
-    macro = macro.copy()
-    macro["event_family"] = macro.apply(
-        lambda row: f"macro_{str(row.get('country', '')).lower() or 'global'}_{_canonical_event_type(str(row.get('event_type', 'unknown_event')))}",
-        axis=1,
-    )
-    actual = pd.to_numeric(macro.get("actual"), errors="coerce")
-    previous = pd.to_numeric(macro.get("previous"), errors="coerce")
-    macro["direction_code"] = np.select(
-        [actual > previous, actual < previous, actual.eq(previous)],
-        [0, 1, 2],
-        default=-1,
-    ).astype("int8")
-    presence = macro[["date", "event_family"]].drop_duplicates().assign(value=1.0)
-    presence = presence.pivot_table(index="date", columns="event_family", values="value", fill_value=0.0)
-    presence.columns = [f"is_{column}" for column in presence.columns]
-    directions = macro.loc[macro.direction_code.ge(0), ["date", "event_family", "direction_code"]]
-    if not directions.empty:
-        directions = directions.groupby(["date", "event_family"], as_index=False).direction_code.first()
-        directions = directions.pivot(index="date", columns="event_family", values="direction_code")
-        directions.columns = [f"macro_direction_{column}" for column in directions.columns]
-    else:
-        directions = pd.DataFrame(index=presence.index)
-    surprises = macro.dropna(subset=["surprise_pct"]).groupby(["date", "event_family"], as_index=False).surprise_pct.mean()
-    if not surprises.empty:
-        surprises = surprises.pivot(index="date", columns="event_family", values="surprise_pct")
-        surprises.columns = [f"macro_surprise_{column}" for column in surprises.columns]
-    else:
-        surprises = pd.DataFrame(index=presence.index)
-    panel = pd.concat([presence, directions, surprises], axis=1).reset_index()
-    return out.merge(panel, on=date_column, how="left")
+    if macro.is_empty(): return out
+    macro = macro.with_columns(pl.concat_str([pl.lit("macro_"), pl.col("country").str.to_lowercase().fill_null("global"), pl.lit("_"), pl.col("event_type")]).alias("event_family"), pl.when(pl.col("actual") > pl.col("previous")).then(0).when(pl.col("actual") < pl.col("previous")).then(1).when(pl.col("actual") == pl.col("previous")).then(2).otherwise(-1).cast(pl.Int8).alias("direction_code"))
+    presence = macro.select(["date", "event_family"]).unique().with_columns(pl.lit(1.0).alias("value")).pivot(on="event_family", index="date", values="value", aggregate_function="max").fill_null(0.0)
+    presence = presence.rename({c: f"is_{c}" for c in presence.columns if c != "date"})
+    directions = macro.filter(pl.col("direction_code") >= 0).group_by(["date", "event_family"]).agg(pl.col("direction_code").first()).pivot(on="event_family", index="date", values="direction_code")
+    directions = directions.rename({c: f"macro_direction_{c}" for c in directions.columns if c != "date"})
+    surprises = macro.filter(pl.col("surprise_pct").is_not_null()).group_by(["date", "event_family"]).agg(pl.col("surprise_pct").mean()).pivot(on="event_family", index="date", values="surprise_pct")
+    surprises = surprises.rename({c: f"macro_surprise_{c}" for c in surprises.columns if c != "date"})
+    result = out.join(presence, left_on=date_column, right_on="date", how="left")
+    result = result.join(directions, left_on=date_column, right_on="date", how="left") if directions.width > 1 else result
+    return result.join(surprises, left_on=date_column, right_on="date", how="left") if surprises.width > 1 else result
 
-
-def build_macro_response_labels(
-    prices: pd.DataFrame,
-    events: pd.DataFrame,
-    spec: MacroEventSpec | None = None,
-    *,
-    symbol_column: str = "symbol",
-    date_column: str = "date",
-    price_column: str = "close",
-) -> pd.DataFrame:
-    """Build shared five-class company responses for each macro release.
-
-    Response classes are cross-sectional quintile classes for each release and
-    horizon.  The class semantics are shared across every macro event type;
-    event type and surprise remain inputs to the model rather than separate
-    prediction heads.
-    """
+def build_macro_response_labels(prices: pl.DataFrame, events: pl.DataFrame, spec: MacroEventSpec | None = None, *, symbol_column: str = "symbol", date_column: str = "date", price_column: str = "close") -> pl.DataFrame:
     spec = spec or MacroEventSpec()
-    required = {symbol_column, date_column, price_column}
-    if not required.issubset(prices.columns):
-        raise ValueError(f"prices must contain {sorted(required)}")
+    if not {symbol_column, date_column, price_column}.issubset(prices.columns): raise ValueError("prices lacks required columns")
     macro = normalize_macro_events(events)
-    if macro.empty:
-        return pd.DataFrame()
-    if spec.require_actual:
-        macro = macro.loc[macro.actual.notna()].copy()
-    if macro.empty:
-        return pd.DataFrame()
-    panel = prices[[symbol_column, date_column, price_column]].copy()
-    panel[date_column] = pd.to_datetime(panel[date_column], errors="coerce").dt.normalize()
-    panel[symbol_column] = panel[symbol_column].astype(str).str.upper()
-    panel[price_column] = pd.to_numeric(panel[price_column], errors="coerce")
-    panel = panel.dropna().sort_values([symbol_column, date_column])
-    outputs: list[pd.DataFrame] = []
+    if macro.is_empty(): return pl.DataFrame()
+    if spec.require_actual: macro = macro.filter(pl.col("actual").is_not_null())
+    panel = prices.select([symbol_column, date_column, price_column]).with_columns(_date_expr(prices, date_column).alias(date_column), pl.col(symbol_column).cast(pl.String).str.to_uppercase(), pl.col(price_column).cast(pl.Float64, strict=False)).drop_nulls().sort([symbol_column, date_column])
+    outputs: list[pl.DataFrame] = []
     for horizon in spec.horizons:
-        future = panel[[symbol_column, date_column, price_column]].copy()
-        future["event_date"] = future[date_column]
-        future["future_date"] = future.groupby(symbol_column)[date_column].shift(-int(horizon))
-        future["future_price"] = future.groupby(symbol_column)[price_column].shift(-int(horizon))
-        future = future.drop(columns=[date_column, price_column])
-        current = panel.rename(columns={date_column: "event_date", price_column: "event_price"})
-        joined = current.merge(future, on=[symbol_column, "event_date"], how="left")
-        joined["forward_return"] = joined["future_price"] / joined["event_price"] - 1.0
-        joined = joined.merge(macro, left_on="event_date", right_on="date", how="inner")
-        joined = joined.dropna(subset=["forward_return"])
-        if joined.empty:
-            continue
-        grouped = joined.groupby("macro_event_id")["forward_return"]
-        counts = grouped.transform("count")
-        ranks = grouped.rank(method="first", pct=True)
-        joined["response_class"] = np.select(
-            [ranks <= 0.2, ranks <= 0.4, ranks <= 0.6, ranks <= 0.8],
-            [0, 1, 2, 3],
-            default=4,
-        ).astype("int8")
-        joined.loc[counts < spec.minimum_cross_section, "response_class"] = 2
-        joined["horizon"] = int(horizon)
+        future = panel.with_columns(pl.col(date_column).alias("event_date"), pl.col(date_column).shift(-int(horizon)).over(symbol_column).alias("future_date"), pl.col(price_column).shift(-int(horizon)).over(symbol_column).alias("future_price")).select([symbol_column, "event_date", "future_date", "future_price"])
+        current = panel.rename({date_column: "event_date", price_column: "event_price"})
+        joined = current.join(future, on=[symbol_column, "event_date"], how="left").with_columns((pl.col("future_price") / pl.col("event_price") - 1).alias("forward_return")).join(macro, left_on="event_date", right_on="date", how="inner").drop_nulls("forward_return")
+        if joined.is_empty(): continue
+        joined = joined.with_columns(pl.col("forward_return").rank(method="average").over("macro_event_id").alias("rank"), pl.len().over("macro_event_id").alias("count"))
+        joined = joined.with_columns(pl.when(pl.col("count") < spec.minimum_cross_section).then(2).otherwise((pl.col("rank") / pl.col("count") * 5).ceil().clip(upper_bound=4).cast(pl.Int8)).alias("response_class"), pl.lit(int(horizon)).alias("horizon"))
         outputs.append(joined)
-    if not outputs:
-        return pd.DataFrame()
-    return pd.concat(outputs, ignore_index=True).sort_values(["event_date", "macro_event_id", symbol_column, "horizon"]).reset_index(drop=True)
+    return pl.concat(outputs, how="diagonal_relaxed").sort(["event_date", "macro_event_id", symbol_column, "horizon"]) if outputs else pl.DataFrame()

@@ -19,7 +19,7 @@ def screen_universe_to_catalog(
     progress_logger: ProgressLogger = None,
 ) -> tuple[tuple[str, ...], str]:
     frame, source = fetch_equity_screener(query)
-    if frame.empty:
+    if frame.is_empty():
         return tuple(), source
 
     provider_name = str(query.provider or "fmp").strip().lower()
@@ -27,7 +27,7 @@ def screen_universe_to_catalog(
     if source_provider == "fmp":
         source_provider = "fmp_screener"
 
-    records = frame.where(frame.notna(), None).to_dict(orient="records")
+    records = frame.to_dicts()
     symbols: list[str] = []
     for raw_record in records:
         if not isinstance(raw_record, dict):

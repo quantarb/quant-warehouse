@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from datetime import timedelta
-from typing import Sequence
+from datetime import datetime
+from typing import Literal, Sequence
 
-import pandas as pd
+import polars as pl
 
 from quant_warehouse.catalog.store import CatalogStore
 from quant_warehouse.config import WarehouseConfig
@@ -67,15 +68,15 @@ class MarketPricesStore:
 
         raw = fetch_dataframe(section_name, symbol=symbol, provider=provider_name, **kwargs)
         frame = normalize_prices(raw, provider=provider_name, min_date=MIN_HISTORICAL_DATE)
-        if frame.empty and fetch_start and not full_refresh and end_date:
+        if frame.is_empty() and fetch_start and not full_refresh and end_date:
             state = self.catalog.get(symbol=symbol, section=section_name, provider=provider_name)
             if state is not None and state.max_date:
-                wider_start = pd.Timestamp(state.max_date) - timedelta(days=GAP_FILL_RETRY_LOOKBACK_DAYS)
+                wider_start = datetime.fromisoformat(state.max_date) - timedelta(days=GAP_FILL_RETRY_LOOKBACK_DAYS)
                 retry_kwargs = dict(kwargs)
                 retry_kwargs["start_date"] = wider_start.strftime("%Y-%m-%d")
                 raw = fetch_dataframe(section_name, symbol=symbol, provider=provider_name, **retry_kwargs)
                 frame = normalize_prices(raw, provider=provider_name, min_date=MIN_HISTORICAL_DATE)
-                if not frame.empty:
+                if not frame.is_empty():
                     fetch_start = retry_kwargs["start_date"]
 
         storage_symbol = symbol_provider_key(symbol, provider_name)
@@ -88,14 +89,14 @@ class MarketPricesStore:
             symbol=storage_symbol,
         )
         merged = merge_upsert(existing, frame)
-        if not merged.empty:
+        if not merged.is_empty():
             self.backend.write(library, storage_symbol, merged)
 
         min_date = None
         max_date = None
-        if not merged.empty:
-            min_date = merged.index.min().strftime("%Y-%m-%d")
-            max_date = merged.index.max().strftime("%Y-%m-%d")
+        if not merged.is_empty():
+            min_date = merged["date"].min().strftime("%Y-%m-%d")
+            max_date = merged["date"].max().strftime("%Y-%m-%d")
 
         self.catalog.upsert(
             symbol=symbol,
@@ -128,7 +129,8 @@ class MarketPricesStore:
         provider: str = "fmp",
         start: str | None = None,
         end: str | None = None,
-    ) -> pd.DataFrame:
+        output_format: Literal["polars"] = "polars",
+    ) -> pl.DataFrame:
         section_name = str(section).strip()
         library = MARKET_PRICE_SECTIONS.get(section_name)
         if library is None:
@@ -139,16 +141,17 @@ class MarketPricesStore:
             base_library=library,
             provider=provider.strip().lower(),
             symbol=storage_symbol,
+            output_format=output_format,
         )
-        if frame is None or frame.empty:
-            return pd.DataFrame()
+        if frame is None or frame.is_empty():
+            return pl.DataFrame()
         return _slice_dates(frame, start=start, end=end)
 
     def _gap_fill_start(self, symbol: str, section: str, provider: str) -> str | None:
         state = self.catalog.get(symbol=symbol, section=section, provider=provider)
         if state is None or not state.max_date:
             return None
-        resume = pd.Timestamp(state.max_date) - timedelta(days=GAP_OVERLAP_DAYS)
+        resume = datetime.fromisoformat(state.max_date) - timedelta(days=GAP_OVERLAP_DAYS)
         return resume.strftime("%Y-%m-%d")
 
 

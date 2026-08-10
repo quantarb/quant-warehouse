@@ -1,70 +1,65 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-
-import numpy as np
-import pandas as pd
+import math
+import polars as pl
 
 
 GREEK_COLUMNS: tuple[str, ...] = ("delta", "gamma", "theta", "vega", "rho")
 IV_COLUMNS: tuple[str, ...] = ("iv", "implied_volatility", "implied_vol")
+Frame = pl.DataFrame
 
 
 @dataclass(frozen=True)
 class OptionFeatureSet:
-    """Option market fields aligned one row per contract snapshot.
+    """Option market fields aligned one row per contract snapshot."""
 
-    Options use the asset-specific ``option-historical-price-eod`` family.
-    The provider endpoint remains separate so provenance and coverage are not
-    lost.
-    """
-
-    df: pd.DataFrame
+    df: Frame
     feature_cols: list[str]
     family_cols: dict[str, list[str]]
     family_name: str = "option-historical-price-eod"
     endpoint_name: str = "option_history_greeks_eod"
     source_asset_class: str = "option"
-    presence: pd.Series | None = None
+    presence: pl.Series | None = None
 
     def __post_init__(self) -> None:
-        if self.presence is None and not self.df.empty:
-            columns = [column for column in self.feature_cols if column in self.df.columns]
-            observed = self.df.loc[:, columns].notna().any(axis=1) if columns else pd.Series(False, index=self.df.index)
-            object.__setattr__(self, "presence", observed.astype(bool))
+        if self.presence is not None or _is_empty(self.df):
+            return
+        columns = [column for column in self.feature_cols if column in self.df.columns]
+        if isinstance(self.df, pl.DataFrame):
+            observed = self.df.select(
+                pl.any_horizontal([pl.col(column).is_not_null() for column in columns])
+                if columns
+                else pl.lit(False)
+            ).to_series()
+        object.__setattr__(self, "presence", observed.cast(bool))
 
 
 def filter_option_instrument_rows(
-    chain: pd.DataFrame,
+    chain: Frame,
     *,
     require_change_percent: bool = True,
-) -> pd.DataFrame:
-    """Filter executable option rows for downstream instrument modeling.
-
-    This runs after full-chain warehouse reads. ThetaData's reported
-    ``change_percent`` is used as the one-day movement availability signal so
-    a previous option-chain read is not required. The raw ``change`` field is
-    not used because it is commonly zero in stored EOD rows.
-    """
-    if chain is None or chain.empty:
-        return pd.DataFrame() if chain is None else chain.copy()
-    out = chain.copy()
-    required = {"bid", "ask"}
+) -> Frame:
+    """Filter executable option rows using Polars expressions when available."""
+    if chain is None:
+        return pl.DataFrame()
+    work = _to_polars(chain)
+    required = {"bid", "ask"} | ({"change_percent"} if require_change_percent else set())
+    if not required.issubset(work.columns):
+        return work.head(0)
+    valid = (
+        pl.col("bid").cast(pl.Float64, strict=False).gt(0)
+        & pl.col("ask").cast(pl.Float64, strict=False).gt(0)
+        & pl.col("ask").cast(pl.Float64, strict=False).ge(pl.col("bid").cast(pl.Float64, strict=False))
+    )
     if require_change_percent:
-        required.add("change_percent")
-    if not required.issubset(out.columns):
-        return out.iloc[0:0].copy()
-    bid = pd.to_numeric(out["bid"], errors="coerce")
-    ask = pd.to_numeric(out["ask"], errors="coerce")
-    valid = bid.gt(0) & ask.gt(0) & ask.ge(bid)
-    if require_change_percent:
-        change_percent = pd.to_numeric(out["change_percent"], errors="coerce")
-        valid &= change_percent.notna() & change_percent.ne(0)
-    return out.loc[valid].copy()
+        change = pl.col("change_percent").cast(pl.Float64, strict=False)
+        valid &= change.is_not_null() & change.ne(0)
+    return work.filter(valid)
 
 
 def build_option_contract_features(
-    chain: pd.DataFrame,
+    chain: Frame,
     *,
     underlying_price: float | None = None,
     target_dte: int | None = None,
@@ -72,150 +67,132 @@ def build_option_contract_features(
     dividend_yield: float = 0.0,
     compute_model_greeks: bool = False,
 ) -> OptionFeatureSet:
-    """Build contract, liquidity, Greek, and IV features from a ThetaData chain.
+    """Build contract, liquidity, Greek, and IV features natively in Polars.
 
-    The function preserves the vendor chain columns and appends reusable option
-    features. It does not price labels or select contracts.
+    The input and output are Polars frames.
     """
-
-    # Compatibility only: ThetaData Greeks/IV are provider data now. Missing
-    # values are left missing instead of being imputed with a pricing model.
     _ = risk_free_rate, dividend_yield, compute_model_greeks
+    if chain is None or _is_empty(chain):
+        return OptionFeatureSet(df=pl.DataFrame(), feature_cols=[], family_cols={})
 
-    if chain is None or chain.empty:
-        return OptionFeatureSet(df=pd.DataFrame(), feature_cols=[], family_cols={})
+    out = _to_polars(chain)
+    out = out.rename({column: str(column).strip() for column in out.columns})
+    date_exprs = []
+    for column in ("snapshot_date", "expiration"):
+        if column in out.columns:
+            source = pl.col(column)
+            if out.schema[column] == pl.String:
+                source = source.str.to_datetime(strict=False)
+            else:
+                source = source.cast(pl.Datetime, strict=False)
+            date_exprs.append(source.dt.replace_time_zone(None).dt.truncate("1d").alias(column))
+    if date_exprs:
+        out = out.with_columns(date_exprs)
+    numeric = [column for column in ("strike", "bid", "ask", "mid", "volume", "open_interest", *GREEK_COLUMNS, *IV_COLUMNS, "underlying_price") if column in out.columns]
+    if numeric:
+        out = out.with_columns([pl.col(column).cast(pl.Float64, strict=False).alias(column) for column in numeric])
 
-    out = chain.copy()
-    out.columns = [str(col).strip() for col in out.columns]
-    _ensure_datetime(out, "snapshot_date")
-    _ensure_datetime(out, "expiration")
-    for col in ("strike", "bid", "ask", "mid", "volume", "open_interest", *GREEK_COLUMNS, *IV_COLUMNS):
-        if col in out.columns:
-            out[col] = pd.to_numeric(out[col], errors="coerce")
-    if "underlying_price" in out.columns:
-        out["underlying_price"] = pd.to_numeric(out["underlying_price"], errors="coerce")
-        if underlying_price is None:
-            chain_spot = out["underlying_price"].replace([np.inf, -np.inf], np.nan).dropna()
-            chain_spot = chain_spot.loc[chain_spot > 0]
-            if not chain_spot.empty:
-                underlying_price = float(chain_spot.median())
-
-    if "mid" not in out.columns or out["mid"].isna().all():
+    if underlying_price is None and "underlying_price" in out.columns:
+        spot = out.filter(pl.col("underlying_price").is_finite() & pl.col("underlying_price").gt(0)).select(pl.col("underlying_price").median()).item()
+        underlying_price = float(spot) if spot is not None else None
+    if "mid" not in out.columns or out.select(pl.col("mid").is_null().all()).item():
         if {"bid", "ask"}.issubset(out.columns):
-            out["mid"] = (out["bid"] + out["ask"]) / 2.0
+            out = out.with_columns(((pl.col("bid") + pl.col("ask")) / 2.0).alias("mid"))
 
-    family_cols: dict[str, list[str]] = {}
-    contract_cols: list[str] = []
+    families: dict[str, list[str]] = {}
+    contract: list[str] = []
     if {"expiration", "snapshot_date"}.issubset(out.columns):
-        out["dte"] = (out["expiration"] - out["snapshot_date"]).dt.days
-        contract_cols.append("dte")
+        out = out.with_columns((pl.col("expiration") - pl.col("snapshot_date")).dt.total_days().cast(pl.Int64).alias("dte"))
+        contract.append("dte")
         if target_dte is not None:
-            out["dte_gap"] = (out["dte"] - int(target_dte)).abs()
-            contract_cols.append("dte_gap")
-    if underlying_price is not None and np.isfinite(float(underlying_price)) and float(underlying_price) > 0:
-        out["underlying_spot_entry"] = float(underlying_price)
-        if "strike" in out.columns:
-            out["moneyness"] = out["strike"] / float(underlying_price) - 1.0
-            out["abs_moneyness"] = out["moneyness"].abs()
-            contract_cols.extend(["moneyness", "abs_moneyness"])
-    _add_family(family_cols, "contract_static", out, contract_cols)
+            out = out.with_columns((pl.col("dte") - int(target_dte)).abs().alias("dte_gap"))
+            contract.append("dte_gap")
+    if underlying_price is not None and math.isfinite(underlying_price) and underlying_price > 0 and "strike" in out.columns:
+        out = out.with_columns([
+            pl.lit(float(underlying_price)).alias("underlying_spot_entry"),
+            (pl.col("strike") / float(underlying_price) - 1.0).alias("moneyness"),
+        ]).with_columns(pl.col("moneyness").abs().alias("abs_moneyness"))
+        contract.extend(["moneyness", "abs_moneyness"])
+    _add_family(families, "contract_static", contract)
 
-    liquidity_cols: list[str] = []
+    liquidity: list[str] = []
     if {"bid", "ask"}.issubset(out.columns):
-        out["spread"] = out["ask"] - out["bid"]
-        liquidity_cols.append("spread")
+        out = out.with_columns((pl.col("ask") - pl.col("bid")).alias("spread"))
+        liquidity.append("spread")
         if "mid" in out.columns:
-            out["spread_pct"] = out["spread"] / out["mid"].replace(0, np.nan)
-            liquidity_cols.append("spread_pct")
-    if "volume" in out.columns:
-        liquidity_cols.append("volume")
-    if "open_interest" in out.columns:
-        liquidity_cols.append("open_interest")
-    if "volume" in out.columns or "open_interest" in out.columns:
-        volume = out["volume"] if "volume" in out.columns else pd.Series(0.0, index=out.index)
-        open_interest = out["open_interest"] if "open_interest" in out.columns else pd.Series(0.0, index=out.index)
-        out["liquidity_score"] = volume.fillna(0.0) + open_interest.fillna(0.0) / 100.0
-        liquidity_cols.append("liquidity_score")
-    _add_family(family_cols, "liquidity", out, liquidity_cols)
+            out = out.with_columns(pl.when(pl.col("mid").eq(0)).then(None).otherwise(pl.col("spread") / pl.col("mid")).alias("spread_pct"))
+            liquidity.append("spread_pct")
+    for column in ("volume", "open_interest"):
+        if column in out.columns:
+            liquidity.append(column)
+    if {"volume", "open_interest"}.intersection(out.columns):
+        volume = pl.col("volume").fill_null(0.0) if "volume" in out.columns else pl.lit(0.0)
+        interest = pl.col("open_interest").fill_null(0.0) if "open_interest" in out.columns else pl.lit(0.0)
+        out = out.with_columns((volume + interest / 100.0).alias("liquidity_score"))
+        liquidity.append("liquidity_score")
+    _add_family(families, "liquidity", liquidity)
 
-    greek_cols: list[str] = []
-    for col in GREEK_COLUMNS:
-        if col in out.columns:
-            greek_cols.append(col)
-            out[f"abs_{col}"] = out[col].abs()
-            greek_cols.append(f"abs_{col}")
+    greeks: list[str] = []
+    greek_exprs = []
+    for column in GREEK_COLUMNS:
+        if column in out.columns:
+            greeks.extend([column, f"abs_{column}"])
+            greek_exprs.append(pl.col(column).abs().alias(f"abs_{column}"))
     if "theta" in out.columns and "mid" in out.columns:
-        out["theta_to_mid"] = out["theta"] / out["mid"].replace(0, np.nan)
-        greek_cols.append("theta_to_mid")
+        greek_exprs.append(pl.when(pl.col("mid").eq(0)).then(None).otherwise(pl.col("theta") / pl.col("mid")).alias("theta_to_mid"))
+        greeks.append("theta_to_mid")
     if "vega" in out.columns and "mid" in out.columns:
-        out["vega_to_mid"] = out["vega"] / out["mid"].replace(0, np.nan)
-        greek_cols.append("vega_to_mid")
-    _add_family(family_cols, "greeks", out, greek_cols)
+        greek_exprs.append(pl.when(pl.col("mid").eq(0)).then(None).otherwise(pl.col("vega") / pl.col("mid")).alias("vega_to_mid"))
+        greeks.append("vega_to_mid")
+    if greek_exprs:
+        out = out.with_columns(greek_exprs)
+    _add_family(families, "greeks", greeks)
 
-    iv_cols: list[str] = []
+    iv: list[str] = []
     iv_source = _first_present(out, IV_COLUMNS)
     if iv_source is not None:
         if iv_source != "iv":
-            out["iv"] = out[iv_source]
-        iv_cols.append("iv")
-        group_cols = [col for col in ("snapshot_date", "underlying_symbol", "option_type", "expiration") if col in out.columns]
-        if group_cols:
-            grouped = out.groupby(group_cols, dropna=False)["iv"]
-            out["iv_expiration_z"] = (out["iv"] - grouped.transform("mean")) / grouped.transform("std").replace(0, np.nan)
-            iv_cols.append("iv_expiration_z")
+            out = out.with_columns(pl.col(iv_source).alias("iv"))
+        iv.append("iv")
+        groups = [column for column in ("snapshot_date", "underlying_symbol", "option_type", "expiration") if column in out.columns]
+        if groups:
+            out = out.with_columns([
+                pl.col("iv").mean().over(groups).alias("_iv_mean"),
+                pl.col("iv").std().over(groups).alias("_iv_std"),
+            ]).with_columns(
+                ((pl.col("iv") - pl.col("_iv_mean")) / pl.when(pl.col("_iv_std").eq(0)).then(None).otherwise(pl.col("_iv_std"))).alias("iv_expiration_z")
+            ).drop(["_iv_mean", "_iv_std"])
+            iv.append("iv_expiration_z")
         if "dte" in out.columns:
-            out["iv_times_sqrt_dte"] = out["iv"] * np.sqrt(out["dte"].clip(lower=0) / 365.0)
-            iv_cols.append("iv_times_sqrt_dte")
-    _add_family(family_cols, "iv_surface", out, iv_cols)
-
-    feature_cols = [col for cols in family_cols.values() for col in cols]
-    return OptionFeatureSet(df=out, feature_cols=feature_cols, family_cols=family_cols)
-
-
-def option_ranker_feature_columns(frame: pd.DataFrame) -> list[str]:
-    """Return available numeric option features suitable for a selector model."""
-
-    preferred = [
-        "dte",
-        "dte_gap",
-        "moneyness",
-        "abs_moneyness",
-        "spread_pct",
-        "volume",
-        "open_interest",
-        "liquidity_score",
-        "delta",
-        "abs_delta",
-        "gamma",
-        "abs_gamma",
-        "theta",
-        "abs_theta",
-        "vega",
-        "abs_vega",
-        "rho",
-        "abs_rho",
-        "theta_to_mid",
-        "vega_to_mid",
-        "iv",
-        "iv_expiration_z",
-        "iv_times_sqrt_dte",
-    ]
-    return [col for col in preferred if col in frame.columns and pd.to_numeric(frame[col], errors="coerce").notna().any()]
+            out = out.with_columns((pl.col("iv") * (pl.col("dte").clip(lower_bound=0) / 365.0).sqrt()).alias("iv_times_sqrt_dte"))
+            iv.append("iv_times_sqrt_dte")
+    _add_family(families, "iv_surface", iv)
+    feature_cols = [column for columns in families.values() for column in columns]
+    return OptionFeatureSet(df=out, feature_cols=feature_cols, family_cols=families)
 
 
-def _ensure_datetime(frame: pd.DataFrame, col: str) -> None:
-    if col in frame.columns:
-        frame[col] = pd.to_datetime(frame[col], errors="coerce").dt.normalize()
+def option_ranker_feature_columns(frame: Frame) -> list[str]:
+    preferred = ["dte", "dte_gap", "moneyness", "abs_moneyness", "spread_pct", "volume", "open_interest", "liquidity_score", "delta", "abs_delta", "gamma", "abs_gamma", "theta", "abs_theta", "vega", "abs_vega", "rho", "abs_rho", "theta_to_mid", "vega_to_mid", "iv", "iv_expiration_z", "iv_times_sqrt_dte"]
+    if isinstance(frame, pl.DataFrame):
+        return [column for column in preferred if column in frame.columns and frame.select(pl.col(column).cast(pl.Float64, strict=False).is_not_null().any()).item()]
+    return [column for column in preferred if column in frame.columns and frame.select(pl.col(column).cast(pl.Float64, strict=False).is_not_null().any()).item()]
 
 
-def _add_family(families: dict[str, list[str]], name: str, frame: pd.DataFrame, cols: list[str]) -> None:
-    usable = [col for col in cols if col in frame.columns]
-    if usable:
-        families[name] = list(dict.fromkeys(usable))
+def _to_polars(frame: Frame) -> pl.DataFrame:
+    return frame
 
 
-def _first_present(frame: pd.DataFrame, columns: tuple[str, ...]) -> str | None:
-    for col in columns:
-        if col in frame.columns and frame[col].notna().any():
-            return col
+def _is_empty(frame: Frame | None) -> bool:
+    return frame is None or frame.is_empty()
+
+
+def _add_family(families: dict[str, list[str]], name: str, cols: list[str]) -> None:
+    if cols:
+        families[name] = list(dict.fromkeys(cols))
+
+
+def _first_present(frame: pl.DataFrame, columns: tuple[str, ...]) -> str | None:
+    for column in columns:
+        if column in frame.columns and frame.select(pl.col(column).is_not_null().any()).item():
+            return column
     return None

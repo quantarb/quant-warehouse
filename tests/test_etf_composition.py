@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 
-import pandas as pd
+import polars as pl
 
 from quant_warehouse.ingest.equity_calendar_fetch import normalize_equity_calendar_frame
 from quant_warehouse.ingest.normalize import (
@@ -13,7 +13,7 @@ from quant_warehouse.ingest.normalize import (
 
 
 def test_normalize_etf_holdings_uses_updated_as_of_index():
-    raw = pd.DataFrame(
+    raw = pl.DataFrame(
         {
             "symbol": ["NVDA", "AAPL"],
             "name": ["NVIDIA", "Apple"],
@@ -22,27 +22,26 @@ def test_normalize_etf_holdings_uses_updated_as_of_index():
         }
     )
     out = normalize_etf_composition_frame(raw, section="etf_holdings")
-    assert isinstance(out.index, pd.DatetimeIndex)
-    assert out.index.name == "as_of"
+    assert out.schema["as_of"] == pl.Datetime
     assert len(out) == 2
 
 
 def test_normalize_etf_sectors_stamps_as_of_index():
-    raw = pd.DataFrame({"symbol": ["SPY", "SPY"], "sector": ["Technology", "Healthcare"], "weight": [0.4, 0.2]})
+    raw = pl.DataFrame({"symbol": ["SPY", "SPY"], "sector": ["Technology", "Healthcare"], "weight": [0.4, 0.2]})
     out = normalize_etf_composition_frame(raw, section="etf_sectors")
-    assert isinstance(out.index, pd.DatetimeIndex)
+    assert out.schema["as_of"] == pl.Datetime
     assert len(out) == 2
 
 
 def test_normalize_management_stamps_as_of_index():
-    raw = pd.DataFrame({"title": ["CEO", "CFO"], "name": ["Tim", "Luca"], "pay": [1, 2]})
+    raw = pl.DataFrame({"title": ["CEO", "CFO"], "name": ["Tim", "Luca"], "pay": [1, 2]})
     out = normalize_dated_snapshot_frame(raw, section="management")
-    assert isinstance(out.index, pd.DatetimeIndex)
+    assert out.schema["as_of"] == pl.Datetime
     assert len(out) == 2
 
 
 def test_coerce_object_dates_converts_python_dates():
-    raw = pd.DataFrame(
+    raw = pl.DataFrame(
         {
             "report_date": ["2024-01-31"],
             "symbol": ["AAPL"],
@@ -50,11 +49,11 @@ def test_coerce_object_dates_converts_python_dates():
         }
     )
     out = coerce_object_dates(raw)
-    assert pd.api.types.is_datetime64_any_dtype(out["last_updated"])
+    assert out.schema["last_updated"] == pl.Datetime
 
 
 def test_normalize_equity_calendar_dividend_coerces_record_date():
-    raw = pd.DataFrame(
+    raw = pl.DataFrame(
         {
             "ex_dividend_date": ["2024-01-31"],
             "symbol": ["AAPL"],
@@ -63,4 +62,4 @@ def test_normalize_equity_calendar_dividend_coerces_record_date():
     )
     out = normalize_equity_calendar_frame(raw, section="equity_calendar_dividend")
     assert len(out) == 1
-    assert pd.api.types.is_datetime64_any_dtype(out["record_date"])
+    assert out.schema["record_date"] in {pl.Date, pl.Datetime}

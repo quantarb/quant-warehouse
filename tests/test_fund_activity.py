@@ -1,4 +1,4 @@
-import pandas as pd
+import polars as pl
 
 from quant_warehouse.research_tools.fund_activity import (
     build_fund_holding_activity_events,
@@ -8,7 +8,7 @@ from quant_warehouse.research_tools.fund_activity import (
 
 
 def test_fund_holding_activity_emits_buy_add_reduce_and_exit():
-    holdings = pd.DataFrame(
+    holdings = pl.DataFrame(
         [
             {"fund_symbol": "F1", "symbol": "AAA", "date": "2024-01-01", "shares": 10},
             {"fund_symbol": "F1", "symbol": "AAA", "date": "2024-04-01", "shares": 15},
@@ -26,7 +26,7 @@ def test_fund_holding_activity_emits_buy_add_reduce_and_exit():
 
 
 def test_institutional_activity_uses_aggregate_position_counts():
-    summary = pd.DataFrame(
+    summary = pl.DataFrame(
         [{
             "symbol": "AAA",
             "date": "2024-06-30",
@@ -45,12 +45,12 @@ def test_institutional_activity_uses_aggregate_position_counts():
 
 
 def test_holder_activity_preserves_holder_identity_as_event_metadata():
-    analytics = pd.DataFrame([{
+    analytics = pl.DataFrame([{
         "symbol": "AAA", "date": "2024-09-30", "cik": "0001234567",
         "investorName": "Example Manager", "isNew": True,
         "isSoldOut": False, "changeInSharesNumber": 100,
     }])
     events = build_holder_activity_events(analytics)
     assert set(events["target_family"]) == {"holder_activity.buy"}
-    assert events.iloc[0]["holder_id"] == "0001234567"
-    assert events.iloc[0]["holder_name"] == "Example Manager"
+    assert events[0, "holder_id"] == "0001234567"
+    assert events[0, "holder_name"] == "Example Manager"

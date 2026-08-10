@@ -1,6 +1,7 @@
 from pathlib import Path
+from datetime import datetime
 
-import pandas as pd
+import polars as pl
 
 from quant_warehouse.config import WarehouseConfig
 from quant_warehouse.warehouse.backend import ArcticBackend, ProviderRoutingBackend, open_backend
@@ -15,11 +16,8 @@ def _config(tmp_path: Path) -> WarehouseConfig:
     )
 
 
-def _sample_frame() -> pd.DataFrame:
-    return pd.DataFrame(
-        {"close": [100.0, 101.0], "volume": [1000, 1100]},
-        index=pd.to_datetime(["2024-01-01", "2024-01-02"]),
-    )
+def _sample_frame() -> pl.DataFrame:
+    return pl.DataFrame({"date": [datetime(2024, 1, 1), datetime(2024, 1, 2)], "close": [100.0, 101.0], "volume": [1000, 1100]})
 
 
 def test_arctic_backend_roundtrip(tmp_path: Path):
@@ -29,7 +27,7 @@ def test_arctic_backend_roundtrip(tmp_path: Path):
     out = backend.read("prices", "AAPL__yfinance")
     assert out is not None
     assert len(out) == 2
-    assert out.loc["2024-01-02", "close"] == 101.0
+    assert out.filter(pl.col("date") == datetime(2024, 1, 2))["close"][0] == 101.0
 
 
 def test_open_backend_uses_arctic(tmp_path: Path, monkeypatch):

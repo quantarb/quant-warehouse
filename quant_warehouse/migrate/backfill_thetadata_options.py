@@ -1,14 +1,15 @@
 from __future__ import annotations
 
+import polars as pl
+
 import json
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import date as date_type, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Literal, Mapping, MutableSet, Sequence
 
-import pandas as pd
 
 from quant_warehouse.config import WarehouseConfig
 from quant_warehouse.platforms.data_providers.thetadata.options import (
@@ -33,13 +34,20 @@ MARKET_CAP_TIERS: dict[str, float] = {
     "10b": 10_000_000_000,
 }
 
+def _day(value: object) -> datetime:
+    if isinstance(value, datetime):
+        return value.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=None)
+    if isinstance(value, date_type):
+        return datetime.combine(value, datetime.min.time())
+    return datetime.fromisoformat(str(value)[:10])
+
 
 def fmp_trading_days_for_year(
     year: int,
     *,
     warehouse: Warehouse | None = None,
     calendar_symbol: str = "SPY",
-) -> tuple[pd.Timestamp, ...]:
+) -> tuple[datetime, ...]:
     """Return distinct FMP price dates for a calendar year.
 
     FMP's stored daily price panel is the source of truth for valid US market
@@ -50,13 +58,13 @@ def fmp_trading_days_for_year(
     start = f"{int(year):04d}-01-01"
     end = f"{int(year):04d}-12-31"
     frame = warehouse.read_prices(calendar_symbol, provider="fmp", start=start, end=end)
-    if frame is None or frame.empty:
+    if frame is None or frame.is_empty():
         raise ValueError(f"FMP price history is missing for calendar symbol {calendar_symbol!r} in {year}")
     if "date" in frame.columns:
-        dates = pd.to_datetime(frame["date"], errors="coerce")
+        dates = frame["date"].cast(pl.Datetime, strict=False)
     else:
-        dates = pd.to_datetime(frame.index, errors="coerce")
-    result = tuple(sorted({pd.Timestamp(value).normalize() for value in dates.dropna()}))
+        raise ValueError("FMP price history must contain an explicit date column")
+    result = tuple(sorted({value.replace(hour=0, minute=0, second=0, microsecond=0) for value in dates.drop_nulls().to_list()}))
     if not result:
         raise ValueError(f"FMP price history contains no valid dates for {calendar_symbol!r} in {year}")
     return result
@@ -159,21 +167,24 @@ def resolve_backfill_symbols(
     return resolved
 
 
-def _business_days(start: pd.Timestamp, end: pd.Timestamp) -> list[pd.Timestamp]:
-    return [ts.normalize() for ts in pd.date_range(start, end, freq="B")]
+def _business_days(start: datetime, end: datetime) -> list[datetime]:
+    current = start.replace(hour=0, minute=0, second=0, microsecond=0)
+    final = end.replace(hour=0, minute=0, second=0, microsecond=0)
+    return [current + timedelta(days=offset) for offset in range((final - current).days + 1)
+            if (current + timedelta(days=offset)).weekday() < 5]
 
 
-def _oracle_trade_endpoint_dates(start: pd.Timestamp, end: pd.Timestamp) -> list[pd.Timestamp]:
-    dates = [pd.Timestamp(start).normalize(), pd.Timestamp(end).normalize()]
+def _oracle_trade_endpoint_dates(start: datetime, end: datetime) -> list[datetime]:
+    dates = [start.replace(hour=0, minute=0, second=0, microsecond=0), end.replace(hour=0, minute=0, second=0, microsecond=0)]
     return list(dict.fromkeys(dates))
 
 
 def normalize_oracle_trade_windows(
-    trades: Sequence[Mapping[str, Any]] | pd.DataFrame,
+    trades: Sequence[Mapping[str, Any]] | pl.DataFrame,
     *,
     max_trades: int | None = None,
     symbols: Sequence[str] | None = None,
-) -> pd.DataFrame:
+) -> pl.DataFrame:
     """Return unique oracle trade endpoint windows sorted newest entry first.
 
     The ThetaData backfill for option ML does not need every date for every
@@ -181,12 +192,12 @@ def normalize_oracle_trade_windows(
     once because the stored chain is full-chain by symbol/date.
     """
 
-    if isinstance(trades, pd.DataFrame):
-        frame = trades.copy()
+    if isinstance(trades, pl.DataFrame):
+        frame = trades.clone()
     else:
-        frame = pd.DataFrame([dict(row) for row in trades])
-    if frame.empty:
-        return pd.DataFrame(columns=["trade_id", "symbol", "entry_date", "exit_date"])
+        frame = pl.DataFrame([dict(row) for row in trades])
+    if frame.is_empty():
+        return pl.DataFrame({column: [] for column in ["trade_id", "symbol", "entry_date", "exit_date"]})
 
     rename_map = {}
     if "entry_date" not in frame.columns:
@@ -202,39 +213,39 @@ def normalize_oracle_trade_windows(
     if "symbol" not in frame.columns and "underlying_symbol" in frame.columns:
         rename_map["underlying_symbol"] = "symbol"
     if rename_map:
-        frame = frame.rename(columns=rename_map)
+        frame = frame.rename(rename_map)
 
     required = {"symbol", "entry_date", "exit_date"}
     missing = required.difference(frame.columns)
     if missing:
         raise KeyError(f"oracle trades missing required columns: {sorted(missing)}")
 
-    out = frame.copy()
-    out["symbol"] = out["symbol"].astype(str).str.strip().str.upper()
-    out["entry_date"] = pd.to_datetime(out["entry_date"], errors="coerce").dt.normalize()
-    out["exit_date"] = pd.to_datetime(out["exit_date"], errors="coerce").dt.normalize()
-    out = out.dropna(subset=["symbol", "entry_date", "exit_date"])
-    out = out.loc[out["symbol"].ne("") & out["exit_date"].ge(out["entry_date"])].copy()
+    out = frame.with_columns(
+        pl.col("symbol").cast(pl.String).str.strip_chars().str.to_uppercase(),
+        (pl.col("entry_date").str.to_datetime(strict=False, time_zone="UTC") if frame.schema["entry_date"] == pl.String else pl.col("entry_date").cast(pl.Datetime, strict=False)).dt.replace_time_zone(None).dt.truncate("1d"),
+        (pl.col("exit_date").str.to_datetime(strict=False, time_zone="UTC") if frame.schema["exit_date"] == pl.String else pl.col("exit_date").cast(pl.Datetime, strict=False)).dt.replace_time_zone(None).dt.truncate("1d"),
+    ).drop_nulls(["symbol", "entry_date", "exit_date"]).filter(
+        (pl.col("symbol") != "") & (pl.col("exit_date") >= pl.col("entry_date"))
+    )
     if symbols:
         wanted = {str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()}
-        out = out.loc[out["symbol"].isin(wanted)].copy()
+        out = out.filter(pl.col("symbol").is_in(list(wanted)))
     if "trade_id" not in out.columns:
-        out["trade_id"] = [
-            f"{row.symbol}|{row.entry_date.date()}|{row.exit_date.date()}|{idx}"
-            for idx, row in enumerate(out.itertuples(index=False), start=1)
-        ]
-    out["trade_id"] = out["trade_id"].astype(str)
-    out = out.sort_values(["entry_date", "symbol", "trade_id"], ascending=[False, True, True], kind="stable")
-    out = out.drop_duplicates(subset=["symbol", "entry_date", "exit_date"], keep="first")
+        out = out.with_row_index("_idx").with_columns(
+            (pl.col("symbol") + "|" + pl.col("entry_date").dt.strftime("%Y-%m-%d") + "|" + pl.col("exit_date").dt.strftime("%Y-%m-%d") + "|" + pl.col("_idx").cast(pl.String)).alias("trade_id")
+        ).drop("_idx")
+    out = (out.with_columns(pl.col("trade_id").cast(pl.String))
+           .unique(["symbol", "entry_date", "exit_date"], keep="first")
+           .sort(["entry_date", "symbol", "trade_id"], descending=[True, False, False]))
     if max_trades is not None:
         out = out.head(max(0, int(max_trades)))
-    return out.reset_index(drop=True)
+    return out
 
 
 def _options_range_cached(
     symbol: str,
-    start_date: pd.Timestamp,
-    end_date: pd.Timestamp,
+    start_date: datetime,
+    end_date: datetime,
 ) -> bool:
     return option_chain_range_cached(
         symbol,
@@ -244,14 +255,15 @@ def _options_range_cached(
     )
 
 
-def _cached_endpoint_dates_by_symbol(trade_windows: pd.DataFrame) -> dict[str, set[pd.Timestamp]]:
-    cached: dict[str, set[pd.Timestamp]] = {}
-    if trade_windows.empty:
+def _cached_endpoint_dates_by_symbol(trade_windows: pl.DataFrame) -> dict[str, set[datetime]]:
+    cached: dict[str, set[datetime]] = {}
+    if trade_windows.is_empty():
         return cached
-    requested_ranges: dict[str, tuple[pd.Timestamp, pd.Timestamp]] = {}
-    for symbol, group in trade_windows.groupby("symbol", sort=True):
-        endpoints = pd.concat([group["entry_date"], group["exit_date"]], ignore_index=True)
-        dates = sorted({pd.Timestamp(value).normalize() for value in endpoints.dropna()})
+    requested_ranges: dict[str, tuple[datetime, datetime]] = {}
+    for symbol_key, group in trade_windows.group_by("symbol", maintain_order=True):
+        symbol = symbol_key[0] if isinstance(symbol_key, tuple) else symbol_key
+        endpoints = pl.concat([group["entry_date"], group["exit_date"]])
+        dates = sorted({value.replace(hour=0, minute=0, second=0, microsecond=0) for value in endpoints.drop_nulls().to_list()})
         business_dates = [ts for ts in dates if _business_days(ts, ts)]
         if not business_dates:
             cached[str(symbol).upper()] = set()
@@ -267,21 +279,21 @@ def _cached_endpoint_dates_by_symbol(trade_windows: pd.DataFrame) -> dict[str, s
             required_columns=THETADATA_RICH_OPTION_COLUMNS,
         )
         for symbol in requested_ranges:
-            cached[symbol] = {pd.Timestamp(value).normalize() for value in bulk.get(symbol, (set(), 0))[0]}
+            cached[symbol] = {value.replace(hour=0, minute=0, second=0, microsecond=0) if isinstance(value, datetime) else datetime.fromisoformat(str(value)[:10]) for value in bulk.get(symbol, (set(), 0))[0]}
     return cached
 
 
 def _endpoint_is_cached(
     symbol: str,
-    snapshot_date: pd.Timestamp,
-    cached_dates_by_symbol: Mapping[str, set[pd.Timestamp]],
+    snapshot_date: datetime,
+    cached_dates_by_symbol: Mapping[str, set[datetime]],
     *,
     skip_existing: bool,
     overwrite: bool,
 ) -> bool:
     if not skip_existing or overwrite:
         return False
-    normalized = pd.Timestamp(snapshot_date).normalize()
+    normalized = snapshot_date.replace(hour=0, minute=0, second=0, microsecond=0)
     if not _business_days(normalized, normalized):
         return True
     return normalized in cached_dates_by_symbol.get(str(symbol).upper(), set())
@@ -340,8 +352,8 @@ def backfill_thetadata_options(
     """Download full daily ThetaData EOD option chains for FMP underlyings in Arctic."""
 
     warehouse = warehouse or Warehouse(config=config)
-    start = pd.Timestamp(start_date).normalize()
-    end = pd.Timestamp(end_date or datetime.now(timezone.utc).date()).normalize()
+    start = _day(start_date)
+    end = _day(end_date or datetime.now(timezone.utc).date())
     if end < start:
         raise ValueError(f"end_date {end.date()} must be on or after start_date {start.date()}")
 
@@ -465,7 +477,7 @@ def backfill_thetadata_options(
 
 
 def backfill_thetadata_options_for_oracle_trades(
-    trades: Sequence[Mapping[str, Any]] | pd.DataFrame,
+    trades: Sequence[Mapping[str, Any]] | pl.DataFrame,
     *,
     warehouse: Warehouse | None = None,
     config: WarehouseConfig | None = None,
@@ -476,7 +488,7 @@ def backfill_thetadata_options_for_oracle_trades(
     skip_existing: bool = True,
     overwrite: bool = False,
     request_sleep: float = 1.0,
-    trading_days: Sequence[date | str | pd.Timestamp] | None = None,
+    trading_days: Sequence[date_type | str | datetime] | None = None,
     empty_symbol_probe_limit: int = 1,
     probed_symbols: MutableSet[str] | None = None,
     progress_logger: ProgressLogger = None,
@@ -494,23 +506,23 @@ def backfill_thetadata_options_for_oracle_trades(
     cached_dates_by_symbol = (
         _cached_endpoint_dates_by_symbol(trade_windows) if skip_existing and not overwrite else {}
     )
-    today = pd.Timestamp(datetime.now(timezone.utc).date()).normalize()
+    today = _day(datetime.now(timezone.utc).date())
 
-    records = trade_windows.to_dict("records")
-    endpoint_keys: list[tuple[str, pd.Timestamp]] = []
+    records = trade_windows.to_dicts()
+    endpoint_keys: list[tuple[str, datetime]] = []
     valid_trading_days = (
-        {pd.Timestamp(value).normalize() for value in trading_days}
+        {_day(value) for value in trading_days}
         if trading_days is not None
         else None
     )
     for trade in records:
         symbol = str(trade["symbol"]).upper()
-        start = pd.Timestamp(trade["entry_date"]).normalize()
-        end = pd.Timestamp(trade["exit_date"]).normalize()
+        start = _day(trade["entry_date"])
+        end = _day(trade["exit_date"])
         for snapshot_date in _oracle_trade_endpoint_dates(start, end):
-            if valid_trading_days is not None and pd.Timestamp(snapshot_date).normalize() not in valid_trading_days:
+            if valid_trading_days is not None and _day(snapshot_date) not in valid_trading_days:
                 continue
-            endpoint_keys.append((symbol, pd.Timestamp(snapshot_date).normalize()))
+            endpoint_keys.append((symbol, _day(snapshot_date)))
     unique_endpoint_keys = list(dict.fromkeys(endpoint_keys))
     if callable(progress_logger):
         progress_logger(
@@ -518,7 +530,7 @@ def backfill_thetadata_options_for_oracle_trades(
             f"unique_endpoint_dates={len(unique_endpoint_keys):,} order=trade_entry_desc"
         )
 
-    endpoint_results: dict[tuple[str, pd.Timestamp], dict[str, object]] = {}
+    endpoint_results: dict[tuple[str, datetime], dict[str, object]] = {}
     for symbol, snapshot_date in unique_endpoint_keys:
         cached = _endpoint_is_cached(
             symbol,
@@ -705,8 +717,8 @@ def backfill_thetadata_options_for_oracle_trades(
     results: list[dict[str, object]] = []
     for index, trade in enumerate(records, start=1):
         symbol = str(trade["symbol"]).upper()
-        start = pd.Timestamp(trade["entry_date"]).normalize()
-        end = pd.Timestamp(trade["exit_date"]).normalize()
+        start = _day(trade["entry_date"])
+        end = _day(trade["exit_date"])
         row: dict[str, object] = {
             "index": index,
             "total": total,
@@ -717,9 +729,9 @@ def backfill_thetadata_options_for_oracle_trades(
             "snapshot_mode": "entry_exit",
         }
         snapshot_dates = [
-            pd.Timestamp(ts).normalize()
+            _day(ts)
             for ts in _oracle_trade_endpoint_dates(start, end)
-            if valid_trading_days is None or pd.Timestamp(ts).normalize() in valid_trading_days
+            if valid_trading_days is None or _day(ts) in valid_trading_days
         ]
         row["snapshot_dates"] = [ts.date().isoformat() for ts in snapshot_dates]
         date_results = []
@@ -778,7 +790,7 @@ def backfill_thetadata_options_for_oracle_trades(
         "trade_windows_completed": len(completed),
         "trade_windows_skipped": len(skipped),
         "trade_windows_failed": len(failed),
-        "symbols_requested": int(trade_windows["symbol"].nunique()) if not trade_windows.empty else 0,
+        "symbols_requested": int(trade_windows["symbol"].n_unique()) if not trade_windows.is_empty() else 0,
         "max_trades": max_trades,
         "download_spec": {
             "endpoint": THETADATA_OPTION_HISTORY_ENDPOINT,
@@ -806,14 +818,14 @@ def write_backfill_log(summary: dict[str, object], *, log_path: str | Path) -> P
 
 
 def backfill_thetadata_options_for_oracle_trade_ranges(
-    trades: Sequence[Mapping[str, Any]] | pd.DataFrame,
+    trades: Sequence[Mapping[str, Any]] | pl.DataFrame,
     *,
     mode: Literal["oracle_entry_exit", "all"] = "all",
     warehouse: Warehouse | None = None,
     config: WarehouseConfig | None = None,
     symbols: Sequence[str] | None = None,
     max_trades: int | None = None,
-    trading_days: Sequence[date | str | pd.Timestamp] | None = None,
+    trading_days: Sequence[date_type | str | datetime] | None = None,
     skip_existing: bool = True,
     overwrite: bool = False,
     request_sleep: float = 1.0,
@@ -853,27 +865,27 @@ def backfill_thetadata_options_for_oracle_trade_ranges(
 
     warehouse = warehouse or Warehouse(config=config)
     windows = normalize_oracle_trade_windows(trades, max_trades=max_trades, symbols=symbols)
-    if windows.empty:
+    if windows.is_empty():
         return {"status": "empty_trades", "dates_requested": 0, "dates_downloaded": 0}
 
-    today = pd.Timestamp(datetime.now(timezone.utc).date()).normalize()
+    today = _day(datetime.now(timezone.utc).date())
     valid_trading_days = (
-        {pd.Timestamp(value).normalize() for value in trading_days}
+        {_day(value) for value in trading_days}
         if trading_days is not None
         else None
     )
-    keys: set[tuple[str, pd.Timestamp]] = set()
-    for row in windows.to_dict("records"):
+    keys: set[tuple[str, datetime]] = set()
+    for row in windows.to_dicts():
         symbol = str(row["symbol"]).upper()
-        start = pd.Timestamp(row["entry_date"]).normalize()
-        end = pd.Timestamp(row["exit_date"]).normalize()
+        start = _day(row["entry_date"])
+        end = _day(row["exit_date"])
         for date in _business_days(start, end):
             if (valid_trading_days is None or date in valid_trading_days) and date < today:
                 keys.add((symbol, date))
 
-    cached_by_symbol: dict[str, set[pd.Timestamp]] = {}
+    cached_by_symbol: dict[str, set[datetime]] = {}
     if skip_existing and not overwrite:
-        requested_dates_by_symbol: dict[str, list[pd.Timestamp]] = {}
+        requested_dates_by_symbol: dict[str, list[datetime]] = {}
         for symbol, date in keys:
             requested_dates_by_symbol.setdefault(symbol, []).append(date)
         if requested_dates_by_symbol:

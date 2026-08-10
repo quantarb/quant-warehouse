@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-import pandas as pd
+import polars as pl
+from datetime import datetime, timedelta
 
 from quant_warehouse.platforms.data_providers.fmp.target_engineering import (
     solve_optimal_trades_generic,
@@ -9,9 +10,9 @@ from quant_warehouse.platforms.data_providers.fmp.target_engineering import (
 from quant_warehouse.platforms.data_providers.fmp.target_engineering.strategy_solver import solve_side_trades_by_frequency_batched_multi_k
 
 
-def _frame(values: list[tuple[float, float]]) -> pd.DataFrame:
-    index = pd.date_range("2024-01-01", periods=len(values), freq="D")
-    return pd.DataFrame(values, columns=["low", "high"], index=index)
+def _frame(values: list[tuple[float, float]]) -> pl.DataFrame:
+    dates = pl.Series("date", [datetime(2024, 1, 1) + timedelta(days=i) for i in range(len(values))])
+    return pl.DataFrame(values, schema=["low", "high"]).with_columns(dates.alias("date"))
 
 
 def test_solve_optimal_trades_generic_long() -> None:
@@ -19,9 +20,9 @@ def test_solve_optimal_trades_generic_long() -> None:
 
     trades = solve_optimal_trades_generic(df, k=2, side="long", min_profit_pct=0.05)
 
-    assert [(t.entry_row.name, t.exit_row.name, t.entry_price, t.exit_price) for t in trades] == [
-        (pd.Timestamp("2024-01-02"), pd.Timestamp("2024-01-03"), 9.0, 12.0),
-        (pd.Timestamp("2024-01-04"), pd.Timestamp("2024-01-05"), 8.0, 15.0),
+    assert [(t.entry_row["date"], t.exit_row["date"], t.entry_price, t.exit_price) for t in trades] == [
+        (datetime(2024, 1, 2), datetime(2024, 1, 3), 9.0, 12.0),
+        (datetime(2024, 1, 4), datetime(2024, 1, 5), 8.0, 15.0),
     ]
     assert [round(t.profit, 6) for t in trades] == [3.0, 7.0]
 
@@ -34,23 +35,23 @@ def test_solve_optimal_trades_generic_short() -> None:
     assert len(trades) == 1
     trade = trades[0]
     assert trade.side == "short"
-    assert trade.entry_row.name == pd.Timestamp("2024-01-03")
-    assert trade.exit_row.name == pd.Timestamp("2024-01-04")
+    assert trade.entry_row["date"] == datetime(2024, 1, 3)
+    assert trade.exit_row["date"] == datetime(2024, 1, 4)
     assert trade.entry_price == 12.0
     assert trade.exit_price == 7.0
     assert trade.profit == 5.0
 
 
 def test_solve_trades_by_frequency_accepts_date_column() -> None:
-    df = _frame([(10, 11), (8, 9), (12, 13), (7, 8), (15, 16)]).reset_index(names="date")
+    df = _frame([(10, 11), (8, 9), (12, 13), (7, 8), (15, 16)])
 
     trades = solve_trades_by_frequency(df, k=1, freq="ME", side="long", min_profit_pct=0.05)
 
     assert len(trades) == 1
     assert trades[0]["side"] == "long"
-    assert trades[0]["entry_row"].name == pd.Timestamp("2024-01-04")
-    assert trades[0]["exit_row"].name == pd.Timestamp("2024-01-05")
-    assert trades[0]["period_label"] == "M:2024-01-31"
+    assert trades[0]["entry_row"]["date"] == datetime(2024, 1, 4)
+    assert trades[0]["exit_row"]["date"] == datetime(2024, 1, 5)
+    assert trades[0]["period_label"] == "M:2024-01-01"
 
 
 def test_solve_side_trades_by_frequency_batched_multi_k_solves_sides_independently() -> None:
@@ -68,6 +69,6 @@ def test_solve_side_trades_by_frequency_batched_multi_k_solves_sides_independent
 
     assert set(cpu) == {1, 2}
     assert set(cpu[1]) == {"AAA", "BBB"}
-    assert all(row["period_label"] == "M:2024-01-31" for rows in cpu[2].values() for row in rows)
+    assert all(row["period_label"] == "M:2024-01-01" for rows in cpu[2].values() for row in rows)
     assert sum(len(rows) for rows in cpu[2].values()) >= sum(len(rows) for rows in cpu[1].values())
     assert {row["side"] for rows in cpu[2].values() for row in rows} == {"long", "short"}

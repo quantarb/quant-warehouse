@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import polars as pl
+
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Sequence
 
-import pandas as pd
 
 from quant_warehouse.catalog.listing_date import equity_historical_floor
 from quant_warehouse.catalog.store import CatalogStore, SectionState
@@ -54,10 +55,15 @@ PANEL_SECTION_DIMENSIONS: dict[str, str] = {
 
 def expected_latest_price_date(*, now: datetime | None = None) -> date:
     """Latest date for which US equity prices are expected to be complete."""
-    now_et = pd.Timestamp(now or datetime.now(timezone.utc)).tz_convert("America/New_York")
+    from zoneinfo import ZoneInfo
+
+    now_et = (now or datetime.now(timezone.utc)).astimezone(ZoneInfo("America/New_York"))
     if now_et.weekday() < 5 and now_et.hour >= 17:
         return now_et.date()
-    return (now_et.normalize() - pd.offsets.BDay(1)).date()
+    previous = now_et.date() - timedelta(days=1)
+    while previous.weekday() >= 5:
+        previous -= timedelta(days=1)
+    return previous
 
 
 def catalog_price_max_date(
@@ -92,7 +98,7 @@ def _parse_date(value: Any) -> date | None:
     if value in (None, ""):
         return None
     try:
-        return pd.Timestamp(value).date()
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).date()
     except (TypeError, ValueError):
         return None
 
@@ -101,12 +107,8 @@ def _parse_timestamp(value: Any) -> datetime | None:
     if value in (None, ""):
         return None
     try:
-        parsed = pd.Timestamp(value)
-        if pd.isna(parsed):
-            return None
-        if parsed.tzinfo is None:
-            return parsed.to_pydatetime().replace(tzinfo=timezone.utc)
-        return parsed.to_pydatetime()
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
     except (TypeError, ValueError):
         return None
 
@@ -181,7 +183,7 @@ def historical_fetch_plan(
     section = str(section).strip()
     target_end = target_end_date or expected_latest_price_date()
     target_start = (
-        pd.Timestamp(MIN_HISTORICAL_DATE).date()
+        date.fromisoformat(MIN_HISTORICAL_DATE)
         if is_etf
         else _equity_history_start_date(catalog, symbol)
     )
@@ -505,7 +507,7 @@ def macro_refresh_needs_update(
 
 
 def _min_historical_floor() -> date:
-    return pd.Timestamp(MIN_HISTORICAL_DATE).date()
+    return date.fromisoformat(MIN_HISTORICAL_DATE)
 
 
 def _is_below_min_historical_date(value: Any) -> bool:

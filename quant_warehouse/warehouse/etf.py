@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from datetime import timedelta
-from typing import Sequence
+from datetime import datetime, timedelta
+from typing import Literal, Sequence
 
-import pandas as pd
+import polars as pl
 
 from quant_warehouse.catalog.store import CatalogStore, SymbolProfile
 from quant_warehouse.config import WarehouseConfig
@@ -72,17 +72,15 @@ class EtfStore:
 
             raw = fetch_dataframe("etf_prices", symbol=symbol, provider=provider, **kwargs)
             frame = normalize_prices(raw, provider=provider)
-            if frame.empty and fetch_start and not full_refresh and end_date:
+            if frame.is_empty() and fetch_start and not full_refresh and end_date:
                 state = self.catalog.get(symbol=symbol, section=ETF_PRICES_SECTION, provider=provider)
                 if state is not None and state.max_date:
-                    from datetime import timedelta
-
-                    wider_start = pd.Timestamp(state.max_date) - timedelta(days=30)
+                    wider_start = datetime.fromisoformat(state.max_date) - timedelta(days=30)
                     retry_kwargs = dict(kwargs)
                     retry_kwargs["start_date"] = wider_start.strftime("%Y-%m-%d")
                     raw = fetch_dataframe("etf_prices", symbol=symbol, provider=provider, **retry_kwargs)
                     frame = normalize_prices(raw, provider=provider)
-                    if not frame.empty:
+                    if not frame.is_empty():
                         fetch_start = retry_kwargs["start_date"]
             storage_symbol = symbol_provider_key(symbol, provider)
 
@@ -95,15 +93,15 @@ class EtfStore:
             )
             merged = merge_upsert(existing, frame)
             rows_written = 0
-            if not merged.empty:
+            if not merged.is_empty():
                 self.backend.write(library, storage_symbol, merged)
                 rows_written = len(merged)
 
             min_date = None
             max_date = None
-            if not merged.empty:
-                min_date = merged.index.min().strftime("%Y-%m-%d")
-                max_date = merged.index.max().strftime("%Y-%m-%d")
+            if not merged.is_empty():
+                min_date = merged["date"].min().strftime("%Y-%m-%d")
+                max_date = merged["date"].max().strftime("%Y-%m-%d")
 
             self.catalog.upsert(
                 symbol=symbol,
@@ -132,7 +130,7 @@ class EtfStore:
         symbol: str,
         *,
         provider: str,
-        frame: pd.DataFrame,
+        frame: pl.DataFrame,
         merge: bool = True,
     ) -> dict[str, object]:
         symbol = symbol.strip().upper()
@@ -152,15 +150,15 @@ class EtfStore:
             merged = merge_upsert(existing, normalized)
 
         rows_written = 0
-        if not merged.empty:
+        if not merged.is_empty():
             self.backend.write(library, storage_symbol, merged)
             rows_written = len(merged)
 
         min_date = None
         max_date = None
-        if not merged.empty:
-            min_date = merged.index.min().strftime("%Y-%m-%d")
-            max_date = merged.index.max().strftime("%Y-%m-%d")
+        if not merged.is_empty():
+            min_date = merged["date"].min().strftime("%Y-%m-%d")
+            max_date = merged["date"].max().strftime("%Y-%m-%d")
 
         self.catalog.upsert(
             symbol=symbol,
@@ -188,7 +186,7 @@ class EtfStore:
         provider: str = "yfinance",
         start: str | None = None,
         end: str | None = None,
-    ) -> pd.DataFrame:
+    ) -> pl.DataFrame:
         provider = validate_price_provider(provider)
         storage_symbol = symbol_provider_key(symbol, provider)
         df = read_provider_frame(
@@ -197,8 +195,8 @@ class EtfStore:
             provider=provider,
             symbol=storage_symbol,
         )
-        if df is None or df.empty:
-            return pd.DataFrame()
+        if df is None or df.is_empty():
+            return pl.DataFrame()
         return _slice_dates(df, start=start, end=end)
 
     def refresh_profile(self, symbol: str, *, provider: str) -> dict[str, object]:
@@ -206,8 +204,8 @@ class EtfStore:
         provider = validate_price_provider(provider)
         result = fetch_openbb("etf_profile", symbol=symbol, provider=provider)
         record = dict(result.records[0]) if result.records else {}
-        if not record and not result.df.empty:
-            record = result.df.iloc[0].to_dict()
+        if not record and not result.df.is_empty():
+            record = result.df.row(0, named=True)
         self.catalog.upsert_etf_profile(
             symbol=symbol,
             provider=provider,
@@ -253,7 +251,8 @@ class EtfStore:
         provider: str = "fmp",
         start: str | None = None,
         end: str | None = None,
-    ) -> pd.DataFrame:
+        output_format: Literal["polars"] = "polars",
+    ) -> pl.DataFrame:
         if section not in ETF_FUNDAMENTAL_SECTIONS:
             raise ValueError(f"Unknown ETF fundamental section: {section}")
         return self.fundamentals.read(
@@ -262,6 +261,7 @@ class EtfStore:
             provider=provider,
             start=start,
             end=end,
+            output_format=output_format,
         )
 
     def refresh_nport_disclosure_history(
@@ -276,8 +276,8 @@ class EtfStore:
         """Fetch quarterly ETF N-PORT filings and merge into a dated panel."""
         symbol = symbol.strip().upper()
         provider = validate_price_provider(provider)
-        end_year = int(end_year or pd.Timestamp.utcnow().year)
-        frames: list[pd.DataFrame] = []
+        end_year = int(end_year or datetime.utcnow().year)
+        frames: list[pl.DataFrame] = []
         fetched_periods = 0
         for year in range(int(start_year), end_year + 1):
             for quarter in quarters:
@@ -291,7 +291,7 @@ class EtfStore:
                     )
                 except Exception:
                     continue
-                if result.df is None or result.df.empty:
+                if result.df is None or result.df.is_empty():
                     continue
                 frames.append(result.df.copy())
                 fetched_periods += 1
@@ -304,7 +304,7 @@ class EtfStore:
                 "fetched_periods": 0,
             }
 
-        combined = pd.concat(frames, ignore_index=True)
+        combined = pl.concat(frames, how="diagonal_relaxed")
         stats = self.fundamentals.ingest_frame(
             symbol,
             section="etf_nport_disclosure",
@@ -319,5 +319,5 @@ class EtfStore:
         state = self.catalog.get(symbol=symbol, section=ETF_PRICES_SECTION, provider=provider)
         if state is None or not state.max_date:
             return None
-        resume = pd.Timestamp(state.max_date) - timedelta(days=GAP_OVERLAP_DAYS)
+        resume = datetime.fromisoformat(state.max_date) - timedelta(days=GAP_OVERLAP_DAYS)
         return resume.strftime("%Y-%m-%d")

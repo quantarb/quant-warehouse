@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-import pandas as pd
+from datetime import date, datetime, timedelta
+
+import polars as pl
 import pytest
 
 from quant_warehouse.platforms.data_providers.thetadata.options import (
@@ -22,8 +24,22 @@ from quant_warehouse.platforms.data_providers.thetadata.options import (
 from quant_warehouse.warehouse.storage import provider_library
 
 
-def _raw_frame() -> pd.DataFrame:
-    return pd.DataFrame(
+def _ts(value: str | date | datetime) -> datetime:
+    if isinstance(value, datetime):
+        return value.replace(hour=0, minute=0, second=0, microsecond=0)
+    if isinstance(value, date):
+        return datetime.combine(value, datetime.min.time())
+    return datetime.fromisoformat(str(value)[:10])
+
+
+def _business_days(start: str | date | datetime, end: str | date | datetime) -> list[datetime]:
+    first, last = _ts(start), _ts(end)
+    return [first + timedelta(days=offset) for offset in range((last - first).days + 1)
+            if (first + timedelta(days=offset)).weekday() < 5]
+
+
+def _raw_frame() -> pl.DataFrame:
+    return pl.DataFrame(
         [
             {
                 "symbol": "AAPL",
@@ -47,9 +63,10 @@ def _raw_frame() -> pd.DataFrame:
     )
 
 
-def _with_rich_option_fields(frame: pd.DataFrame) -> pd.DataFrame:
-    out = frame.copy()
-    for column, value in {
+def _with_rich_option_fields(frame: pl.DataFrame) -> pl.DataFrame:
+    return frame.with_columns([
+        pl.lit(value).alias(column)
+        for column, value in {
         "underlying_price": 230.0,
         "delta": -0.4,
         "gamma": 0.02,
@@ -57,26 +74,27 @@ def _with_rich_option_fields(frame: pd.DataFrame) -> pd.DataFrame:
         "vega": 0.1,
         "rho": -0.01,
         "iv": 0.25,
-    }.items():
-        out[column] = value
-    return out
+        }.items()
+    ])
 
 
 def test_normalize_thetadata_option_chain_builds_contract_symbol() -> None:
     frame = normalize_thetadata_option_chain(_raw_frame())
     assert "contract_symbol" in frame.columns
-    assert frame["contract_symbol"].iloc[0] == "AAPL_put_20250124_230"
+    assert frame["contract_symbol"][0] == "AAPL_put_20250124_230"
     assert "snapshot_date" in frame.columns
     assert "mid" in frame.columns
-    assert frame["data_interval"].iloc[0] == "eod"
+    assert frame["data_interval"][0] == "eod"
 
 
 def test_normalize_thetadata_option_chain_keeps_rows_without_bid_ask() -> None:
     raw = _raw_frame()
-    raw.loc[0, "bid"] = 0.0
+    raw = raw.with_row_index("_row").with_columns(
+        pl.when(pl.col("_row") == 0).then(0.0).otherwise(pl.col("bid")).alias("bid")
+    ).drop("_row")
     frame = normalize_thetadata_option_chain(raw)
-    assert len(frame) == 2
-    assert frame["contract_symbol"].iloc[0] == "AAPL_put_20250124_230"
+    assert frame.height == 2
+    assert frame["contract_symbol"][0] == "AAPL_put_20250124_230"
 
 
 def test_split_snapshots_by_date_groups_rows() -> None:
@@ -86,45 +104,45 @@ def test_split_snapshots_by_date_groups_rows() -> None:
 
 
 class _MemoryBackend:
-    def __init__(self, initial: pd.DataFrame | None = None) -> None:
+    def __init__(self, initial: pl.DataFrame | None = None) -> None:
         self.frame = initial
-        self.writes: list[tuple[str, str, pd.DataFrame, bool]] = []
+        self.writes: list[tuple[str, str, pl.DataFrame, bool]] = []
 
-    def read(self, library: str, symbol: str, **kwargs) -> pd.DataFrame | None:
+    def read(self, library: str, symbol: str, **kwargs) -> pl.DataFrame | None:
         assert library in {
             provider_library(OPTIONS_THETADATA_EOD_LIBRARY, OPTIONS_THETADATA_PROVIDER),
         }
         if self.frame is None:
             return None
-        out = self.frame.copy()
+        out = self.frame.clone()
         date_range = kwargs.get("date_range")
-        if date_range is not None and isinstance(out.index, pd.DatetimeIndex):
+        if date_range is not None and "date" in out.columns:
             start, end = date_range
             if start is not None:
-                out = out.loc[out.index >= start]
+                out = out.filter(pl.col("date") >= start)
             if end is not None:
-                out = out.loc[out.index <= end]
+                out = out.filter(pl.col("date") <= end)
         columns = kwargs.get("columns")
         if columns is not None:
             keep = [column for column in columns if column in out.columns]
-            out = out.loc[:, keep]
+            out = out.select(keep)
         return out
 
     def write(
         self,
         library: str,
         symbol: str,
-        df: pd.DataFrame,
+        df: pl.DataFrame,
         *,
         prune_previous_versions: bool = False,
     ) -> None:
         assert library == provider_library(OPTIONS_THETADATA_EOD_LIBRARY, OPTIONS_THETADATA_PROVIDER)
-        self.frame = df.copy()
-        self.writes.append((library, symbol, df.copy(), prune_previous_versions))
+        self.frame = df.clone()
+        self.writes.append((library, symbol, df.clone(), prune_previous_versions))
 
 
 def test_arctic_option_chain_roundtrip() -> None:
-    frame = normalize_thetadata_option_chain(_raw_frame().iloc[[0]])
+    frame = normalize_thetadata_option_chain(_raw_frame().head(1))
     backend = _MemoryBackend()
     expected_library = provider_library(OPTIONS_THETADATA_EOD_LIBRARY, OPTIONS_THETADATA_PROVIDER)
     assert write_option_chain_arctic("AAPL", frame, backend=backend) == f"arctic://{expected_library}/AAPL"
@@ -132,11 +150,11 @@ def test_arctic_option_chain_roundtrip() -> None:
     assert backend.writes[0][3] is True
     loaded = read_option_chain_arctic("AAPL", start_date="2025-01-06", end_date="2025-01-06", backend=backend)
     assert len(loaded) == 1
-    assert loaded["contract_symbol"].iloc[0] == "AAPL_put_20250124_230"
+    assert loaded["contract_symbol"][0] == "AAPL_put_20250124_230"
 
 
 def test_read_option_chain_arctic_deduplicates_existing_snapshot_contract_rows() -> None:
-    duplicate = pd.DataFrame(
+    duplicate = pl.DataFrame(
         [
             {
                 "symbol": "AAPL",
@@ -158,21 +176,24 @@ def test_read_option_chain_arctic_deduplicates_existing_snapshot_contract_rows()
             },
         ]
     )
-    cached = normalize_thetadata_option_chain(duplicate)
-    cached.index = pd.DatetimeIndex(
-        [pd.Timestamp("2025-01-06"), pd.Timestamp("2025-01-06") + pd.Timedelta(nanoseconds=1)]
+    cached = pl.concat([
+        normalize_thetadata_option_chain(duplicate.head(1)),
+        normalize_thetadata_option_chain(duplicate.tail(1)),
+    ], how="diagonal_relaxed")
+    cached = cached.with_columns(
+        pl.Series("date", [datetime(2025, 1, 6), datetime(2025, 1, 6, 0, 0, 0, 1)])
     )
     backend = _MemoryBackend(cached)
 
     loaded = read_option_chain_arctic("AAPL", start_date="2025-01-06", end_date="2025-01-06", backend=backend)
 
-    assert len(loaded) == 1
-    assert loaded["contract_symbol"].iloc[0] == "AAPL_put_20250124_230"
-    assert loaded["bid"].iloc[0] == 0.70
+    assert loaded.height == 1
+    assert loaded["contract_symbol"][0] == "AAPL_put_20250124_230"
+    assert loaded["bid"][0] == 0.70
 
 
 def test_read_thetadata_eod_option_chain_enforces_contract_and_projects_columns() -> None:
-    duplicate = pd.DataFrame(
+    duplicate = pl.DataFrame(
         [
             {
                 "symbol": "AAPL",
@@ -194,9 +215,12 @@ def test_read_thetadata_eod_option_chain_enforces_contract_and_projects_columns(
             },
         ]
     )
-    cached = _with_rich_option_fields(normalize_thetadata_option_chain(duplicate))
-    cached.index = pd.DatetimeIndex(
-        [pd.Timestamp("2025-01-06"), pd.Timestamp("2025-01-06") + pd.Timedelta(nanoseconds=1)]
+    cached = _with_rich_option_fields(pl.concat([
+        normalize_thetadata_option_chain(duplicate.head(1)),
+        normalize_thetadata_option_chain(duplicate.tail(1)),
+    ], how="diagonal_relaxed"))
+    cached = cached.with_columns(
+        pl.Series("date", [datetime(2025, 1, 6), datetime(2025, 1, 6, 0, 0, 0, 1)])
     )
     backend = _MemoryBackend(cached)
 
@@ -210,13 +234,13 @@ def test_read_thetadata_eod_option_chain_enforces_contract_and_projects_columns(
     )
 
     assert list(loaded.columns) == ["snapshot_date", "contract_symbol", "bid"]
-    assert len(loaded) == 1
-    assert loaded["contract_symbol"].iloc[0] == "AAPL_put_20250124_230"
-    assert loaded["bid"].iloc[0] == 0.70
+    assert loaded.height == 1
+    assert loaded["contract_symbol"][0] == "AAPL_put_20250124_230"
+    assert loaded["bid"][0] == 0.70
 
 
 def test_read_thetadata_eod_option_chain_requires_rich_endpoint_columns_when_requested() -> None:
-    quote_only = normalize_thetadata_option_chain(_raw_frame().iloc[[0]])
+    quote_only = normalize_thetadata_option_chain(_raw_frame().head(1))
     backend = _MemoryBackend(quote_only)
 
     with pytest.raises(ValueError, match="underlying_price"):
@@ -230,7 +254,7 @@ def test_read_thetadata_eod_option_chain_requires_rich_endpoint_columns_when_req
 
 
 def test_deduplicate_option_chain_arctic_rewrites_existing_cached_duplicates() -> None:
-    duplicate = pd.DataFrame(
+    duplicate = pl.DataFrame(
         [
             {
                 "symbol": "AAPL",
@@ -252,27 +276,30 @@ def test_deduplicate_option_chain_arctic_rewrites_existing_cached_duplicates() -
             },
         ]
     )
-    cached = normalize_thetadata_option_chain(duplicate)
-    cached.index = pd.DatetimeIndex(
-        [pd.Timestamp("2025-01-06"), pd.Timestamp("2025-01-06") + pd.Timedelta(nanoseconds=1)]
+    cached = pl.concat([
+        normalize_thetadata_option_chain(duplicate.head(1)),
+        normalize_thetadata_option_chain(duplicate.tail(1)),
+    ], how="diagonal_relaxed")
+    cached = cached.with_columns(
+        pl.Series("date", [datetime(2025, 1, 6), datetime(2025, 1, 6, 0, 0, 0, 1)])
     )
     backend = _MemoryBackend(cached)
 
     dry_run = deduplicate_option_chain_arctic(["AAPL"], backend=backend)
-    assert dry_run.loc[0, "duplicate_rows"] == 1
-    assert bool(dry_run.loc[0, "rewritten"]) is False
-    assert len(backend.frame) == 2
+    assert dry_run["duplicate_rows"][0] == 1
+    assert bool(dry_run["rewritten"][0]) is False
+    assert backend.frame.height == 2
 
     rewritten = deduplicate_option_chain_arctic(["AAPL"], backend=backend, dry_run=False)
 
-    assert rewritten.loc[0, "duplicate_rows"] == 1
-    assert bool(rewritten.loc[0, "rewritten"]) is True
-    assert len(backend.frame) == 1
+    assert rewritten["duplicate_rows"][0] == 1
+    assert bool(rewritten["rewritten"][0]) is True
+    assert backend.frame.height == 1
     assert backend.writes[-1][3] is True
 
 
 def test_cached_date_summary_requires_rich_greeks_columns() -> None:
-    quote_only = normalize_thetadata_option_chain(_raw_frame().iloc[[0]])
+    quote_only = normalize_thetadata_option_chain(_raw_frame().head(1))
     rich = _with_rich_option_fields(quote_only)
 
     quote_backend = _MemoryBackend(quote_only)
@@ -295,22 +322,22 @@ def test_cached_date_summary_requires_rich_greeks_columns() -> None:
 
     assert quote_dates == set()
     assert quote_rows == 0
-    assert rich_dates == {pd.Timestamp("2025-01-06")}
+    assert rich_dates == {datetime(2025, 1, 6)}
     assert rich_rows == 1
 
 
 def test_iter_eod_date_chunks_splits_long_ranges() -> None:
     chunks = list(_iter_eod_date_chunks("2024-01-01", "2026-06-20"))
     assert len(chunks) >= 2
-    assert chunks[0] == (pd.Timestamp("2024-01-01").date(), pd.Timestamp("2024-12-30").date())
-    assert chunks[-1][1] == pd.Timestamp("2026-06-20").date()
+    assert chunks[0] == (date(2024, 1, 1), date(2024, 12, 30))
+    assert chunks[-1][1] == date(2026, 6, 20)
 
 
 def test_fetch_option_history_eod_chunks_requests(monkeypatch) -> None:
     calls: list[tuple] = []
 
     class FakeResult:
-        def __init__(self, frame: pd.DataFrame):
+        def __init__(self, frame: pl.DataFrame):
             self.df = frame
 
     def fake_fetch_openbb(section, *, symbol, provider, **kwargs):
@@ -321,7 +348,7 @@ def test_fetch_option_history_eod_chunks_requests(monkeypatch) -> None:
         assert kwargs["min_ask"] == 0.0
         calls.append((kwargs["start_date"], kwargs["end_date"]))
         return FakeResult(
-            pd.DataFrame(
+            pl.DataFrame(
                 [
                     {
                         "underlying_symbol": symbol,
@@ -349,7 +376,7 @@ def test_fetch_option_history_eod_chunks_requests(monkeypatch) -> None:
         api_key="test-key",
         spec=ThetaDataDownloadSpec(),
     )
-    assert not frame.empty
+    assert not frame.is_empty()
     assert len(calls) >= 2
     for start, end in calls:
         assert (end - start).days <= 364
@@ -371,7 +398,7 @@ def test_thetadata_download_apis_reject_contract_filters() -> None:
 
 def test_normalize_thetadata_option_chain_preserves_greeks_endpoint_fields() -> None:
     frame = normalize_thetadata_option_chain(
-        pd.DataFrame(
+        pl.DataFrame(
             [
                 {
                     "underlying_symbol": "GOOG",
@@ -393,8 +420,8 @@ def test_normalize_thetadata_option_chain_preserves_greeks_endpoint_fields() -> 
         )
     )
 
-    row = frame.iloc[0]
-    assert row["snapshot_date"] == pd.Timestamp("2021-02-03")
+    row = frame.row(0, named=True)
+    assert row["snapshot_date"] == datetime(2021, 2, 3)
     assert row["contract_symbol"] == "GOOG_call_20210205_2075"
     assert row["underlying_price"] == 2070.07
     assert row["iv"] == 0.42
@@ -402,7 +429,7 @@ def test_normalize_thetadata_option_chain_preserves_greeks_endpoint_fields() -> 
 
 
 def test_load_thetadata_option_snapshots_uses_cache_without_fetch(monkeypatch) -> None:
-    frame = _with_rich_option_fields(normalize_thetadata_option_chain(_raw_frame().iloc[[0]]))
+    frame = _with_rich_option_fields(normalize_thetadata_option_chain(_raw_frame().head(1)))
     backend = _MemoryBackend(frame)
 
     def _fail_fetch(*args, **kwargs):
@@ -428,7 +455,7 @@ def test_load_thetadata_option_snapshots_uses_cache_without_fetch(monkeypatch) -
 def test_download_option_snapshots_for_range_returns_cached_manifest(
     monkeypatch,
 ) -> None:
-    frame = _with_rich_option_fields(normalize_thetadata_option_chain(_raw_frame().iloc[[0]]))
+    frame = _with_rich_option_fields(normalize_thetadata_option_chain(_raw_frame().head(1)))
     backend = _MemoryBackend(frame)
 
     def _fail_fetch(*args, **kwargs):
@@ -459,7 +486,7 @@ def test_download_option_snapshots_for_range_fetches_only_missing_business_range
     monkeypatch,
 ) -> None:
     cached = _with_rich_option_fields(normalize_thetadata_option_chain(
-        pd.DataFrame(
+        pl.DataFrame(
             [
                 {
                     "symbol": "AAPL",
@@ -474,14 +501,14 @@ def test_download_option_snapshots_for_range_fetches_only_missing_business_range
         )
     ))
     backend = _MemoryBackend(cached)
-    calls: list[tuple[pd.Timestamp, pd.Timestamp]] = []
+    calls: list[tuple[datetime, datetime]] = []
 
     def _fake_fetch(symbol, start_date, end_date, **kwargs):
-        start = pd.Timestamp(start_date).normalize()
-        end = pd.Timestamp(end_date).normalize()
+        start = _ts(start_date)
+        end = _ts(end_date)
         calls.append((start, end))
         return normalize_thetadata_option_chain(
-            pd.DataFrame(
+            pl.DataFrame(
                 [
                     {
                         "symbol": symbol,
@@ -510,8 +537,8 @@ def test_download_option_snapshots_for_range_fetches_only_missing_business_range
         "2025-01-08",
     )
     assert calls == [
-        (pd.Timestamp("2025-01-06"), pd.Timestamp("2025-01-06")),
-        (pd.Timestamp("2025-01-08"), pd.Timestamp("2025-01-08")),
+        (datetime(2025, 1, 6), datetime(2025, 1, 6)),
+        (datetime(2025, 1, 8), datetime(2025, 1, 8)),
     ]
     assert manifest["snapshot_days"] == 3
     assert manifest["contracts_total"] == 3
@@ -522,14 +549,14 @@ def test_download_option_snapshots_for_range_fetches_only_missing_business_range
 
 def test_download_option_snapshots_for_range_uses_large_backfill_window(monkeypatch) -> None:
     backend = _MemoryBackend()
-    calls: list[tuple[pd.Timestamp, pd.Timestamp]] = []
+    calls: list[tuple[datetime, datetime]] = []
 
     def _fake_fetch(symbol, start_date, end_date, **kwargs):
-        start = pd.Timestamp(start_date).normalize()
-        end = pd.Timestamp(end_date).normalize()
+        start = _ts(start_date)
+        end = _ts(end_date)
         calls.append((start, end))
         rows = []
-        for ts in pd.date_range(start, end, freq="B"):
+        for ts in _business_days(start, end):
             rows.append(
                 {
                     "symbol": symbol,
@@ -542,7 +569,7 @@ def test_download_option_snapshots_for_range_uses_large_backfill_window(monkeypa
                 }
             )
         return normalize_thetadata_option_chain(
-            pd.DataFrame(rows)
+            pl.DataFrame(rows)
         )
 
     monkeypatch.setattr(
@@ -561,22 +588,22 @@ def test_download_option_snapshots_for_range_uses_large_backfill_window(monkeypa
         spec=ThetaDataDownloadSpec(backfill_window_days=180),
     )
 
-    assert calls == [(pd.Timestamp("2025-01-02"), pd.Timestamp("2025-02-28"))]
-    assert manifest["fetched_rows"] == len(pd.date_range("2025-01-02", "2025-02-28", freq="B"))
+    assert calls == [(datetime(2025, 1, 2), datetime(2025, 2, 28))]
+    assert manifest["fetched_rows"] == len(_business_days("2025-01-02", "2025-02-28"))
 
 
 def test_download_option_snapshots_for_range_falls_back_after_large_request_error(monkeypatch) -> None:
     backend = _MemoryBackend()
-    calls: list[tuple[pd.Timestamp, pd.Timestamp]] = []
+    calls: list[tuple[datetime, datetime]] = []
 
     def _fake_fetch(symbol, start_date, end_date, **kwargs):
-        start = pd.Timestamp(start_date).normalize()
-        end = pd.Timestamp(end_date).normalize()
+        start = _ts(start_date)
+        end = _ts(end_date)
         calls.append((start, end))
         if (end - start).days > 10:
             raise RuntimeError("range too large")
         rows = []
-        for ts in pd.date_range(start, end, freq="B"):
+        for ts in _business_days(start, end):
             rows.append(
                 {
                     "symbol": symbol,
@@ -589,7 +616,7 @@ def test_download_option_snapshots_for_range_falls_back_after_large_request_erro
                 }
             )
         return normalize_thetadata_option_chain(
-            pd.DataFrame(rows)
+            pl.DataFrame(rows)
         )
 
     monkeypatch.setattr(
@@ -608,7 +635,7 @@ def test_download_option_snapshots_for_range_falls_back_after_large_request_erro
         spec=ThetaDataDownloadSpec(backfill_window_days=180, fallback_window_days=7),
     )
 
-    assert calls[0] == (pd.Timestamp("2025-01-02"), pd.Timestamp("2025-01-24"))
+    assert calls[0] == (datetime(2025, 1, 2), datetime(2025, 1, 24))
     assert len(calls) > 1
     assert manifest["fetched_rows"] > 0
 

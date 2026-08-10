@@ -4,11 +4,12 @@ from collections.abc import Iterable, Sequence
 from functools import lru_cache
 from typing import Any
 
-import numpy as np
-import pandas as pd
+import polars as pl
 
 from quant_warehouse.platforms.data_providers.fmp.feature_engineering.broadcast import broadcast_asof_to_target_index
 from quant_warehouse.platforms.data_providers.fmp.sections import LEGACY_FMP_SECTION_MAP
+
+Frame = pl.DataFrame
 
 
 SECTION_PREFIXES: dict[str, str] = {
@@ -87,18 +88,29 @@ def load_warehouse_fundamental_frame(
     start_date: str | None = None,
     end_date: str | None = None,
     warehouse=None,
-) -> pd.DataFrame:
+) -> pl.DataFrame:
     section = warehouse_section_for_legacy_key(legacy_section_key)
     if section is None:
-        return pd.DataFrame()
+        return pl.DataFrame()
     wh = warehouse or get_warehouse()
-    return wh.read_fundamentals(
-        str(symbol).strip().upper(),
-        section=section,
-        provider=str(provider or "fmp").strip().lower(),
-        start=start_date,
-        end=end_date,
-    )
+    read_kwargs = {
+        "section": section,
+        "provider": str(provider or "fmp").strip().lower(),
+        "start": start_date,
+        "end": end_date,
+    }
+    try:
+        frame = wh.read_fundamentals(
+            str(symbol).strip().upper(),
+            **read_kwargs,
+            output_format="polars",
+        )
+    except TypeError:
+        # Compatibility for injected legacy warehouse doubles.
+        frame = wh.read_fundamentals(str(symbol).strip().upper(), **read_kwargs)
+    if not isinstance(frame, pl.DataFrame):
+        raise TypeError("Warehouse fundamentals must return a Polars DataFrame")
+    return frame
 
 
 def warehouse_section_to_payload_rows(
@@ -121,24 +133,22 @@ def warehouse_section_to_payload_rows(
         end_date=end_date,
         warehouse=warehouse,
     )
-    if frame is None or frame.empty:
+    if frame is None or frame.is_empty():
         return []
 
     keep = {str(value).lower().strip() for value in (keep_fields or [])}
     rows: list[dict[str, Any]] = []
-    working = frame.reset_index()
-    date_col = working.columns[0]
-    working = working.rename(columns={date_col: "date"})
-    working["date"] = pd.to_datetime(working["date"], errors="coerce")
-    working = working.dropna(subset=["date"])
+    working = frame
+    date_col = "date" if "date" in working.columns else working.columns[0]
+    if date_col != "date":
+        working = working.rename({date_col: "date"})
+    working = working.with_columns(pl.col("date").cast(pl.Datetime, strict=False)).drop_nulls("date")
     # Preserve the warehouse observation date exactly.  The argument remains
     # for compatibility with older callers, but feature construction never
     # applies an implicit filing/reporting lag.
 
-    for _, series in working.iterrows():
-        ts = pd.Timestamp(series["date"]).normalize()
-        if pd.isna(ts):
-            continue
+    for series in working.iter_rows(named=True):
+        ts = series["date"]
         row: dict[str, Any] = {
             "date": ts,
             "symbol": str(symbol).strip().upper(),
@@ -165,33 +175,30 @@ def warehouse_section_to_indexed_frame(
     end_date: str | None = None,
     provider: str = "fmp",
     warehouse=None,
-) -> pd.DataFrame:
-    rows = warehouse_section_to_payload_rows(
+) -> pl.DataFrame:
+    raw = load_warehouse_fundamental_frame(
         symbol,
         legacy_section_key,
-        prefix=prefix,
-        keep_fields=keep_fields,
-        filing_lag_days=filing_lag_days,
         start_date=start_date,
         end_date=end_date,
         provider=provider,
         warehouse=warehouse,
     )
-    if not rows:
-        return pd.DataFrame()
-    df = pd.DataFrame(rows)
-    for col in df.columns:
-        if col in {"date", "symbol"}:
-            continue
-        converted = pd.to_numeric(df[col], errors="coerce")
-        if converted.notna().any():
-            df[col] = converted
-    return (
-        df.sort_values(["date", "symbol"])
-        .drop_duplicates(subset=["date", "symbol"], keep="last")
-        .set_index(["date", "symbol"])
-        .sort_index()
-    )
+    if raw is None or raw.is_empty():
+        return pl.DataFrame()
+    date_column = "date" if "date" in raw.columns else next((column for column in raw.columns if column in {"period_ending", "as_of", "filing_date", "report_date"}), None)
+    if date_column is None:
+        return pl.DataFrame()
+    out = raw.rename({date_column: "date"}) if date_column != "date" else raw
+    if "symbol" not in out.columns:
+        out = out.with_columns(pl.lit(str(symbol).strip().upper()).alias("symbol"))
+    rename = {column: f"{prefix}{str(column).lower().strip()}" for column in out.columns if column not in {"date", "symbol"} and not str(column).startswith(prefix)}
+    if rename:
+        out = out.rename(rename)
+    numeric = [column for column in out.columns if column not in {"date", "symbol"}]
+    if numeric:
+        out = out.with_columns(pl.col(column).cast(pl.Float64, strict=False).alias(column) for column in numeric)
+    return out.unique(["date", "symbol"], keep="last").sort(["date", "symbol"])
 
 
 def fetch_fundamentals_data(
@@ -203,76 +210,52 @@ def fetch_fundamentals_data(
     use_filing_lag: bool = False,
     filing_lag_days: int = 0,
     provider: str = "fmp",
-) -> pd.DataFrame:
+) -> pl.DataFrame:
     """Load sparse key-metric and ratio fundamentals from quant-warehouse."""
 
     del api_key, period, limit
-    dfs_per_symbol: list[pd.DataFrame] = []
+    polars_frames: list[pl.DataFrame] = []
     for sym in symbols:
         symbol = str(sym).strip().upper()
         if not symbol:
             continue
-        df_km = pd.DataFrame(
-            warehouse_section_to_payload_rows(
+        parts: list[pl.DataFrame] = []
+        for section_key, prefix in (("key_metrics", "km__"), ("ratios", "rt__")):
+            frame = warehouse_section_to_indexed_frame(
                 symbol,
-                "key_metrics",
-                prefix="km__",
+                section_key,
+                prefix=prefix,
                 filing_lag_days=filing_lag_days if use_filing_lag else 0,
                 provider=provider,
             )
-        )
-        df_rt = pd.DataFrame(
-            warehouse_section_to_payload_rows(
-                symbol,
-                "ratios",
-                prefix="rt__",
-                filing_lag_days=filing_lag_days if use_filing_lag else 0,
-                provider=provider,
-            )
-        )
-        if df_km.empty and df_rt.empty:
+            if not frame.is_empty():
+                parts.append(frame)
+        if not parts:
             continue
-        merge_keys = ["date", "symbol", "period"]
-        for frame in (df_km, df_rt):
-            if frame.empty:
-                continue
-            for key in merge_keys:
-                if key not in frame.columns:
-                    frame[key] = np.nan
-            frame["symbol"] = frame["symbol"].astype(str)
-        if df_km.empty:
-            merged = df_rt
-        elif df_rt.empty:
-            merged = df_km
-        else:
-            merged = pd.merge(df_km, df_rt, on=merge_keys, how="outer")
-        dfs_per_symbol.append(merged)
-
-    if not dfs_per_symbol:
+        merged = pl.concat(parts, how="diagonal_relaxed")
+        if "period" not in merged.columns:
+            merged = merged.with_columns(pl.lit(None, dtype=pl.String).alias("period"))
+        polars_frames.append(merged)
+    if not polars_frames:
         if verbose:
             print("[fundamentals] WARN: No quant-warehouse fundamentals found.")
-        return pd.DataFrame()
-    fund_df = pd.concat(dfs_per_symbol, ignore_index=True)
-    if "date" in fund_df.columns and "symbol" in fund_df.columns:
-        fund_df = fund_df.sort_values(["symbol", "date"]).set_index(["date", "symbol"])
-    return _enforce_numeric_features(fund_df)
+        return pl.DataFrame()
+    out = pl.concat(polars_frames, how="diagonal_relaxed")
+    return out.sort([column for column in ("symbol", "date") if column in out.columns])
+    if not polars_frames:
+        if verbose:
+            print("[fundamentals] WARN: No quant-warehouse fundamentals found.")
+        return pl.DataFrame()
+    return pl.concat(polars_frames, how="diagonal_relaxed").sort(["symbol", "date"])
 
 
 def broadcast_fundamentals_to_daily(
-    fund_df: pd.DataFrame,
-    target_daily_index: pd.Index,
-) -> pd.DataFrame:
+    fund_df: pl.DataFrame,
+    target_daily_index: pl.DataFrame,
+) -> pl.DataFrame:
     return broadcast_asof_to_target_index(
         sparse_df=fund_df,
         target_index=target_daily_index,
         on="date",
         by=("symbol",),
     )
-
-
-def _enforce_numeric_features(df: pd.DataFrame) -> pd.DataFrame:
-    out = df.copy()
-    for col in out.columns:
-        if col.startswith("km__") or col.startswith("rt__"):
-            out[col] = pd.to_numeric(out[col], errors="coerce")
-    return out

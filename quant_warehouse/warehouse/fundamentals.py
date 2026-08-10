@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from typing import Sequence
+from datetime import datetime
+from typing import Literal, Sequence
 
-import pandas as pd
+import polars as pl
 
 from quant_warehouse.catalog.store import CatalogStore
 from quant_warehouse.config import WarehouseConfig
@@ -125,19 +126,19 @@ class FundamentalsStore:
 
                     if section in PANEL_FUNDAMENTAL_SECTIONS or section in DATED_SNAPSHOT_SECTIONS:
                         merged = merge_panel_upsert(existing, frame)
-                    elif isinstance(frame.index, pd.DatetimeIndex):
+                    elif "date" in frame.columns:
                         merged = merge_upsert(existing, frame)
                     else:
                         merged = frame
 
-                    if not merged.empty:
+                    if not merged.is_empty():
                         self.backend.write(library, storage_symbol, merged)
 
                     min_date = None
                     max_date = None
-                    if not merged.empty and isinstance(merged.index, pd.DatetimeIndex):
-                        min_date = merged.index.min().strftime("%Y-%m-%d")
-                        max_date = merged.index.max().strftime("%Y-%m-%d")
+                    if not merged.is_empty() and "date" in merged.columns:
+                        min_date = merged["date"].min().strftime("%Y-%m-%d")
+                        max_date = merged["date"].max().strftime("%Y-%m-%d")
 
                     self.catalog.upsert(
                         symbol=symbol,
@@ -190,7 +191,8 @@ class FundamentalsStore:
         period: str | None = None,
         start: str | None = None,
         end: str | None = None,
-    ) -> pd.DataFrame:
+        output_format: Literal["polars"] = "polars",
+    ) -> pl.DataFrame:
         self._validate_section(section)
         provider = validate_fundamental_provider(provider)
         storage_symbol = symbol_provider_key(symbol, provider)
@@ -205,17 +207,14 @@ class FundamentalsStore:
             base_library=library,
             provider=provider,
             symbol=storage_symbol,
+            output_format=output_format,
         )
-        if df is None or df.empty:
-            return pd.DataFrame()
+        if df is None or df.is_empty():
+            return pl.DataFrame()
         if section in SNAPSHOT_FUNDAMENTAL_SECTIONS:
             out = df.copy()
         else:
             out = _slice_dates(df, start=start, end=end)
-        out.attrs["section"] = section
-        out.attrs["provider"] = provider
-        if effective_period is not None:
-            out.attrs["period"] = effective_period
         return out
 
     def ingest_frame(
@@ -224,7 +223,7 @@ class FundamentalsStore:
         *,
         section: str,
         provider: str,
-        frame: pd.DataFrame,
+        frame: pl.DataFrame,
         merge: bool = True,
         period: str | None = None,
     ) -> dict[str, object]:
@@ -234,7 +233,7 @@ class FundamentalsStore:
 
         if section in DATED_SNAPSHOT_SECTIONS:
             normalized = normalize_dated_snapshot_frame(frame, section=section)
-        elif isinstance(frame.index, pd.DatetimeIndex):
+        elif "date" in frame.columns:
             normalized = frame.copy()
         elif section in SNAPSHOT_FUNDAMENTAL_SECTIONS:
             normalized = normalize_snapshot_frame(frame)
@@ -261,19 +260,19 @@ class FundamentalsStore:
             )
             if section in PANEL_FUNDAMENTAL_SECTIONS or section in DATED_SNAPSHOT_SECTIONS:
                 merged = merge_panel_upsert(existing, normalized)
-            elif isinstance(normalized.index, pd.DatetimeIndex):
+            elif "date" in normalized.columns:
                 merged = merge_upsert(existing, normalized)
 
         rows_written = 0
-        if not merged.empty:
+        if not merged.is_empty():
             self.backend.write(library, storage_symbol, merged)
             rows_written = len(merged)
 
         min_date = None
         max_date = None
-        if not merged.empty and isinstance(merged.index, pd.DatetimeIndex):
-            min_date = merged.index.min().strftime("%Y-%m-%d")
-            max_date = merged.index.max().strftime("%Y-%m-%d")
+        if not merged.is_empty() and "date" in merged.columns:
+            min_date = merged["date"].min().strftime("%Y-%m-%d")
+            max_date = merged["date"].max().strftime("%Y-%m-%d")
 
         self.catalog.upsert(
             symbol=symbol,
@@ -306,8 +305,8 @@ class FundamentalsStore:
         """Fetch quarterly earnings transcripts and merge into a dated panel."""
         symbol = symbol.strip().upper()
         provider = validate_fundamental_provider(provider)
-        end_year = int(end_year or pd.Timestamp.utcnow().year)
-        frames: list[pd.DataFrame] = []
+        end_year = int(end_year or datetime.utcnow().year)
+        frames: list[pl.DataFrame] = []
         fetched_periods = 0
         for year in range(int(start_year), end_year + 1):
             for quarter in quarters:
@@ -321,7 +320,7 @@ class FundamentalsStore:
                     )
                 except Exception:
                     continue
-                if result.df is None or result.df.empty:
+                if result.df is None or result.df.is_empty():
                     continue
                 frames.append(result.df.copy())
                 fetched_periods += 1
@@ -334,7 +333,7 @@ class FundamentalsStore:
                 "fetched_periods": 0,
             }
 
-        combined = pd.concat(frames, ignore_index=True)
+        combined = pl.concat(frames, how="diagonal_relaxed")
         stats = self.ingest_frame(
             symbol,
             section="transcript",

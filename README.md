@@ -79,7 +79,7 @@ cp .env.example .env
 export QW_HOME=~/.quant-warehouse
 ```
 
-The current environment installs `quant-warehouse` with required platform dependencies. OpenBB packages come from the `quantarb/OpenBB` `develop` branch, `pandas-ta-classic` comes from the `quantarb/pandas-ta-classic` `main` branch, and computation libraries without `quantarb` forks use their official packages. The warehouse itself reads `QW_HOME`, `QW_ARCTIC_URI`, and `QW_CATALOG_PATH`; by default it stores legacy/shared ArcticDB data under `~/.quant-warehouse/arctic`, provider-isolated ArcticDB roots under `~/.quant-warehouse/arctic/providers/{provider}`, and metadata in `~/.quant-warehouse/catalog.sqlite`.
+The current environment installs `quant-warehouse` with required platform dependencies. OpenBB packages come from the `quantarb/OpenBB` `develop` branch, and computation libraries without `quantarb` forks use their official packages. The warehouse itself reads `QW_HOME`, `QW_ARCTIC_URI`, and `QW_CATALOG_PATH`; by default it stores legacy/shared ArcticDB data under `~/.quant-warehouse/arctic`, provider-isolated ArcticDB roots under `~/.quant-warehouse/arctic/providers/{provider}`, and metadata in `~/.quant-warehouse/catalog.sqlite`.
 
 ## CLI
 
@@ -140,7 +140,7 @@ python scripts/materialize_raw_dataset.py \
 ```
 
 The materializer uses ArcticDB date and column projection before converting to
-Arrow, so it avoids loading unrelated history and fields into pandas.
+Arrow, so it avoids loading unrelated history and fields into the dataframe layer.
 
 ## Design rules
 

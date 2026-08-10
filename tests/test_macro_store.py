@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-import pandas as pd
+from datetime import date
+import polars as pl
 
 from quant_warehouse.catalog.store import CatalogStore
 from quant_warehouse.config import WarehouseConfig
@@ -16,13 +17,14 @@ from quant_warehouse.warehouse.storage import provider_library
 
 class FakeBackend:
     def __init__(self) -> None:
-        self.frames: dict[tuple[str, str], pd.DataFrame] = {}
+        self.frames: dict[tuple[str, str], pl.DataFrame] = {}
 
-    def read(self, library: str, symbol: str) -> pd.DataFrame:
-        return self.frames.get((library, symbol), pd.DataFrame())
+    def read(self, library: str, symbol: str, **kwargs) -> pl.DataFrame:
+        del kwargs
+        return self.frames.get((library, symbol), pl.DataFrame())
 
-    def write(self, library: str, symbol: str, frame: pd.DataFrame) -> None:
-        self.frames[(library, symbol)] = frame.copy()
+    def write(self, library: str, symbol: str, frame: pl.DataFrame) -> None:
+        self.frames[(library, symbol)] = frame.clone()
 
 
 def test_read_panel_joins_economic_and_treasury_series(tmp_path):
@@ -36,8 +38,8 @@ def test_read_panel_joins_economic_and_treasury_series(tmp_path):
     catalog = CatalogStore(config.catalog_path)
     store = MacroStore(config=config, backend=backend, catalog=catalog)
 
-    economic = pd.DataFrame({"value": [1.0, 2.0]}, index=pd.to_datetime(["2024-01-01", "2024-02-01"]))
-    treasury = pd.DataFrame({"value": [4.0, 4.1]}, index=pd.to_datetime(["2024-01-01", "2024-02-01"]))
+    economic = pl.DataFrame({"date": ["2024-01-01", "2024-02-01"], "value": [1.0, 2.0]}).with_columns(pl.col("date").str.to_datetime())
+    treasury = pl.DataFrame({"date": ["2024-01-01", "2024-02-01"], "value": [4.0, 4.1]}).with_columns(pl.col("date").str.to_datetime())
     backend.write(provider_library(MACRO_ECONOMIC_LIBRARY, "fmp"), "GDP__fmp", economic)
     backend.write(provider_library(MACRO_TREASURY_LIBRARY, "fmp"), "MACRO__UST_YEAR10__fmp", treasury)
     store._upsert_catalog_state(symbol="GDP", section="macro_economic", provider="fmp", frame=economic)
@@ -49,8 +51,8 @@ def test_read_panel_joins_economic_and_treasury_series(tmp_path):
     )
 
     panel = store.read_panel(["GDP", "macro__ust_year10"], provider="fmp")
-    assert list(panel.columns) == ["GDP", "macro__ust_year10"]
-    assert len(panel) == 2
+    assert list(panel.columns) == ["date", "GDP", "macro__ust_year10"]
+    assert panel.height == 2
 
 
 def test_read_panel_collapses_duplicate_macro_dates(tmp_path):
@@ -64,16 +66,13 @@ def test_read_panel_collapses_duplicate_macro_dates(tmp_path):
     catalog = CatalogStore(config.catalog_path)
     store = MacroStore(config=config, backend=backend, catalog=catalog)
 
-    economic = pd.DataFrame(
-        {"value": [1.0, 2.0, 3.0]},
-        index=pd.to_datetime(["2024-01-01 08:00", "2024-01-01 16:00", "2024-02-01 00:00"]),
-    )
+    economic = pl.DataFrame({"date": ["2024-01-01 08:00", "2024-01-01 16:00", "2024-02-01 00:00"], "value": [1.0, 2.0, 3.0]}).with_columns(pl.col("date").str.to_datetime())
     backend.write(provider_library(MACRO_ECONOMIC_LIBRARY, "fmp"), "GDP__fmp", economic)
 
     panel = store.read_panel(["GDP"], provider="fmp")
 
-    assert list(panel.index) == list(pd.to_datetime(["2024-01-01", "2024-02-01"]))
-    assert panel.loc[pd.Timestamp("2024-01-01"), "GDP"] == 2.0
+    assert panel["date"].dt.date().to_list() == [date(2024, 1, 1), date(2024, 2, 1)]
+    assert panel[0, "GDP"] == 2.0
 
 
 def test_read_risk_premium_and_calendar(tmp_path):
@@ -87,20 +86,10 @@ def test_read_risk_premium_and_calendar(tmp_path):
     catalog = CatalogStore(config.catalog_path)
     store = MacroStore(config=config, backend=backend, catalog=catalog)
 
-    risk = pd.DataFrame(
-        {
-            "country": ["United States"],
-            "total_equity_risk_premium": [5.0],
-            "country_risk_premium": [0.0],
-        },
-        index=pd.to_datetime(["2024-06-01"]),
-    )
-    risk.index.name = "as_of"
-    calendar = pd.DataFrame(
-        {"country": ["US"], "event": ["CPI"], "actual": [3.1]},
-        index=pd.to_datetime(["2024-06-01"]),
-    )
-    calendar.index.name = "date"
+    risk = pl.DataFrame({"as_of": ["2024-06-01"], "country": ["United States"],
+                         "total_equity_risk_premium": [5.0], "country_risk_premium": [0.0]}).with_columns(pl.col("as_of").str.to_datetime())
+    calendar = pl.DataFrame({"date": ["2024-06-01"], "country": ["US"],
+                             "event": ["CPI"], "actual": [3.1]}).with_columns(pl.col("date").str.to_datetime())
     backend.write(provider_library(MACRO_RISK_PREMIUM_LIBRARY, "fmp"), "RISK_PREMIUM__fmp", risk)
     backend.write(provider_library(MACRO_CALENDAR_LIBRARY, "fmp"), "MACRO_CALENDAR__fmp", calendar)
 

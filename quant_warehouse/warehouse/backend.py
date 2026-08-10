@@ -4,11 +4,13 @@ import threading
 from contextlib import nullcontext
 from typing import Literal, Protocol
 
-import pandas as pd
+import polars as pl
+from datetime import datetime
 
 from quant_warehouse.config import WarehouseConfig
 
 StorageKind = Literal["arctic"]
+FrameFormat = Literal["polars"]
 
 
 class StorageBackend(Protocol):
@@ -19,15 +21,16 @@ class StorageBackend(Protocol):
         library: str,
         symbol: str,
         *,
-        date_range: tuple[pd.Timestamp | None, pd.Timestamp | None] | None = None,
+        date_range: tuple[datetime | None, datetime | None] | None = None,
         columns: list[str] | None = None,
-    ) -> pd.DataFrame | None: ...
+        output_format: FrameFormat = "polars",
+    ) -> pl.DataFrame | None: ...
 
     def write(
         self,
         library: str,
         symbol: str,
-        df: pd.DataFrame,
+        df: pl.DataFrame,
         *,
         prune_previous_versions: bool = True,
     ) -> None: ...
@@ -64,9 +67,10 @@ class ArcticBackend:
         library: str,
         symbol: str,
         *,
-        date_range: tuple[pd.Timestamp | None, pd.Timestamp | None] | None = None,
+        date_range: tuple[datetime | None, datetime | None] | None = None,
         columns: list[str] | None = None,
-    ) -> pd.DataFrame | None:
+        output_format: FrameFormat = "polars",
+    ) -> pl.DataFrame | None:
         with self._storage_guard():
             lib = self._library(library)
             if not lib.has_symbol(symbol):
@@ -76,6 +80,7 @@ class ArcticBackend:
                 read_kwargs["date_range"] = date_range
             if columns is not None:
                 read_kwargs["columns"] = columns
+            read_kwargs["output_format"] = output_format
             try:
                 version = lib.read(symbol, **read_kwargs)
             except Exception as exc:
@@ -83,27 +88,35 @@ class ArcticBackend:
                     return None
                 raise
             df = version.data
-            if df is None or df.empty:
+            if df is None or df.is_empty():
                 return None
-            if not isinstance(df.index, pd.DatetimeIndex) and df.index.name in ("date", "period_ending"):
-                df.index = pd.to_datetime(df.index, errors="coerce")
-            return df.sort_index()
+            return df.sort("date") if "date" in df.columns else df
 
     def write(
         self,
         library: str,
         symbol: str,
-        df: pd.DataFrame,
+        df: pl.DataFrame,
         *,
         prune_previous_versions: bool = True,
     ) -> None:
-        if df.empty:
+        if df.is_empty():
             return
-        if not isinstance(df.index, pd.DatetimeIndex):
-            raise ValueError("DataFrame index must be DatetimeIndex")
         with self._storage_guard():
             lib = self._library(library)
-            lib.write(symbol, df.sort_index(), prune_previous_versions=prune_previous_versions)
+            # ArcticDB's time-series writer still requires an indexed frame.
+            # Keep that conversion isolated here; all warehouse callers and
+            # all reads remain Polars, so the storage-library adapter never
+            # crosses the public API.
+            write_frame = df.to_pandas()
+            if "date" in df.columns:
+                write_frame = write_frame.set_index("date")
+                write_frame.index.name = "date"
+            lib.write(
+                symbol,
+                write_frame.sort_index(),
+                prune_previous_versions=prune_previous_versions,
+            )
 
     def _storage_guard(self):
         return self._storage_lock or nullcontext()
@@ -168,21 +181,23 @@ class ProviderRoutingBackend:
         library: str,
         symbol: str,
         *,
-        date_range: tuple[pd.Timestamp | None, pd.Timestamp | None] | None = None,
+        date_range: tuple[datetime | None, datetime | None] | None = None,
         columns: list[str] | None = None,
-    ) -> pd.DataFrame | None:
+        output_format: FrameFormat = "polars",
+    ) -> pl.DataFrame | None:
         return self._backend_for_library(library).read(
             library,
             symbol,
             date_range=date_range,
             columns=columns,
+            output_format=output_format,
         )
 
     def write(
         self,
         library: str,
         symbol: str,
-        df: pd.DataFrame,
+        df: pl.DataFrame,
         *,
         prune_previous_versions: bool = True,
     ) -> None:

@@ -1,4 +1,4 @@
-import pandas as pd
+import polars as pl
 
 from quant_warehouse.ingest.equity_calendar_fetch import normalize_equity_calendar_frame
 from quant_warehouse.platforms.data_providers.fmp.sections import (
@@ -9,7 +9,7 @@ from quant_warehouse.platforms.data_providers.fmp.sections import (
 
 
 def test_normalize_equity_calendar_earnings_frame():
-    raw = pd.DataFrame(
+    raw = pl.DataFrame(
         {
             "report_date": ["2024-01-31", "2024-01-30"],
             "symbol": ["AAPL", "MSFT"],
@@ -18,7 +18,7 @@ def test_normalize_equity_calendar_earnings_frame():
     )
     out = normalize_equity_calendar_frame(raw, section="equity_calendar_earnings")
     assert len(out) == 2
-    assert out.index.name == "report_date"
+    assert "report_date" in out.columns
     assert "symbol" in out.columns
 
 

@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+from datetime import date, datetime
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-import numpy as np
-import pandas as pd
+import polars as pl
 
 
 LINEAGE_SCHEMA_VERSION = 1
@@ -44,12 +45,12 @@ class DatasetLineageManifest:
 
 
 def build_dataset_lineage_manifest(
-    frame: pd.DataFrame,
+    frame: pl.DataFrame,
     *,
     dataset_id: str,
     dataset_kind: str,
     provider: str,
-    available_at_cutoff: str | pd.Timestamp,
+    available_at_cutoff: str | datetime,
     recipe_id: str,
     recipe: Mapping[str, Any],
     source_references: Mapping[str, str] | None = None,
@@ -61,19 +62,20 @@ def build_dataset_lineage_manifest(
 
     if frame is None:
         raise TypeError("frame cannot be None")
-    cutoff = pd.Timestamp(available_at_cutoff)
-    if pd.isna(cutoff):
-        raise ValueError("available_at_cutoff must be a valid timestamp")
-    dates = (
-        pd.to_datetime(frame[date_column], errors="coerce").dropna()
-        if date_column in frame.columns
-        else pd.Series(dtype="datetime64[ns]")
-    )
-    cutoff_naive = cutoff.tz_localize(None) if cutoff.tzinfo is not None else cutoff
-    if not dates.empty and dates.max() > cutoff_naive:
+    cutoff = datetime.fromisoformat(str(available_at_cutoff)) if isinstance(available_at_cutoff, str) else available_at_cutoff
+    if date_column in frame.columns:
+        date_expr = (pl.col(date_column).str.to_datetime(strict=False)
+                     if frame.schema[date_column] == pl.String
+                     else pl.col(date_column).cast(pl.Datetime, strict=False))
+        dates = frame.select(date_expr).to_series()
+    else:
+        dates = pl.Series([], dtype=pl.Datetime)
+    dates = dates.drop_nulls()
+    cutoff_naive = cutoff.replace(tzinfo=None)
+    if len(dates) and dates.max() > cutoff_naive:
         raise ValueError("dataset contains dates after available_at_cutoff")
     symbols = (
-        tuple(sorted(frame[symbol_column].dropna().astype(str).str.strip().str.upper().unique()))
+        tuple(sorted(frame[symbol_column].drop_nulls().cast(pl.String).str.strip_chars().str.to_uppercase().unique().to_list()))
         if symbol_column in frame.columns
         else ()
     )
@@ -82,12 +84,12 @@ def build_dataset_lineage_manifest(
         dataset_kind=str(dataset_kind),
         provider=str(provider),
         available_at_cutoff=cutoff.isoformat(),
-        start_date=None if dates.empty else dates.min().isoformat(),
-        end_date=None if dates.empty else dates.max().isoformat(),
-        row_count=int(len(frame)),
+        start_date=None if not len(dates) else dates.min().isoformat(),
+        end_date=None if not len(dates) else dates.max().isoformat(),
+        row_count=frame.height,
         symbols=symbols,
         columns=tuple(str(column) for column in frame.columns),
-        dtypes={str(column): str(dtype) for column, dtype in frame.dtypes.items()},
+        dtypes={str(column): str(dtype) for column, dtype in frame.schema.items()},
         content_fingerprint=dataframe_fingerprint(frame, key_columns=key_columns),
         recipe_id=str(recipe_id),
         recipe_fingerprint=canonical_fingerprint(recipe),
@@ -95,25 +97,20 @@ def build_dataset_lineage_manifest(
     )
 
 
-def dataframe_fingerprint(frame: pd.DataFrame, *, key_columns: Sequence[str] = ()) -> str:
+def dataframe_fingerprint(frame: pl.DataFrame, *, key_columns: Sequence[str] = ()) -> str:
     """Hash all values, column order, and dtypes deterministically."""
 
-    work = frame.copy(deep=False)
-    converted = False
+    work = frame
     for column in work.columns:
-        if work[column].dtype == "object" and work[column].map(
-            lambda value: isinstance(value, (dict, list, tuple, set))
-        ).any():
-            if not converted:
-                work = work.copy(deep=False)
-                converted = True
-            work[column] = work[column].map(_stable_cell)
+        work = work.with_columns(
+            pl.col(column).map_elements(_stable_cell, return_dtype=pl.String).alias(column)
+        ) if work.schema[column] == pl.Object else work
     digest = hashlib.sha256()
-    digest.update(canonical_json({"columns": list(frame.columns), "dtypes": {str(c): str(t) for c, t in frame.dtypes.items()}}).encode())
-    hashes = pd.util.hash_pandas_object(work, index=False, categorize=True).to_numpy(dtype=np.uint64)
+    digest.update(canonical_json({"columns": list(frame.columns), "dtypes": {str(c): str(t) for c, t in frame.schema.items()}}).encode())
+    hashes = [int(value) for value in work.hash_rows().to_list()]
     if any(column in frame.columns for column in key_columns):
         hashes.sort()
-    digest.update(hashes.tobytes())
+    digest.update(b"".join(value.to_bytes(8, byteorder="little", signed=False) for value in hashes))
     return f"sha256:{digest.hexdigest()}"
 
 
@@ -178,10 +175,8 @@ def _jsonable(value: Any) -> Any:
         return sorted(_jsonable(item) for item in value)
     if isinstance(value, Path):
         return str(value)
-    if isinstance(value, (pd.Timestamp, np.datetime64)):
-        return pd.Timestamp(value).isoformat()
-    if isinstance(value, np.generic):
-        return value.item()
-    if pd.isna(value) if not isinstance(value, (dict, list, tuple, set)) else False:
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    if value is None or (isinstance(value, float) and math.isnan(value)) if not isinstance(value, (dict, list, tuple, set)) else False:
         return None
     return value

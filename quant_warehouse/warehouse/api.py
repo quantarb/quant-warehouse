@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import threading
-from typing import Sequence
+from typing import Literal, Sequence
 
-import pandas as pd
+import polars as pl
 
 from quant_warehouse.catalog.store import CatalogStore
 from quant_warehouse.config import WarehouseConfig
@@ -197,13 +197,15 @@ class Warehouse:
         start: str | None = None,
         end: str | None = None,
         adjustment: str = EQUITY_PRICE_ADJUSTMENT,
-    ) -> pd.DataFrame:
+        output_format: Literal["polars"] = "polars",
+    ) -> pl.DataFrame:
         return self.prices.read(
             symbol,
             provider=provider,
             start=start,
             end=end,
             adjustment=adjustment,
+            output_format=output_format,
         )
 
     def read_fundamentals(
@@ -215,7 +217,8 @@ class Warehouse:
         start: str | None = None,
         end: str | None = None,
         period: str | None = None,
-    ) -> pd.DataFrame:
+        output_format: Literal["polars"] = "polars",
+    ) -> pl.DataFrame:
         if section in ETF_FUNDAMENTAL_SECTIONS:
             return self.etf.read_fundamentals(
                 symbol,
@@ -223,6 +226,7 @@ class Warehouse:
                 provider=provider,
                 start=start,
                 end=end,
+                output_format=output_format,
             )
         return self.fundamentals.read(
             symbol,
@@ -231,6 +235,7 @@ class Warehouse:
             start=start,
             end=end,
             period=period,
+            output_format=output_format,
         )
 
     def read_features(
@@ -240,11 +245,12 @@ class Warehouse:
         recipe: str,
         start: str | None = None,
         end: str | None = None,
-    ) -> pd.DataFrame:
+        output_format: Literal["polars"] = "polars",
+    ) -> pl.DataFrame:
         storage_symbol = f"{symbol.strip().upper()}__{recipe}"
-        df = self.backend.read("features", storage_symbol)
-        if df is None or df.empty:
-            return pd.DataFrame()
+        df = self.backend.read("features", storage_symbol, output_format=output_format)
+        if df is None or df.is_empty():
+            return pl.DataFrame()
         return _slice_dates(df, start=start, end=end)
 
     def read_news(
@@ -254,8 +260,11 @@ class Warehouse:
         provider: str = "fmp",
         start: str | None = None,
         end: str | None = None,
-    ) -> pd.DataFrame:
-        return self.news.read(symbol, provider=provider, start=start, end=end)
+        output_format: Literal["polars"] = "polars",
+    ) -> pl.DataFrame:
+        return self.news.read(
+            symbol, provider=provider, start=start, end=end, output_format=output_format
+        )
 
     def refresh_macro(
         self,
@@ -289,8 +298,15 @@ class Warehouse:
         provider: str = "fmp",
         start: str | None = None,
         end: str | None = None,
-    ) -> pd.DataFrame:
-        return self.macro.read_panel(series_codes, provider=provider, start=start, end=end)
+        output_format: Literal["polars"] = "polars",
+    ) -> pl.DataFrame:
+        return self.macro.read_panel(
+            series_codes,
+            provider=provider,
+            start=start,
+            end=end,
+            output_format=output_format,
+        )
 
     def read_macro_calendar(
         self,
@@ -298,23 +314,28 @@ class Warehouse:
         provider: str = "fmp",
         start: str | None = None,
         end: str | None = None,
-    ) -> pd.DataFrame:
+        output_format: Literal["polars"] = "polars",
+    ) -> pl.DataFrame:
         """Read stored macro economic-calendar releases."""
-        return self.macro.read_calendar(provider=provider, start=start, end=end)
+        return self.macro.read_calendar(
+            provider=provider, start=start, end=end, output_format=output_format
+        )
 
     def status(self, symbol: str) -> list:
         return self.catalog.list_symbol(symbol)
 
 
 def _slice_dates(
-    df: pd.DataFrame,
+    df: pl.DataFrame,
     *,
     start: str | None,
     end: str | None,
-) -> pd.DataFrame:
-    out = df.copy()
+) -> pl.DataFrame:
+    if "date" not in df.columns:
+        return df
+    predicate = pl.lit(True)
     if start is not None:
-        out = out.loc[out.index >= pd.Timestamp(start)]
+        predicate = predicate & (pl.col("date") >= pl.lit(start).str.to_datetime())
     if end is not None:
-        out = out.loc[out.index <= pd.Timestamp(end)]
-    return out
+        predicate = predicate & (pl.col("date") <= pl.lit(end).str.to_datetime())
+    return df.filter(predicate)

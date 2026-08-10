@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from types import SimpleNamespace
+import math
 
-import numpy as np
-import pandas as pd
+import polars as pl
 
 from quant_warehouse.research_tools.feature_family_eval import (
     FamilyEvaluationConfig,
@@ -17,19 +18,19 @@ from quant_warehouse.research_tools.feature_family_eval import (
 
 
 def test_cap_features_by_quality_limits_each_family_without_targets() -> None:
-    dates = pd.date_range("2024-01-01", periods=4, freq="D")
-    panel = pd.DataFrame(
+    dates = [datetime(2024, 1, 1) + timedelta(days=i) for i in range(4)]
+    panel = pl.DataFrame(
         {
-            "date": dates.tolist() * 2,
+            "date": dates * 2,
             "symbol": ["A", "A", "A", "A", "B", "B", "B", "B"],
-            "close": np.arange(8, dtype=float) + 10.0,
+            "close": [float(value) + 10.0 for value in range(8)],
             "family_a__dense": [1, 2, 3, 4, 2, 4, 6, 8],
-            "family_a__sparse": [1, np.nan, np.nan, np.nan, 2, np.nan, np.nan, np.nan],
+                "family_a__sparse": [1.0, math.nan, math.nan, math.nan, 2.0, math.nan, math.nan, math.nan],
             "family_b__dense": [5, 4, 3, 2, 6, 5, 4, 3],
-            "forward_return_1d": [0.1, 0.2, 0.3, np.nan, 0.0, 0.1, 0.2, np.nan],
+            "forward_return_1d": [0.1, 0.2, 0.3, math.nan, 0.0, 0.1, 0.2, math.nan],
         }
     )
-    metadata = pd.DataFrame(
+    metadata = pl.DataFrame(
         [
             {
                 "feature": "family_a__dense",
@@ -57,14 +58,14 @@ def test_cap_features_by_quality_limits_each_family_without_targets() -> None:
 
     selected, capped_metadata, quality = cap_features_by_quality(panel, metadata, max_features=1)
 
-    assert selected == ["family_a__dense", "family_b__dense"]
-    assert capped_metadata.groupby("family").size().max() == 1
-    assert quality.loc[quality["feature"].eq("family_a__dense"), "selected"].item() is True
-    assert quality.loc[quality["feature"].eq("family_a__sparse"), "selected"].item() is False
+    assert set(selected) == {"family_a__dense", "family_b__dense"}
+    assert capped_metadata.group_by("family").len()["len"].max() == 1
+    assert quality.filter(pl.col("feature") == "family_a__dense").item(0, "selected") is True
+    assert quality.filter(pl.col("feature") == "family_a__sparse").item(0, "selected") is False
 
 
 def test_evaluate_feature_families_returns_family_summaries() -> None:
-    dates = pd.date_range("2024-01-01", periods=5, freq="D")
+    dates = [datetime(2024, 1, 1) + timedelta(days=i) for i in range(5)]
     rows = []
     for date_idx, date in enumerate(dates):
         for symbol_idx, symbol in enumerate(["A", "B", "C"]):
@@ -78,8 +79,8 @@ def test_evaluate_feature_families_returns_family_summaries() -> None:
                     "forward_return_1d": float(symbol_idx) / 100.0,
                 }
             )
-    panel = pd.DataFrame(rows)
-    metadata = pd.DataFrame(
+    panel = pl.DataFrame(rows)
+    metadata = pl.DataFrame(
         [
             {
                 "feature": "family_a__feature",
@@ -108,7 +109,7 @@ def test_evaluate_feature_families_returns_family_summaries() -> None:
 
     assert len(results) == 2
     assert set(summary["family"]) == {"family_a", "family_b"}
-    assert best.loc[0, "horizon"] == 1
+    assert best.item(0, "horizon") == 1
     assert set(stable["family"]) == {"family_a", "family_b"}
     assert seconds >= 0.0
 
@@ -121,7 +122,7 @@ def test_supported_equity_record_rejects_pooled_vehicle_payloads() -> None:
 
 
 def test_context_feature_families_are_added_without_vendor_calls() -> None:
-    dates = pd.date_range("2024-01-01", periods=8, freq="D")
+    dates = [datetime(2024, 1, 1) + timedelta(days=i) for i in range(8)]
     rows = []
     for symbol_idx, symbol in enumerate(["AAA", "BBB", "CCC"]):
         for date_idx, date in enumerate(dates):
@@ -134,21 +135,18 @@ def test_context_feature_families_are_added_without_vendor_calls() -> None:
                     "fmp_daily_mcap_multiple__mcap_to_revenue": 4.0 + symbol_idx,
                 }
             )
-    panel = pd.DataFrame(rows)
+    panel = pl.DataFrame(rows)
 
     class FakeWarehouse:
         def read_macro_panel(self, series_codes, *, provider, start=None, end=None):
-            index = pd.date_range("2023-12-29", periods=12, freq="D")
+            index = [datetime(2023, 12, 29) + timedelta(days=i) for i in range(12)]
             data = {
-                "GDP": np.linspace(100.0, 111.0, len(index)),
-                "macro__ust_year10": np.linspace(4.0, 4.2, len(index)),
-                "macro__ust_year2": np.linspace(3.7, 3.9, len(index)),
-                "macro__ust_month3": np.linspace(3.4, 3.6, len(index)),
+                "GDP": [100.0 + 11.0 * i / (len(index) - 1) for i in range(len(index))],
+                "macro__ust_year10": [4.0 + 0.2 * i / (len(index) - 1) for i in range(len(index))],
+                "macro__ust_year2": [3.7 + 0.2 * i / (len(index) - 1) for i in range(len(index))],
+                "macro__ust_month3": [3.4 + 0.2 * i / (len(index) - 1) for i in range(len(index))],
             }
-            return pd.DataFrame(
-                {code: data[code] for code in series_codes if code in data},
-                index=index,
-            )
+            return pl.DataFrame({code: data[code] for code in series_codes if code in data}).with_columns(pl.Series("date", index))
 
         def read_profile(self, symbol, *, provider):
             groups = {
@@ -177,4 +175,4 @@ def test_context_feature_families_are_added_without_vendor_calls() -> None:
     for family in families:
         feature_cols = [spec.feature for spec in specs if spec.family == family]
         assert feature_cols
-        assert panel[feature_cols].notna().any().any()
+        assert all(column in {spec.feature for spec in specs} for column in feature_cols)

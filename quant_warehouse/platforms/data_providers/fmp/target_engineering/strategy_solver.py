@@ -1,31 +1,23 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Literal, Mapping, Optional, Sequence, Tuple
 
-import numpy as np
-import pandas as pd
+import torch
 
-try:
-    from numba import njit
-    _HAS_NUMBA = True
-except ImportError:
-    _HAS_NUMBA = False
-
-    def njit(*args, **kwargs):
-        """No-op decorator when numba is not available."""
-        def _decorator(fn):
-            return fn
-        return _decorator
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+import polars as pl
 
 Side = Literal["long", "short"]
+Frame = pl.DataFrame
 
 
 @dataclass
 class Trade:
     side: Side
-    entry_row: pd.Series
-    exit_row: pd.Series
+    entry_row: dict[str, object]
+    exit_row: dict[str, object]
     entry_price: float
     exit_price: float
     profit: float
@@ -47,167 +39,67 @@ def _pick_price_cols(side: Side, entry_price_col: Optional[str], exit_price_col:
 def _profit_pct(side: Side, entry: float, exit: float) -> float:
     if entry <= 0:
         return 0.0
-    if side == "long":
-        return (exit - entry) / entry
-    return (entry - exit) / entry
+    return (exit - entry) / entry if side == "long" else (entry - exit) / entry
 
-
-def _resolve_required_col(df: pd.DataFrame, col: str) -> str:
-    col_map = {str(c).lower(): c for c in df.columns}
-    key = str(col).lower()
-    if key in col_map:
-        return col_map[key]
-    raise ValueError(f"Missing column '{col}' (needed by solver)")
-
-
-@njit
-def _solve_one_side_numba(entry_prices, exit_prices, k, min_profit_pct):
-    """Numba-accelerated one-side DP solver core.
-
-    Returns (trades_arr, n_trades) where trades_arr is (entry_idx, exit_idx) pairs
-    in chronological order, and n_trades is the count.
-    """
-    n = len(entry_prices)
-
-    cash_val = np.zeros(k + 1, dtype=np.float64)
-    hold_val = np.full(k + 1, -np.inf, dtype=np.float64)
-    hold_entry_day = np.full(k + 1, -1, dtype=np.int32)
-    hold_entry_px = np.zeros(k + 1, dtype=np.float64)
-    cash_action = np.zeros((n, k + 1), dtype=np.int32)
-    cash_entry_day = np.zeros((n, k + 1), dtype=np.int32)
-
+def _solve_one_side_torch(entry_prices: Sequence[float], exit_prices: Sequence[float], k: int, min_profit_pct: float):
+    """Torch DP solver used for the numerical strategy kernel."""
+    ep = torch.as_tensor(entry_prices, dtype=torch.float64, device=DEVICE)
+    xp = torch.as_tensor(exit_prices, dtype=torch.float64, device=DEVICE)
+    n = int(ep.numel())
+    cash_val = torch.zeros(k + 1, dtype=torch.float64, device=DEVICE)
+    hold_val = torch.full((k + 1,), -torch.inf, dtype=torch.float64, device=DEVICE)
+    hold_entry_day = torch.full((k + 1,), -1, dtype=torch.int64, device=DEVICE)
+    hold_entry_px = torch.zeros(k + 1, dtype=torch.float64, device=DEVICE)
+    cash_action = torch.zeros((n, k + 1), dtype=torch.int64, device=DEVICE)
+    cash_entry_day = torch.zeros((n, k + 1), dtype=torch.int64, device=DEVICE)
     for i in range(n):
-        ep = entry_prices[i]
-        xp = exit_prices[i]
-
         for t in range(1, k + 1):
-            hv = hold_val[t]
-            if hv > -np.inf:
-                entry_denom = hold_entry_px[t] if hold_entry_px[t] > 0.0 else -hold_entry_px[t]
-                pct = (xp - hold_entry_px[t]) / entry_denom if entry_denom > 0.0 else 0.0
+            if float(hold_val[t]) > float(-torch.inf):
+                denom = float(abs(hold_entry_px[t]))
+                pct = (float(xp[i]) - float(hold_entry_px[t])) / denom if denom > 0.0 else 0.0
                 if pct >= min_profit_pct:
-                    cand_cash = hv + xp
-                    if cand_cash > cash_val[t] + 1e-12:
-                        cash_val[t] = cand_cash
+                    candidate = hold_val[t] + xp[i]
+                    if float(candidate) > float(cash_val[t]) + 1e-12:
+                        cash_val[t] = candidate
                         cash_action[i, t] = 1
                         cash_entry_day[i, t] = hold_entry_day[t]
-
         for t in range(1, k + 1):
-            cand_hold = cash_val[t - 1] - ep
-            if cand_hold > hold_val[t]:
-                hold_val[t] = cand_hold
+            candidate = cash_val[t - 1] - ep[i]
+            if float(candidate) > float(hold_val[t]):
+                hold_val[t] = candidate
                 hold_entry_day[t] = i
-                hold_entry_px[t] = ep
-
-    best_t = 0
-    best_val = 0.0
-    for t in range(k + 1):
-        if cash_val[t] > best_val + 1e-12:
-            best_val = cash_val[t]
-            best_t = t
-
-    # Back-tracking returns most recent first.
-    trades_out = np.zeros((k, 2), dtype=np.int32)
-    n_trades = 0
-    t = best_t
-    i = n - 1
-    while t > 0 and i >= 0 and n_trades < k:
-        if cash_action[i, t] == 0:
+                hold_entry_px[t] = ep[i]
+    best_t = int(torch.argmax(cash_val).item())
+    trades: list[tuple[int, int]] = []
+    t, i = best_t, n - 1
+    while t > 0 and i >= 0 and len(trades) < k:
+        if int(cash_action[i, t]) == 0:
             i -= 1
             continue
-
-        entry_idx = cash_entry_day[i, t]
-        if entry_idx < i:
-            trades_out[n_trades, 0] = entry_idx
-            trades_out[n_trades, 1] = i
-            n_trades += 1
+        entry_i = int(cash_entry_day[i, t])
+        if entry_i < i:
+            trades.append((entry_i, i))
             t -= 1
-            i = entry_idx - 1
+            i = entry_i - 1
         else:
             i -= 1
-
-    # Reverse to chronological order.
-    result = np.zeros((n_trades, 2), dtype=np.int32)
-    for idx in range(n_trades):
-        result[idx, 0] = trades_out[n_trades - 1 - idx, 0]
-        result[idx, 1] = trades_out[n_trades - 1 - idx, 1]
-    return result, n_trades
+    trades.reverse()
+    return torch.tensor(trades, dtype=torch.int64, device=DEVICE).tolist(), len(trades)
 
 
-@njit
-def _solve_one_side_all_k_numba(entry_prices, exit_prices, max_k, min_profit_pct):
-    """Numba DP solver that backtracks the best solution for every k <= max_k."""
-    n = len(entry_prices)
-
-    cash_val = np.zeros(max_k + 1, dtype=np.float64)
-    hold_val = np.full(max_k + 1, -np.inf, dtype=np.float64)
-    hold_entry_day = np.full(max_k + 1, -1, dtype=np.int32)
-    hold_entry_px = np.zeros(max_k + 1, dtype=np.float64)
-    cash_action = np.zeros((n, max_k + 1), dtype=np.int32)
-    cash_entry_day = np.zeros((n, max_k + 1), dtype=np.int32)
-
-    for i in range(n):
-        ep = entry_prices[i]
-        xp = exit_prices[i]
-
-        for t in range(1, max_k + 1):
-            hv = hold_val[t]
-            if hv > -np.inf:
-                entry_denom = hold_entry_px[t] if hold_entry_px[t] > 0.0 else -hold_entry_px[t]
-                pct = (xp - hold_entry_px[t]) / entry_denom if entry_denom > 0.0 else 0.0
-                if pct >= min_profit_pct:
-                    cand_cash = hv + xp
-                    if cand_cash > cash_val[t] + 1e-12:
-                        cash_val[t] = cand_cash
-                        cash_action[i, t] = 1
-                        cash_entry_day[i, t] = hold_entry_day[t]
-
-        for t in range(1, max_k + 1):
-            cand_hold = cash_val[t - 1] - ep
-            if cand_hold > hold_val[t]:
-                hold_val[t] = cand_hold
-                hold_entry_day[t] = i
-                hold_entry_px[t] = ep
-
-    trades_by_k = np.full((max_k + 1, max_k, 2), -1, dtype=np.int32)
-    counts = np.zeros(max_k + 1, dtype=np.int32)
+def _solve_one_side_all_k_torch(entry_prices: Sequence[float], exit_prices: Sequence[float], max_k: int, min_profit_pct: float):
+    results = torch.full((max_k + 1, max_k, 2), -1, dtype=torch.int64, device=DEVICE)
+    counts = torch.zeros(max_k + 1, dtype=torch.int64, device=DEVICE)
     for k in range(1, max_k + 1):
-        best_t = 0
-        best_val = 0.0
-        for t in range(k + 1):
-            if cash_val[t] > best_val + 1e-12:
-                best_val = cash_val[t]
-                best_t = t
-
-        trades_out = np.zeros((max_k, 2), dtype=np.int32)
-        n_trades = 0
-        t = best_t
-        i = n - 1
-        while t > 0 and i >= 0 and n_trades < max_k:
-            if cash_action[i, t] == 0:
-                i -= 1
-                continue
-
-            entry_idx = cash_entry_day[i, t]
-            if entry_idx < i:
-                trades_out[n_trades, 0] = entry_idx
-                trades_out[n_trades, 1] = i
-                n_trades += 1
-                t -= 1
-                i = entry_idx - 1
-            else:
-                i -= 1
-
-        counts[k] = n_trades
-        for idx in range(n_trades):
-            trades_by_k[k, idx, 0] = trades_out[n_trades - 1 - idx, 0]
-            trades_by_k[k, idx, 1] = trades_out[n_trades - 1 - idx, 1]
-
-    return trades_by_k, counts
+        trades, count = _solve_one_side_torch(entry_prices, exit_prices, k, min_profit_pct)
+        if count:
+            results[k, :count] = torch.as_tensor(trades, dtype=torch.int64, device=DEVICE)
+        counts[k] = count
+    return results.tolist(), counts.tolist()
 
 
 def solve_optimal_trades_generic(
-    df: pd.DataFrame,
+    df: Frame,
     k: int,
     side: Side = "long",
     entry_price_col: Optional[str] = None,
@@ -229,131 +121,46 @@ def solve_optimal_trades_generic(
     entry_col = _resolve_col(entry_col)
     exit_col = _resolve_col(exit_col)
 
-    entry_prices = df[entry_col].astype(float).values
-    exit_prices = df[exit_col].astype(float).values
+    entry_prices = df[entry_col].cast(pl.Float64, strict=False).to_list()
+    exit_prices = df[exit_col].cast(pl.Float64, strict=False).to_list()
 
     if side == "short":
-        ep = -entry_prices
-        xp = -exit_prices
+        ep = [-value for value in entry_prices]
+        xp = [-value for value in exit_prices]
     else:
         ep = entry_prices
         xp = exit_prices
 
-    # --- Try numba-accelerated path ---
-    if _HAS_NUMBA:
-        trades_arr, n_trades = _solve_one_side_numba(
-            ep.astype(np.float64), xp.astype(np.float64),
-            k=k, min_profit_pct=min_profit_pct,
-        )
+    # Torch owns the numerical DP kernel; Trade retains row-oriented metadata
+    # for callers that need the selected entry and exit observations.
+    trades_arr, n_trades = _solve_one_side_torch(
+        ep, xp, k=k, min_profit_pct=min_profit_pct,
+    )
 
-        out: List[Trade] = []
-        for idx in range(n_trades):
-            entry_i = int(trades_arr[idx, 0])
-            exit_i = int(trades_arr[idx, 1])
-            raw_entry = float(entry_prices[entry_i])
-            raw_exit = float(exit_prices[exit_i])
-            profit_pct = _profit_pct(side, raw_entry, raw_exit)
-            if profit_pct < float(min_profit_pct):
-                continue
-            if side == "long":
-                profit = raw_exit - raw_entry
-                entry_price = raw_entry
-                exit_price = raw_exit
-            else:
-                profit = raw_entry - raw_exit
-                entry_price = raw_entry
-                exit_price = raw_exit
-            out.append(
-                Trade(
-                    side=side,
-                    entry_row=df.iloc[entry_i],
-                    exit_row=df.iloc[exit_i],
-                    entry_price=entry_price,
-                    exit_price=exit_price,
-                    profit=profit,
-                )
-            )
-        return out
-
-    # --- Pure-Python fallback ---
-    n = len(df)
-
-    cash = [0.0] * (k + 1)
-    hold = [float("-inf")] * (k + 1)
-    hold_entry_day = [-1] * (k + 1)
-    hold_entry_px = [0.0] * (k + 1)
-    cash_action = [[0] * (k + 1) for _ in range(n)]
-    cash_entry_day = [[0] * (k + 1) for _ in range(n)]
-
-    for i in range(n):
-        ep_i = float(ep[i])
-        xp_i = float(xp[i])
-        for trade_count in range(1, k + 1):
-            hold_value = hold[trade_count]
-            if hold_value > float("-inf"):
-                entry_denom = abs(hold_entry_px[trade_count])
-                profit_pct = ((xp_i - hold_entry_px[trade_count]) / entry_denom) if entry_denom > 0 else 0.0
-                if profit_pct >= float(min_profit_pct):
-                    cand_cash = hold_value + xp_i
-                    if cand_cash > cash[trade_count] + 1e-12:
-                        cash[trade_count] = cand_cash
-                        cash_action[i][trade_count] = 1
-                        cash_entry_day[i][trade_count] = hold_entry_day[trade_count]
-
-        for trade_count in range(1, k + 1):
-            cand_hold = cash[trade_count - 1] - ep_i
-            if cand_hold > hold[trade_count]:
-                hold[trade_count] = cand_hold
-                hold_entry_day[trade_count] = i
-                hold_entry_px[trade_count] = ep_i
-
-    trades_idx: List[Tuple[int, int]] = []
-    trade_count = max(range(k + 1), key=lambda value: cash[value])
-    i = n - 1
-    while trade_count > 0 and i >= 0:
-        if cash_action[i][trade_count] == 0:
-            i -= 1
-            continue
-
-        entry_idx = cash_entry_day[i][trade_count]
-        if entry_idx < i:
-            trades_idx.append((entry_idx, i))
-            i = entry_idx - 1
-            trade_count -= 1
-        else:
-            i -= 1
-
-    trades_idx.reverse()
     out: List[Trade] = []
-    for entry_i, exit_i in trades_idx:
-        raw_entry = float(df[entry_col].iloc[entry_i])
-        raw_exit = float(df[exit_col].iloc[exit_i])
+    for idx in range(n_trades):
+        entry_i = int(trades_arr[idx][0])
+        exit_i = int(trades_arr[idx][1])
+        raw_entry = float(entry_prices[entry_i])
+        raw_exit = float(exit_prices[exit_i])
         profit_pct = _profit_pct(side, raw_entry, raw_exit)
         if profit_pct < float(min_profit_pct):
             continue
-        if side == "long":
-            profit = raw_exit - raw_entry
-            entry_price = raw_entry
-            exit_price = raw_exit
-        else:
-            profit = raw_entry - raw_exit
-            entry_price = raw_entry
-            exit_price = raw_exit
+        profit = raw_exit - raw_entry if side == "long" else raw_entry - raw_exit
         out.append(
             Trade(
                 side=side,
-                entry_row=df.iloc[entry_i],
-                exit_row=df.iloc[exit_i],
-                entry_price=entry_price,
-                exit_price=exit_price,
+                entry_row=df.row(entry_i, named=True),
+                exit_row=df.row(exit_i, named=True),
+                entry_price=raw_entry,
+                exit_price=raw_exit,
                 profit=profit,
             )
         )
     return out
 
-
 def solve_optimal_trades_all_k_generic(
-    df: pd.DataFrame,
+    df: Frame,
     ks: Sequence[int],
     side: Side = "long",
     entry_price_col: Optional[str] = None,
@@ -379,31 +186,18 @@ def solve_optimal_trades_all_k_generic(
     entry_col = _resolve_col(entry_col)
     exit_col = _resolve_col(exit_col)
 
-    entry_prices = df[entry_col].astype(float).values
-    exit_prices = df[exit_col].astype(float).values
+    entry_prices = df[entry_col].cast(pl.Float64, strict=False).to_list()
+    exit_prices = df[exit_col].cast(pl.Float64, strict=False).to_list()
     if side == "short":
-        ep = -entry_prices
-        xp = -exit_prices
+        ep = [-value for value in entry_prices]
+        xp = [-value for value in exit_prices]
     else:
         ep = entry_prices
         xp = exit_prices
 
-    if not _HAS_NUMBA:
-        return {
-            k: solve_optimal_trades_generic(
-                df,
-                k=k,
-                side=side,
-                entry_price_col=entry_col,
-                exit_price_col=exit_col,
-                min_profit_pct=min_profit_pct,
-            )
-            for k in normalized_ks
-        }
-
-    trades_by_k, counts = _solve_one_side_all_k_numba(
-        ep.astype(np.float64),
-        xp.astype(np.float64),
+    trades_by_k, counts = _solve_one_side_all_k_torch(
+        ep,
+        xp,
         max_k=max_k,
         min_profit_pct=float(min_profit_pct),
     )
@@ -412,8 +206,8 @@ def solve_optimal_trades_all_k_generic(
     for k in normalized_ks:
         trades: List[Trade] = []
         for idx in range(int(counts[k])):
-            entry_i = int(trades_by_k[k, idx, 0])
-            exit_i = int(trades_by_k[k, idx, 1])
+            entry_i = int(trades_by_k[k][idx][0])
+            exit_i = int(trades_by_k[k][idx][1])
             if entry_i < 0 or exit_i < 0:
                 continue
             raw_entry = float(entry_prices[entry_i])
@@ -425,8 +219,8 @@ def solve_optimal_trades_all_k_generic(
             trades.append(
                 Trade(
                     side=side,
-                    entry_row=df.iloc[entry_i],
-                    exit_row=df.iloc[exit_i],
+                    entry_row=df.row(entry_i, named=True),
+                    exit_row=df.row(exit_i, named=True),
                     entry_price=raw_entry,
                     exit_price=raw_exit,
                     profit=profit,
@@ -437,7 +231,7 @@ def solve_optimal_trades_all_k_generic(
 
 
 def solve_trades_by_frequency(
-    df: pd.DataFrame,
+    df: Frame,
     k: int,
     freq: str = "QE",
     side: Side = "long",
@@ -445,29 +239,20 @@ def solve_trades_by_frequency(
     entry_price_col: Optional[str] = None,
     exit_price_col: Optional[str] = None,
 ) -> List[Dict]:
-    if df is None or df.empty:
+    if df is None or df.is_empty():
         return []
-    freq_resolved, label_freq = _resolve_freq(freq)
-    if not isinstance(df.index, pd.DatetimeIndex):
-        if "date" in df.columns:
-            dfi = df.copy()
-            dfi["date"] = pd.to_datetime(dfi["date"], errors="coerce")
-            dfi = dfi.set_index("date")
-        else:
-            raise ValueError("solve_trades_by_frequency requires a DatetimeIndex or a 'date' column")
-    else:
-        dfi = df
-
-    dfi = dfi.sort_index()
+    if "date" not in df.columns:
+        raise ValueError("solve_trades_by_frequency requires a 'date' column")
+    _, label_freq = _resolve_freq(freq)
+    dfi = df.with_columns(pl.col("date").cast(pl.Datetime, strict=False).alias("date")).drop_nulls("date").sort("date")
+    dfi = dfi.with_columns(pl.col("date").map_elements(lambda value: _period_start(value, freq), return_dtype=pl.Datetime).alias("_period"))
     all_trades: List[Dict] = []
-    for period, group in dfi.groupby(pd.Grouper(freq=freq_resolved)):
-        if group is None or len(group) < 2:
+    for period_group in dfi.partition_by("_period", maintain_order=True):
+        if period_group.height < 2:
             continue
-        try:
-            ts = period.to_timestamp() if hasattr(period, "to_timestamp") else pd.to_datetime(period)
-            period_label = f"{label_freq}:{ts.date()}"
-        except Exception:
-            period_label = str(period)
+        period = period_group["_period"][0]
+        period_label = f"{label_freq}:{period.date()}"
+        group = period_group.drop("_period")
         trades = solve_optimal_trades_generic(
             group,
             k=k,
@@ -492,7 +277,7 @@ def solve_trades_by_frequency(
 
 
 def solve_longs_by_frequency(
-    df: pd.DataFrame,
+    df: Frame,
     k: int,
     freq: str = "QE",
     min_profit_pct: float = 0.01,
@@ -511,7 +296,7 @@ def solve_longs_by_frequency(
 
 
 def solve_shorts_by_frequency(
-    df: pd.DataFrame,
+    df: Frame,
     k: int,
     freq: str = "QE",
     min_profit_pct: float = 0.01,
@@ -529,7 +314,7 @@ def solve_shorts_by_frequency(
     )
 
 
-def _resolve_frame_column(df: pd.DataFrame, col: str) -> str:
+def _resolve_frame_column(df: Frame, col: str) -> str:
     col_map = {str(c).lower(): c for c in df.columns}
     key = str(col).lower()
     if key in col_map:
@@ -537,29 +322,26 @@ def _resolve_frame_column(df: pd.DataFrame, col: str) -> str:
     raise ValueError(f"Missing column '{col}' (needed by solver)")
 
 
-def _normalize_frame_for_batch(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or df.empty:
-        return pd.DataFrame()
-    out = df.copy()
-    if not isinstance(out.index, pd.DatetimeIndex):
-        if "date" not in out.columns:
-            raise ValueError("Batch solver requires a DatetimeIndex or a 'date' column")
-        out["date"] = pd.to_datetime(out["date"], errors="coerce")
-        out = out.dropna(subset=["date"]).set_index("date")
-    out = out.sort_index()
-    return out[~out.index.duplicated(keep="last")]
+def _normalize_frame_for_batch(df: Frame) -> Frame:
+    if df is None or df.is_empty(): return pl.DataFrame()
+    if "date" not in df.columns: raise ValueError("Batch solver requires a 'date' column")
+    return df.with_columns(pl.col("date").cast(pl.Datetime, strict=False).alias("date")).drop_nulls("date").sort("date").unique("date", keep="last")
 
 
 def _period_label(period: Any, label_freq: str) -> str:
-    try:
-        ts = period.to_timestamp() if hasattr(period, "to_timestamp") else pd.to_datetime(period)
-        return f"{label_freq}:{ts.date()}"
-    except Exception:
-        return str(period)
+    return f"{label_freq}:{period.date()}" if isinstance(period, datetime) else str(period)
+
+
+def _period_start(value: datetime, freq: str) -> datetime:
+    if freq == "W": return value - timedelta(days=value.weekday())
+    if freq in {"M", "ME"}: return value.replace(day=1)
+    if freq in {"QE", "Q"}: return value.replace(month=((value.month - 1) // 3) * 3 + 1, day=1)
+    if freq in {"YE", "Y"}: return value.replace(month=1, day=1)
+    return value
 
 
 def solve_side_trades_by_frequency_batched_multi_k(
-    price_frames: Mapping[str, pd.DataFrame],
+    price_frames: Mapping[str, Frame],
     ks: Sequence[int],
     freq: str = "QE",
     min_profit_pct: float = 0.01,
@@ -577,36 +359,38 @@ def solve_side_trades_by_frequency_batched_multi_k(
     symbols = [
         str(symbol).strip().upper()
         for symbol, frame in price_frames.items()
-        if str(symbol).strip() and frame is not None and not frame.empty
+        if str(symbol).strip() and frame is not None and not frame.is_empty()
     ]
     results: dict[int, dict[str, List[Dict]]] = {
         k: {symbol: [] for symbol in symbols}
         for k in normalized_ks
     }
-    period_buckets: dict[str, list[tuple[str, pd.DataFrame]]] = {}
-    period_order: dict[str, pd.Timestamp] = {}
+    period_buckets: dict[str, list[tuple[str, Frame]]] = {}
+    period_order: dict[str, datetime] = {}
     normalized_sides = tuple(dict.fromkeys(side for side in sides if side in {"long", "short"}))
     if not normalized_sides:
         return results
 
     for symbol, frame in price_frames.items():
         symbol_name = str(symbol).strip().upper()
-        if frame is None or frame.empty or not symbol_name:
+        if frame is None or frame.is_empty() or not symbol_name:
             continue
         dfi = _normalize_frame_for_batch(frame)
-        if dfi.empty:
+        if dfi.is_empty():
             continue
-        for period, group in dfi.groupby(pd.Grouper(freq=freq_resolved)):
-            if group is None or len(group) < 2:
+        dfi = dfi.with_columns(pl.col("date").map_elements(lambda value: _period_start(value, freq), return_dtype=pl.Datetime).alias("_period"))
+        for group in dfi.partition_by("_period", maintain_order=True):
+            if group.height < 2:
                 continue
+            period = group["_period"][0]
             label = _period_label(period, label_freq)
             if label not in period_buckets:
                 period_buckets[label] = []
                 try:
-                    period_order[label] = period.to_timestamp() if hasattr(period, "to_timestamp") else pd.to_datetime(period)
+                    period_order[label] = period
                 except Exception:
-                    period_order[label] = pd.Timestamp.min
-            period_buckets[label].append((symbol_name, group))
+                    period_order[label] = datetime.min
+            period_buckets[label].append((symbol_name, group.drop("_period")))
 
     if not period_buckets:
         return results
@@ -616,13 +400,13 @@ def solve_side_trades_by_frequency_batched_multi_k(
     se_col_hint = short_entry_price_col or "low"
     sx_col_hint = short_exit_price_col or "high"
 
-    task_frames: list[pd.DataFrame] = []
+    task_frames: list[Frame] = []
     task_symbols: list[str] = []
     task_labels: list[str] = []
     task_sides: list[Side] = []
     task_columns: list[tuple[str, str]] = []
 
-    for label in sorted(period_buckets, key=lambda item: period_order.get(item, pd.Timestamp.min)):
+    for label in sorted(period_buckets, key=lambda item: period_order.get(item, datetime.min)):
         for symbol, group in period_buckets[label]:
             if "long" in normalized_sides:
                 task_symbols.append(symbol)

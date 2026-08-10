@@ -1,400 +1,198 @@
 from __future__ import annotations
 
-import datetime as dt
 import re
+from datetime import datetime
 
-import numpy as np
-import pandas as pd
+import polars as pl
 
 from quant_warehouse.warehouse.sections import MIN_HISTORICAL_DATE
 
 INDEX_CANDIDATES = (
-    "period_ending",
-    "date",
-    "as_of",
-    "ex_dividend_date",
-    "payment_date",
-    "record_date",
-    "announcement_date",
-    "filing_date",
-    "accepted_date",
-    "report_date",
-    "split_date",
-    "transaction_date",
-    "published_date",
-    "disclosure_date",
-    "ipo_date",
+    "period_ending", "date", "as_of", "ex_dividend_date", "payment_date",
+    "record_date", "announcement_date", "filing_date", "accepted_date",
+    "report_date", "split_date", "transaction_date", "published_date",
+    "disclosure_date", "ipo_date",
 )
 PRICE_INDEX_CANDIDATES = ("date",)
-STANDARD_PRICE_COLUMNS = frozenset(
-    {"open", "high", "low", "close", "volume", "adj_open", "adj_high", "adj_low", "adj_close"}
-)
 PRICE_COLUMN_ALIASES: dict[str, tuple[str, ...]] = {
-    "open": ("open",),
-    "high": ("high",),
-    "low": ("low",),
-    "close": ("close",),
-    "volume": ("volume", "vol"),
-    "adj_open": ("adj_open", "adjopen"),
-    "adj_high": ("adj_high", "adjhigh"),
+    "open": ("open",), "high": ("high",), "low": ("low",),
+    "close": ("close",), "volume": ("volume", "vol"),
+    "adj_open": ("adj_open", "adjopen"), "adj_high": ("adj_high", "adjhigh"),
     "adj_low": ("adj_low", "adjlow"),
     "adj_close": ("adj_close", "adjclose", "adj_close_price"),
 }
 METADATA_COLUMNS = {
-    "symbol",
-    "cik",
-    "link",
-    "final_link",
-    "reported_currency",
-    "currency",
-    "fiscal_year",
-    "calendar_year",
-    "period",
+    "symbol", "cik", "link", "final_link", "reported_currency", "currency",
+    "fiscal_year", "calendar_year", "period",
 }
-
-PANEL_DIMENSION_COLUMNS = frozenset(
-    {
-        "business_line",
-        "region",
-        "cusip",
-        "isin",
-        "lei",
-        "name",
-        "title",
-        "symbol",
-        "fiscal_period",
-    }
-)
+PANEL_DIMENSION_COLUMNS = frozenset({
+    "business_line", "region", "cusip", "isin", "lei", "name", "title",
+    "symbol", "fiscal_period", "sector", "country", "industry",
+})
 
 
 def symbol_provider_key(symbol: str, provider: str) -> str:
     return f"{symbol.strip().upper()}__{provider.strip().lower()}"
 
 
-def clip_to_min_historical_date(
-    frame: pd.DataFrame,
-    *,
-    min_date: str = MIN_HISTORICAL_DATE,
-) -> pd.DataFrame:
-    """Drop rows indexed before the warehouse historical floor."""
-    if frame.empty:
+def _to_snake(name: str) -> str:
+    return re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", str(name)).lower().strip()
+
+
+def _date_expr(frame: pl.DataFrame, column: str) -> pl.Expr:
+    if frame.schema[column] == pl.String:
+        return pl.col(column).str.to_datetime(strict=False)
+    return pl.col(column).cast(pl.Datetime, strict=False)
+
+
+def _floor_expr(min_date: str | None) -> datetime:
+    return datetime.fromisoformat(min_date or MIN_HISTORICAL_DATE)
+
+
+def _finite_numeric(frame: pl.DataFrame, columns: list[str]) -> pl.DataFrame:
+    if not columns:
         return frame
-    floor = pd.Timestamp(min_date)
-    if isinstance(frame.index, pd.DatetimeIndex):
-        if frame.index.tz is not None and floor.tzinfo is None:
-            floor = floor.tz_localize(frame.index.tz)
-        elif frame.index.tz is None and floor.tzinfo is not None:
-            floor = floor.tz_convert(None)
-        clipped = frame[frame.index >= floor]
-        clipped.index = pd.DatetimeIndex(clipped.index)
-        return clipped.sort_index()
+    return frame.with_columns(
+        pl.when(pl.col(column).cast(pl.Float64, strict=False).is_finite())
+        .then(pl.col(column).cast(pl.Float64, strict=False))
+        .otherwise(None)
+        .alias(column)
+        for column in columns
+    )
+
+
+def clip_to_min_historical_date(frame: pl.DataFrame, *, min_date: str = MIN_HISTORICAL_DATE) -> pl.DataFrame:
+    """Drop rows before the warehouse floor using an explicit date column."""
+    if frame.is_empty():
+        return frame
+    column = next((name for name in INDEX_CANDIDATES if name in frame.columns), None)
+    if column is None:
+        return frame
+    out = frame.with_columns(_date_expr(frame, column).alias(column)).drop_nulls(column)
+    return out.filter(pl.col(column) >= pl.lit(_floor_expr(min_date))).sort(column)
+
+
+def _pick_index_column(frame: pl.DataFrame) -> str | None:
     for column in INDEX_CANDIDATES:
-        if column not in frame.columns:
-            continue
-        dates = pd.to_datetime(frame[column], errors="coerce")
-        return frame.loc[dates >= floor].copy()
-    return frame
-
-
-def _pick_index_column(df: pd.DataFrame) -> str | None:
-    for col in INDEX_CANDIDATES:
-        if col in df.columns and df[col].notna().any():
-            return col
+        if column in frame.columns and frame[column].drop_nulls().len():
+            return column
     return None
 
 
-def _to_snake(name: str) -> str:
-    name = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", str(name))
-    return name.lower().strip()
-
-
-def _reset_temporal_index(df: pd.DataFrame) -> pd.DataFrame:
-    out = df.copy()
-    if any(col in out.columns for col in INDEX_CANDIDATES):
-        return out
-    if isinstance(out.index, pd.DatetimeIndex) or out.index.name in INDEX_CANDIDATES:
-        out = out.reset_index()
-        index_name = out.columns[0]
-        if index_name not in INDEX_CANDIDATES:
-            out = out.rename(columns={index_name: "period_ending"})
-    return out
+def _normalize_columns(frame: pl.DataFrame, *, provider: str, prefix: str | None) -> tuple[pl.DataFrame, str] | None:
+    if frame.is_empty():
+        return frame, "date"
+    source = frame.clone()
+    index_col = _pick_index_column(source)
+    if index_col is None:
+        return None
+    source = source.with_columns(_date_expr(source, index_col).alias(index_col)).drop_nulls(index_col)
+    rename: dict[str, str] = {}
+    for column in source.columns:
+        if column == index_col or column in METADATA_COLUMNS:
+            continue
+        base = _to_snake(column)
+        rename[column] = f"{prefix}__{base}" if prefix else base
+    out = source.rename(rename)
+    keep = [index_col, *rename.values()]
+    out = out.select([column for column in keep if column in out.columns])
+    numeric = [column for column in out.columns if column != index_col and column not in PANEL_DIMENSION_COLUMNS]
+    out = _finite_numeric(out, numeric)
+    return out.unique([index_col], keep="last", maintain_order=True).sort(index_col), index_col
 
 
 def normalize_vendor_frame(
-    df: pd.DataFrame,
-    *,
-    provider: str,
-    vendor_only_prefix: str | None = None,
+    df: pl.DataFrame, *, provider: str, vendor_only_prefix: str | None = None,
     min_date: str | None = None,
-) -> pd.DataFrame:
-    if df.empty:
-        return df
-
-    out = _reset_temporal_index(df)
-    index_col = _pick_index_column(out)
-    if index_col is None:
-        return pd.DataFrame()
-
-    out[index_col] = pd.to_datetime(out[index_col], errors="coerce")
-    out = out.dropna(subset=[index_col])
-    out = out.sort_values(index_col)
-
-    rename: dict[str, str] = {}
-    for col in out.columns:
-        if col == index_col:
-            continue
-        base = _to_snake(col)
-        if base in METADATA_COLUMNS:
-            continue
-        if vendor_only_prefix:
-            rename[col] = f"{vendor_only_prefix}__{base}"
-        else:
-            rename[col] = base
-
-    out = out.rename(columns=rename)
-    keep = [index_col] + [rename[c] for c in rename]
-    out = out[keep]
-
-    for col in out.columns:
-        if col == index_col:
-            continue
-        out[col] = pd.to_numeric(out[col], errors="coerce")
-
-    out = out.replace([np.inf, -np.inf], np.nan)
-    out = out.drop_duplicates(subset=[index_col], keep="last")
-    out = out.set_index(index_col)
-    out.index.name = index_col
+) -> pl.DataFrame:
+    normalized = _normalize_columns(df, provider=provider, prefix=vendor_only_prefix)
+    if normalized is None:
+        return pl.DataFrame()
+    out, _ = normalized
     return clip_to_min_historical_date(out, min_date=min_date or MIN_HISTORICAL_DATE)
 
 
 def normalize_panel_frame(
-    df: pd.DataFrame,
-    *,
-    provider: str,
-    vendor_only_prefix: str | None = None,
+    df: pl.DataFrame, *, provider: str, vendor_only_prefix: str | None = None,
     min_date: str | None = None,
-) -> pd.DataFrame:
-    """Normalize repeated cross-sections keyed by a filing/as-of date."""
-    if df.empty:
+) -> pl.DataFrame:
+    normalized = _normalize_columns(df, provider=provider, prefix=vendor_only_prefix)
+    if normalized is None:
+        return pl.DataFrame()
+    out, index_col = normalized
+    keys = [index_col, *(column for column in PANEL_DIMENSION_COLUMNS if column in out.columns)]
+    return clip_to_min_historical_date(
+        out.unique(keys, keep="last", maintain_order=True), min_date=min_date or MIN_HISTORICAL_DATE
+    )
+
+
+def coerce_object_dates(frame: pl.DataFrame) -> pl.DataFrame:
+    expressions = []
+    for column, dtype in frame.schema.items():
+        name = str(column).lower()
+        if dtype == pl.Date:
+            expressions.append(pl.col(column).cast(pl.Datetime).alias(column))
+        elif dtype == pl.String and ("date" in name or name.endswith("_at")):
+            expressions.append(pl.col(column).str.to_datetime(strict=False).alias(column))
+    return frame.with_columns(expressions) if expressions else frame
+
+
+def _coerce_object_strings(frame: pl.DataFrame) -> pl.DataFrame:
+    return frame
+
+
+def normalize_dated_snapshot_frame(df: pl.DataFrame, *, section: str) -> pl.DataFrame:
+    if df.is_empty():
         return df
-
-    out = _reset_temporal_index(df)
-    index_col = _pick_index_column(out)
-    if index_col is None:
-        return pd.DataFrame()
-
-    out[index_col] = pd.to_datetime(out[index_col], errors="coerce")
-    out = out.dropna(subset=[index_col]).sort_values(index_col)
-
-    rename: dict[str, str] = {}
-    for col in out.columns:
-        if col == index_col:
-            continue
-        base = _to_snake(col)
-        if base in METADATA_COLUMNS:
-            continue
-        if vendor_only_prefix:
-            rename[col] = f"{vendor_only_prefix}__{base}"
-        else:
-            rename[col] = base
-
-    out = out.rename(columns=rename)
-    keep = [index_col] + [rename[c] for c in rename]
-    out = out[keep]
-
-    for col in out.columns:
-        if col == index_col or col in PANEL_DIMENSION_COLUMNS or not pd.api.types.is_numeric_dtype(out[col]):
-            continue
-        out[col] = pd.to_numeric(out[col], errors="coerce")
-
-    out = out.replace([np.inf, -np.inf], np.nan)
-    dedupe_keys = [
-        key
-        for key in out.columns
-        if key in PANEL_DIMENSION_COLUMNS
-        or pd.api.types.is_object_dtype(out[key])
-        or pd.api.types.is_string_dtype(out[key])
-        or pd.api.types.is_datetime64_any_dtype(out[key])
-    ]
-    dedupe_cols = [index_col, *dedupe_keys]
-    out = out.drop_duplicates(subset=dedupe_cols, keep="last")
-    out = out.set_index(index_col)
-    out.index.name = index_col
-    out.index = pd.DatetimeIndex(out.index)
-    if out.index.tz is not None:
-        out.index = out.index.tz_convert(None)
-    out = coerce_object_dates(out)
-    out = _coerce_object_strings(out)
-    return clip_to_min_historical_date(out, min_date=min_date or MIN_HISTORICAL_DATE)
-
-
-def coerce_object_dates(frame: pd.DataFrame) -> pd.DataFrame:
-    """Convert datetime.date values in object columns to timestamps for Arctic writes."""
-    if frame.empty:
-        return frame
-    out = frame.copy()
-    for column in out.columns:
-        if out[column].dtype != object:
-            continue
-        sample = out[column].dropna()
-        if sample.empty:
-            continue
-        value = sample.iloc[0]
-        if isinstance(value, dt.date) and not isinstance(value, dt.datetime):
-            out[column] = pd.to_datetime(out[column], errors="coerce")
-    return out
-
-
-def _coerce_object_strings(frame: pd.DataFrame) -> pd.DataFrame:
-    """Convert remaining object columns to nullable strings for Arctic writes."""
-    if frame.empty:
-        return frame
-    out = frame.copy()
-    for column in out.columns:
-        if out[column].dtype != object:
-            continue
-        out[column] = out[column].map(lambda value: None if pd.isna(value) else str(value))
-    return out
-
-
-def normalize_dated_snapshot_frame(df: pd.DataFrame, *, section: str) -> pd.DataFrame:
-    """Normalize cross-sectional snapshots into a dated panel for Arctic storage."""
-    source = df.copy()
-    if section in {"ownership_institutional", "ownership_share_statistics"} and "date" not in source.columns:
-        if isinstance(source.index, pd.DatetimeIndex) or str(source.index.name).lower() in {"date", "as_of"}:
-            source = source.reset_index()
-    out = normalize_snapshot_frame(source)
-    if out.empty:
+    out = normalize_snapshot_frame(df)
+    if out.is_empty():
         return out
-
-    as_of_name = "as_of"
     if section == "etf_holdings" and "updated" in out.columns:
-        out["updated"] = pd.to_datetime(out["updated"], errors="coerce")
-        out = out.dropna(subset=["updated"])
-        out = out.set_index("updated")
-        out.index.name = as_of_name
+        out = out.with_columns(_date_expr(out, "updated").alias("as_of")).drop("updated")
     elif section in {"ownership_institutional", "ownership_share_statistics"} and "date" in out.columns:
-        # These FMP ownership routes return one row per reporting quarter.
-        # Preserve that historical date instead of collapsing all rows onto
-        # the ingestion timestamp.
-        out["date"] = pd.to_datetime(out["date"], errors="coerce", utc=True).dt.tz_convert(None).dt.normalize()
-        out = out.dropna(subset=["date"])
-        out = out.set_index("date")
-        out.index.name = as_of_name
+        out = out.with_columns(_date_expr(out, "date").dt.replace_time_zone(None).dt.truncate("1d").alias("as_of"))
     else:
-        as_of = pd.Timestamp.utcnow().normalize()
-        out[as_of_name] = as_of
-        out = out.set_index(as_of_name)
-
-    out.index = pd.DatetimeIndex(out.index)
-    dedupe_cols = [as_of_name, *(
-        key
-        for key in (
-            "cusip",
-            "isin",
-            "name",
-            "sector",
-            "country",
-            "symbol",
-            "title",
-            "cik",
-        )
-        if key in out.reset_index().columns
-    )]
-    reset = out.reset_index()
-    reset = reset.drop_duplicates(subset=dedupe_cols, keep="last")
-    out = reset.set_index(as_of_name)
-    out.index = pd.DatetimeIndex(out.index)
-    return out.sort_index()
+        out = out.with_columns(pl.lit(datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)).alias("as_of"))
+    dimensions = [column for column in ("cusip", "isin", "name", "sector", "country", "symbol", "title", "cik") if column in out.columns]
+    return out.unique(["as_of", *dimensions], keep="last", maintain_order=True).sort("as_of")
 
 
-def normalize_etf_composition_frame(df: pd.DataFrame, *, section: str) -> pd.DataFrame:
+def normalize_etf_composition_frame(df: pl.DataFrame, *, section: str) -> pl.DataFrame:
     return normalize_dated_snapshot_frame(df, section=section)
 
 
-def normalize_snapshot_frame(df: pd.DataFrame) -> pd.DataFrame:
-    """Normalize cross-sectional frames (holdings, sectors) without a time index."""
-    if df.empty:
+def normalize_snapshot_frame(df: pl.DataFrame) -> pl.DataFrame:
+    if df.is_empty():
         return df
-
-    out = df.copy()
-    rename: dict[str, str] = {}
-    for col in out.columns:
-        if col in METADATA_COLUMNS:
-            continue
-        rename[col] = _to_snake(col)
-
-    out = out.rename(columns=rename)
-    for col in out.columns:
-        out[col] = pd.to_numeric(out[col], errors="ignore")
-
-    out = out.replace([np.inf, -np.inf], np.nan)
-    return out.reset_index(drop=True)
+    rename = {column: _to_snake(column) for column in df.columns if column not in METADATA_COLUMNS}
+    out = df.rename(rename)
+    return _finite_numeric(out, [column for column in out.columns if column not in PANEL_DIMENSION_COLUMNS and out.schema[column].is_numeric()])
 
 
 def _resolve_price_column(name: str) -> str | None:
     base = _to_snake(name)
-    for canonical, aliases in PRICE_COLUMN_ALIASES.items():
-        if base in aliases:
-            return canonical
-    return None
+    return next((canonical for canonical, aliases in PRICE_COLUMN_ALIASES.items() if base in aliases), None)
 
 
-def normalize_prices(df: pd.DataFrame, *, provider: str, min_date: str | None = None) -> pd.DataFrame:
-    """Normalize vendor OHLCV frames to a shared daily schema indexed by date."""
-    if df.empty:
+def normalize_prices(df: pl.DataFrame, *, provider: str, min_date: str | None = None) -> pl.DataFrame:
+    if df.is_empty():
         return df
-
-    out = df.copy()
-    if not any(col in out.columns for col in PRICE_INDEX_CANDIDATES):
-        if isinstance(out.index, pd.DatetimeIndex) or out.index.name in PRICE_INDEX_CANDIDATES:
-            out = out.reset_index()
-            index_name = out.columns[0]
-            if index_name != "date":
-                out = out.rename(columns={index_name: "date"})
-
-    index_col = _pick_index_column(out)
+    index_col = next((column for column in PRICE_INDEX_CANDIDATES if column in df.columns), None)
     if index_col is None:
-        return pd.DataFrame()
-
-    out[index_col] = pd.to_datetime(out[index_col], errors="coerce")
-    out = out.dropna(subset=[index_col]).sort_values(index_col)
-
+        return pl.DataFrame()
+    out = df.clone().with_columns(_date_expr(df, index_col).alias("date")).drop_nulls("date")
     rename: dict[str, str] = {}
-    for col in out.columns:
-        if col == index_col or col in METADATA_COLUMNS:
+    for column in out.columns:
+        if column in {index_col, "date"} or column in METADATA_COLUMNS:
             continue
-        canonical = _resolve_price_column(col)
-        if canonical is None:
-            rename[col] = f"{provider}__{_to_snake(col)}"
-        else:
-            rename[col] = canonical
-
-    out = out.rename(columns=rename)
-    seen: set[str] = set()
-    ordered_keep: list[str] = []
-    for col in [index_col] + [rename[c] for c in rename]:
-        if col not in seen:
-            ordered_keep.append(col)
-            seen.add(col)
-    out = out[ordered_keep]
-
-    for raw_col, adjusted_col in (
-        ("open", "adj_open"),
-        ("high", "adj_high"),
-        ("low", "adj_low"),
-        ("close", "adj_close"),
-    ):
-        if raw_col not in out.columns and adjusted_col in out.columns:
-            out[raw_col] = out[adjusted_col]
-
-    for col in out.columns:
-        if col == index_col:
-            continue
-        out[col] = pd.to_numeric(out[col], errors="coerce")
-
-    out = out.replace([np.inf, -np.inf], np.nan)
-    out = out.drop_duplicates(subset=[index_col], keep="last")
-    out = out.set_index(index_col)
-    out.index.name = "date"
-    return clip_to_min_historical_date(out, min_date=min_date or MIN_HISTORICAL_DATE)
+        rename[column] = _resolve_price_column(column) or f"{provider}__{_to_snake(column)}"
+    out = out.rename(rename)
+    if index_col != "date" and index_col in out.columns:
+        out = out.drop(index_col)
+    for raw, adjusted in (("open", "adj_open"), ("high", "adj_high"), ("low", "adj_low"), ("close", "adj_close")):
+        if raw not in out.columns and adjusted in out.columns:
+            out = out.with_columns(pl.col(adjusted).alias(raw))
+    out = _finite_numeric(out, [column for column in out.columns if column != "date"])
+    return out.unique("date", keep="last", maintain_order=True).sort("date").filter(
+        pl.col("date") >= pl.lit(_floor_expr(min_date or MIN_HISTORICAL_DATE))
+    )

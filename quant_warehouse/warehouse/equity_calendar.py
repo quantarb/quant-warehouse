@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 
-import pandas as pd
+import polars as pl
 
 from quant_warehouse.catalog.store import CatalogStore
 from quant_warehouse.config import WarehouseConfig
@@ -21,16 +21,16 @@ from quant_warehouse.warehouse.storage import provider_library
 GAP_OVERLAP_DAYS = 5
 
 
-def _min_date_text(frame: pd.DataFrame) -> str | None:
-    if frame.empty or not isinstance(frame.index, pd.DatetimeIndex):
+def _min_date_text(frame: pl.DataFrame) -> str | None:
+    if frame.is_empty() or "date" not in frame.columns:
         return None
-    return frame.index.min().strftime("%Y-%m-%d")
+    return frame.get_column("date").min().strftime("%Y-%m-%d")
 
 
-def _max_date_text(frame: pd.DataFrame) -> str | None:
-    if frame.empty or not isinstance(frame.index, pd.DatetimeIndex):
+def _max_date_text(frame: pl.DataFrame) -> str | None:
+    if frame.is_empty() or "date" not in frame.columns:
         return None
-    return frame.index.max().strftime("%Y-%m-%d")
+    return frame.get_column("date").max().strftime("%Y-%m-%d")
 
 
 class EquityCalendarStore:
@@ -70,14 +70,14 @@ class EquityCalendarStore:
             )
             if state is not None and state.max_date:
                 fetch_start = (
-                    pd.Timestamp(state.max_date) - timedelta(days=GAP_OVERLAP_DAYS)
+                    datetime.fromisoformat(str(state.max_date)[:10]) - timedelta(days=GAP_OVERLAP_DAYS)
                 ).strftime("%Y-%m-%d")
 
         library = provider_library(fundamental_library(section), provider)
         storage_symbol = symbol_provider_key(EQUITY_CALENDAR_BUNDLE_SYMBOL, provider)
         existing = self.backend.read(library, storage_symbol)
         if full_refresh:
-            existing = pd.DataFrame()
+            existing = pl.DataFrame()
 
         incoming = fetch_equity_calendar_range(
             section,
@@ -86,7 +86,7 @@ class EquityCalendarStore:
             end_date=end_date,
         )
         merged = merge_panel_upsert(existing, incoming)
-        if not merged.empty:
+        if not merged.is_empty():
             self.backend.write(library, storage_symbol, merged)
 
         self.catalog.upsert(
@@ -134,16 +134,16 @@ class EquityCalendarStore:
         provider: str = "fmp",
         start: str | None = None,
         end: str | None = None,
-    ) -> pd.DataFrame:
+    ) -> pl.DataFrame:
         provider = str(provider or "fmp").strip().lower()
         library = provider_library(fundamental_library(section), provider)
         storage_symbol = symbol_provider_key(EQUITY_CALENDAR_BUNDLE_SYMBOL, provider)
-        frame = self.backend.read(library, storage_symbol)
-        if frame is None or frame.empty:
-            return pd.DataFrame()
-        out = frame.copy()
-        if start is not None:
-            out = out.loc[out.index >= pd.Timestamp(start)]
-        if end is not None:
-            out = out.loc[out.index <= pd.Timestamp(end)]
-        return out
+        frame = self.backend.read(library, storage_symbol, output_format="polars")
+        if frame is None or frame.is_empty():
+            return pl.DataFrame()
+        predicate = pl.lit(True)
+        if start is not None and "date" in frame.columns:
+            predicate = predicate & (pl.col("date") >= datetime.fromisoformat(str(start)[:10]))
+        if end is not None and "date" in frame.columns:
+            predicate = predicate & (pl.col("date") <= datetime.fromisoformat(str(end)[:10]))
+        return frame.filter(predicate)

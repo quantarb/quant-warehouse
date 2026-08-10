@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime
 from pathlib import Path
 
-import pandas as pd
+import polars as pl
 
 from quant_warehouse import Warehouse
 from quant_warehouse.platforms.data_providers.fmp.target_engineering import LabelBuildSpec, build_trade_results
@@ -15,13 +16,11 @@ from quant_warehouse.platforms.data_providers.thetadata.options import (
 )
 
 
-def _load_price_frame(symbol: str, start: str, end: str) -> pd.DataFrame:
+def _load_price_frame(symbol: str, start: str, end: str) -> pl.DataFrame:
     df = Warehouse().read_prices(symbol, provider="fmp", start=start, end=end)
-    if df.empty:
+    if df.is_empty():
         raise RuntimeError(f"No warehouse price history returned for {symbol}")
-    frame = df.reset_index().rename(columns={"index": "date"})
-    frame["date"] = pd.to_datetime(frame["date"]).dt.tz_localize(None)
-    return frame.set_index("date").sort_index()
+    return df.sort("date")
 
 
 def main() -> None:
@@ -44,27 +43,27 @@ def main() -> None:
 
     trade_result = build_trade_results([symbol], spec=spec, price_frames={symbol: price_frame})
     trade = next(t for t in trade_result.completed_trades if t["side"] == "short")
-    entry = pd.Timestamp(trade["entry_date"])
-    exit = pd.Timestamp(trade["exit_date"])
+    entry = datetime.fromisoformat(str(trade["entry_date"])[:10])
+    exit = datetime.fromisoformat(str(trade["exit_date"])[:10])
 
     snapshots = load_thetadata_option_snapshots(symbol, [entry, exit], api_key=api_key)
     normalized = {ts: normalize_thetadata_option_chain(df) for ts, df in snapshots.items()}
     labels = build_option_labels([trade], normalized)
-    label_df = pd.DataFrame(labels.option_rows)
+    label_df = pl.DataFrame(labels.option_rows)
 
     out_dir = Path("notebooks/outputs")
     out_dir.mkdir(parents=True, exist_ok=True)
     label_path = out_dir / f"thetadata_{symbol.lower()}_{entry.date()}_{exit.date()}_option_labels.csv"
     summary_path = out_dir / f"thetadata_{symbol.lower()}_{entry.date()}_{exit.date()}_option_summary.json"
 
-    label_df.to_csv(label_path, index=False)
+    label_df.write_csv(label_path)
     with summary_path.open("w", encoding="utf-8") as handle:
         json.dump(labels.statistics, handle, indent=2, default=str)
 
     print(f"trade={trade}")
     print(f"labels={len(label_df)} saved={label_path}")
     print(f"summary saved={summary_path}")
-    if not label_df.empty:
+    if not label_df.is_empty():
         cols = [
             col
             for col in [
@@ -79,7 +78,7 @@ def main() -> None:
             ]
             if col in label_df.columns
         ]
-        print(label_df.sort_values(["rank_y", "option_return_pct"], ascending=[False, False])[cols].head(10).to_string(index=False))
+        print(label_df.sort(["rank_y", "option_return_pct"], descending=[True, True]).select(cols).head(10))
 
 
 if __name__ == "__main__":

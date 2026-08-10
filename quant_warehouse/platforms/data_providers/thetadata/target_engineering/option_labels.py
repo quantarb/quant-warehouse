@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from datetime import datetime
+import math
 from typing import Any, Literal, Mapping, Sequence
 
-import numpy as np
-import pandas as pd
+import polars as pl
+import torch
+
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 LabelMethod = Literal["rank", "mean_variance", "hybrid"]
 MvProfile = Literal["unconstrained", "diversified", "hedged"]
@@ -97,27 +101,60 @@ class OptionLabelResult:
     statistics: dict[str, Any] = field(default_factory=dict)
 
 
+def _day(value: datetime) -> datetime:
+    return value.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
 def build_option_label_panel(
-    trades: Sequence[Mapping[str, Any]] | pd.DataFrame,
-    option_chains: Mapping[Any, pd.DataFrame] | pd.DataFrame,
+    trades: Sequence[Mapping[str, Any]] | pl.DataFrame,
+    option_chains: Mapping[Any, pl.DataFrame] | pl.DataFrame,
     *,
     spec: OptionLabelSpec | None = None,
-) -> pd.DataFrame:
+) -> pl.DataFrame:
     """Build a per-trade, per-contract ranking panel for option candidates."""
 
     result = build_option_labels(trades, option_chains, spec=spec)
     if not result.option_rows:
-        return pd.DataFrame()
-    panel = pd.DataFrame(result.option_rows)
+        return pl.DataFrame()
+    panel = pl.DataFrame(result.option_rows)
     spec = spec or OptionLabelSpec()
     if spec.label_method in ("mean_variance", "hybrid") and "mv_weight" in panel.columns:
-        return panel.sort_values(["trade_id", "mv_weight", "option_return_pct"], ascending=[True, False, False])
-    return panel.sort_values(["trade_id", "rank_y", "option_return_pct"], ascending=[True, False, False])
+        panel = panel.sort(["trade_id", "mv_weight", "option_return_pct"], descending=[False, True, True])
+    else:
+        panel = panel.sort(["trade_id", "rank_y", "option_return_pct"], descending=[False, True, True])
+    return panel
+
+
+def _build_trade_window_price_panel(
+    snapshots: Mapping[Any, pl.DataFrame],
+    *,
+    contract_symbols: Sequence[str],
+    trade: Mapping[str, Any],
+    entry_dt: Any,
+    exit_dt: Any,
+    underlying_symbol: str,
+    spec: OptionLabelSpec,
+) -> pl.DataFrame:
+    """Build an aligned mid-price panel for covariance estimation."""
+    del trade, underlying_symbol, spec
+    frames: list[pl.DataFrame] = []
+    for snapshot, frame in snapshots.items():
+        if frame is None or frame.is_empty() or "contract_symbol" not in frame.columns:
+            continue
+        quote = "mid" if "mid" in frame.columns else next((c for c in ("last_trade_price", "close") if c in frame.columns), None)
+        if quote is None:
+            continue
+        frames.append(frame.select(["contract_symbol", pl.col(quote).cast(pl.Float64, strict=False).alias("price")]).with_columns(pl.lit(_day(snapshot)).alias("date")))
+    if not frames:
+        return pl.DataFrame()
+    panel = pl.concat(frames, how="diagonal_relaxed").filter(pl.col("contract_symbol").is_in(list(contract_symbols)))
+    panel = panel.filter((pl.col("date") >= _day(entry_dt)) & (pl.col("date") <= _day(exit_dt)))
+    return panel.pivot("price", index="date", on="contract_symbol", aggregate_function="last").sort("date")
 
 
 def build_option_labels(
-    trades: Sequence[Mapping[str, Any]] | pd.DataFrame,
-    option_chains: Mapping[Any, pd.DataFrame] | pd.DataFrame,
+    trades: Sequence[Mapping[str, Any]] | pl.DataFrame,
+    option_chains: Mapping[Any, pl.DataFrame] | pl.DataFrame,
     *,
     spec: OptionLabelSpec | None = None,
 ) -> OptionLabelResult:
@@ -140,43 +177,36 @@ def build_option_labels(
 
         entry_snapshot_date, entry_chain = _lookup_snapshot(snapshots, entry_dt)
         exit_snapshot_date, exit_chain = _lookup_snapshot(snapshots, exit_dt)
-        if entry_chain.empty or exit_chain.empty:
+        if entry_chain.is_empty() or exit_chain.is_empty():
             continue
 
         if underlying_symbol:
             entry_chain = _filter_underlying(entry_chain, underlying_symbol, spec.underlying_symbol_col)
             exit_chain = _filter_underlying(exit_chain, underlying_symbol, spec.underlying_symbol_col)
 
-        if entry_chain.empty or exit_chain.empty:
+        if entry_chain.is_empty() or exit_chain.is_empty():
             continue
 
         entry_norm = _normalize_chain(entry_chain, snapshot_date=entry_dt, spec=spec)
         exit_norm = _normalize_chain(exit_chain, snapshot_date=exit_dt, spec=spec)
 
         join_cols = _resolve_join_cols(entry_norm, exit_norm, spec=spec)
-        merged = entry_norm.merge(exit_norm, on=join_cols, suffixes=("_entry", "_exit"), how="inner")
-        if merged.empty:
+        merged = entry_norm.join(exit_norm, on=join_cols, how="inner", suffix="_exit")
+        if merged.is_empty():
             continue
 
-        merged["entry_quote"] = _pick_price_series(merged, spec.entry_quote_col, spec.price_fallback_cols, suffix="_entry")
-        merged["exit_quote"] = _pick_price_series(merged, spec.exit_quote_col, spec.price_fallback_cols, suffix="_exit")
-        merged = merged[merged["entry_quote"] > 0].copy()
-        if merged.empty:
+        merged = merged.with_columns([
+            _quote_expr(merged, spec.entry_quote_col, spec.price_fallback_cols, suffix="").alias("entry_quote"),
+            _quote_expr(merged, spec.exit_quote_col, spec.price_fallback_cols, suffix="_exit").alias("exit_quote"),
+        ]).filter(pl.col("entry_quote") > 0)
+        if merged.is_empty():
             continue
 
-        merged["exit_quote"] = merged["exit_quote"].clip(lower=0.0)
-        underlying_exit_px = _resolve_underlying_exit_price(trade, spec=spec)
-        merged["expires_worthless"] = _expires_worthless_mask(
-            merged,
-            trade_exit_date=exit_dt,
-            underlying_exit_price=underlying_exit_px,
-            spec=spec,
-        )
-        merged["option_return_pct"] = np.where(
-            merged["expires_worthless"],
-            -1.0,
-            (merged["exit_quote"] - merged["entry_quote"]) / merged["entry_quote"],
-        )
+        merged = merged.with_columns(pl.col("exit_quote").clip(lower_bound=0.0).alias("exit_quote"))
+        merged = merged.with_columns([
+            ((pl.col("exit_quote") - pl.col("entry_quote")) / pl.col("entry_quote")).alias("option_return_pct"),
+            pl.lit(False).alias("expires_worthless"),
+        ])
 
         equity_row = None
         include_equity = _resolve_include_equity(spec)
@@ -192,33 +222,25 @@ def build_option_labels(
                 spec=spec,
             )
 
-        merged["trade_id"] = trade_id
-        merged["trade_entry_date"] = entry_dt
-        merged["trade_exit_date"] = exit_dt
-        merged["trade_duration_days"] = int((exit_dt - entry_dt).days)
-        merged["underlying_symbol"] = underlying_symbol
-        merged["underlying_return_pct"] = _float(trade.get("trade_return"))
-        merged["entry_snapshot_date"] = entry_snapshot_date
-        merged["exit_snapshot_date"] = exit_snapshot_date
-        merged["is_equity"] = False
+        merged = merged.with_columns([
+            pl.lit(trade_id).alias("trade_id"), pl.lit(entry_dt).alias("trade_entry_date"), pl.lit(exit_dt).alias("trade_exit_date"),
+            pl.lit(int((exit_dt - entry_dt).days)).alias("trade_duration_days"), pl.lit(underlying_symbol).alias("underlying_symbol"),
+            pl.lit(_float(trade.get("trade_return"))).alias("underlying_return_pct"), pl.lit(entry_snapshot_date).alias("entry_snapshot_date"),
+            pl.lit(exit_snapshot_date).alias("exit_snapshot_date"), pl.lit(False).alias("is_equity"),
+        ])
 
         rank_frame = merged
         if equity_row is not None:
-            rank_frame = pd.concat([merged, pd.DataFrame([equity_row])], ignore_index=True)
+            rank_frame = pl.concat([merged, pl.DataFrame([equity_row])], how="diagonal_relaxed")
 
-        rank_frame["rank_y"] = rank_frame["option_return_pct"].rank(
-            method=spec.rank_method,
-            pct=True,
-            ascending=spec.sort_descending,
-        )
-        rank_frame["rank_order"] = rank_frame["option_return_pct"].rank(
-            method="first",
-            ascending=not spec.sort_descending,
-        ).astype(int)
+        rank_frame = rank_frame.with_columns([
+            pl.col("option_return_pct").rank(method="average", descending=spec.sort_descending).truediv(pl.len()).alias("rank_y"),
+            pl.col("option_return_pct").rank(method="ordinal", descending=not spec.sort_descending).cast(pl.Int64).alias("rank_order"),
+        ])
 
         if spec.label_method in ("mean_variance", "hybrid"):
-            rank_frame["mv_mu"] = _resolve_mv_expected_returns(rank_frame, spec=spec)
-            rank_frame["mv_weight"] = _assign_mean_variance_weights(
+            rank_frame = rank_frame.with_columns(pl.Series("mv_mu", _resolve_mv_expected_returns(rank_frame, spec=spec)))
+            weights = _assign_mean_variance_weights(
                 rank_frame,
                 snapshots=snapshots,
                 trade=trade,
@@ -226,16 +248,13 @@ def build_option_labels(
                 exit_dt=exit_dt,
                 spec=spec,
             )
-            rank_frame["label"] = rank_frame["mv_weight"]
+            rank_frame = rank_frame.with_columns(pl.Series("mv_weight", weights), pl.Series("label", weights))
         else:
-            rank_frame["mv_mu"] = 0.0
-            rank_frame["mv_weight"] = 0.0
-            rank_frame["label"] = rank_frame["rank_y"]
+            rank_frame = rank_frame.with_columns(pl.lit(0.0).alias("mv_mu"), pl.lit(0.0).alias("mv_weight"), pl.col("rank_y").alias("label"))
 
-        rank_frame["trade_option_count"] = int(len(rank_frame))
-        rank_frame["trade_id"] = trade_id
+        rank_frame = rank_frame.with_columns(pl.lit(rank_frame.height).alias("trade_option_count"), pl.lit(trade_id).alias("trade_id"))
 
-        option_rows.extend(rank_frame.to_dict(orient="records"))
+        option_rows.extend(rank_frame.to_dicts())
 
     if not option_rows:
         return OptionLabelResult()
@@ -246,14 +265,14 @@ def build_option_labels(
 
 
 def _normalize_trades(
-    trades: Sequence[Mapping[str, Any]] | pd.DataFrame,
+    trades: Sequence[Mapping[str, Any]] | pl.DataFrame,
     *,
     trade_id_col: str,
 ) -> list[dict[str, Any]]:
     if trades is None:
         return []
-    if isinstance(trades, pd.DataFrame):
-        rows = trades.to_dict(orient="records")
+    if isinstance(trades, pl.DataFrame):
+        rows = trades.to_dicts()
     else:
         rows = [dict(row) for row in trades]
     out: list[dict[str, Any]] = []
@@ -271,71 +290,71 @@ def _normalize_trades(
 
 
 def _normalize_option_snapshots(
-    option_chains: Mapping[Any, pd.DataFrame] | pd.DataFrame,
+    option_chains: Mapping[Any, pl.DataFrame] | pl.DataFrame,
     *,
     spec: OptionLabelSpec,
-) -> dict[pd.Timestamp, pd.DataFrame]:
+) -> dict[datetime, pl.DataFrame]:
     if option_chains is None:
         return {}
-    snapshots: dict[pd.Timestamp, pd.DataFrame] = {}
-    if isinstance(option_chains, pd.DataFrame):
+    snapshots: dict[datetime, pl.DataFrame] = {}
+    if isinstance(option_chains, pl.DataFrame):
         if spec.snapshot_date_col not in option_chains.columns:
             raise ValueError(f"Option chain frame must include '{spec.snapshot_date_col}' or be provided as a mapping")
-        for snapshot_date, group in option_chains.groupby(pd.to_datetime(option_chains[spec.snapshot_date_col], errors="coerce")):
+        for snapshot_date, group in option_chains.partition_by(spec.snapshot_date_col, as_dict=True).items():
+            if isinstance(snapshot_date, tuple): snapshot_date = snapshot_date[0]
             ts = _to_timestamp(snapshot_date)
             if ts is None:
                 continue
-            snapshots[ts.normalize()] = group.copy()
+            snapshots[_day(ts)] = group
         return dict(sorted(snapshots.items(), key=lambda item: item[0]))
 
     for key, frame in option_chains.items():
         ts = _to_timestamp(key)
-        if ts is None or frame is None or len(frame) == 0:
+        if ts is None or frame is None or frame.is_empty():
             continue
-        snapshots[ts.normalize()] = frame.copy()
+        snapshots[_day(ts)] = frame
     return dict(sorted(snapshots.items(), key=lambda item: item[0]))
 
 
 def _lookup_snapshot(
-    snapshots: Mapping[pd.Timestamp, pd.DataFrame],
-    target: pd.Timestamp,
-) -> tuple[pd.Timestamp | None, pd.DataFrame]:
+    snapshots: Mapping[datetime, pl.DataFrame],
+    target: datetime,
+) -> tuple[datetime | None, pl.DataFrame]:
     if not snapshots:
-        return None, pd.DataFrame()
-    target = target.normalize()
+        return None, pl.DataFrame()
+    target = _day(target)
     if target in snapshots:
-        return target, snapshots[target].copy()
+        return target, snapshots[target].clone()
     prior = [snapshot for snapshot in snapshots if snapshot <= target]
     if prior:
         chosen = max(prior)
-        return chosen, snapshots[chosen].copy()
-    return None, pd.DataFrame()
+        return chosen, snapshots[chosen].clone()
+    return None, pl.DataFrame()
 
 
-def _filter_underlying(df: pd.DataFrame, symbol: str, col: str) -> pd.DataFrame:
+def _filter_underlying(df: pl.DataFrame, symbol: str, col: str) -> pl.DataFrame:
     if col not in df.columns:
         return df
-    return df.loc[df[col].astype(str).str.upper() == symbol.upper()].copy()
+    return df.filter(pl.col(col).cast(pl.String).str.to_uppercase() == symbol.upper())
 
 
-def _normalize_chain(df: pd.DataFrame, *, snapshot_date: pd.Timestamp, spec: OptionLabelSpec) -> pd.DataFrame:
-    out = df.copy()
-    out.columns = [str(col).strip().lower() for col in out.columns]
+def _normalize_chain(df: pl.DataFrame, *, snapshot_date: datetime, spec: OptionLabelSpec) -> pl.DataFrame:
+    out = df.clone().rename({col: str(col).strip().lower() for col in df.columns})
     if "right" in out.columns and spec.option_type_col not in out.columns:
-        out[spec.option_type_col] = out["right"].astype(str).str.strip().str.lower()
+        out = out.with_columns(pl.col("right").cast(pl.String).str.strip_chars().str.to_lowercase().alias(spec.option_type_col))
     if "optiontype" in out.columns and spec.option_type_col not in out.columns:
-        out[spec.option_type_col] = out["optiontype"].astype(str).str.strip().str.lower()
+        out = out.with_columns(pl.col("optiontype").cast(pl.String).str.strip_chars().str.to_lowercase().alias(spec.option_type_col))
     if "expiration" in out.columns:
-        out["expiration"] = pd.to_datetime(out["expiration"], errors="coerce").dt.normalize()
+        out = out.with_columns(pl.col("expiration").cast(pl.String).str.to_datetime(strict=False).dt.truncate("1d").alias("expiration"))
     if "strike" in out.columns:
-        out["strike"] = pd.to_numeric(out["strike"], errors="coerce")
+        out = out.with_columns(pl.col("strike").cast(pl.Float64, strict=False).alias("strike"))
     if spec.underlying_symbol_col in out.columns:
-        out[spec.underlying_symbol_col] = out[spec.underlying_symbol_col].astype(str).str.upper()
-    out["snapshot_date"] = snapshot_date.normalize()
+        out = out.with_columns(pl.col(spec.underlying_symbol_col).cast(pl.String).str.to_uppercase().alias(spec.underlying_symbol_col))
+    out = out.with_columns(pl.lit(snapshot_date.replace(hour=0, minute=0, second=0, microsecond=0)).alias("snapshot_date"))
     return out
 
 
-def _resolve_join_cols(entry: pd.DataFrame, exit: pd.DataFrame, *, spec: OptionLabelSpec) -> list[str]:
+def _resolve_join_cols(entry: pl.DataFrame, exit: pl.DataFrame, *, spec: OptionLabelSpec) -> list[str]:
     preferred = [col for col in spec.option_id_cols if col in entry.columns and col in exit.columns]
     if preferred:
         return preferred
@@ -345,20 +364,18 @@ def _resolve_join_cols(entry: pd.DataFrame, exit: pd.DataFrame, *, spec: OptionL
     raise ValueError("No shared option identity columns found between entry and exit snapshots")
 
 
-def _pick_price_series(
-    df: pd.DataFrame,
+def _quote_expr(
+    df: pl.DataFrame,
     primary: str,
     fallbacks: Sequence[str],
     *,
     suffix: str,
-) -> pd.Series:
+) -> pl.Expr:
     candidates = [primary, *fallbacks]
     for col in candidates:
         actual = f"{col}{suffix}"
         if actual in df.columns:
-            series = pd.to_numeric(df[actual], errors="coerce")
-            if series.notna().any():
-                return series
+            return pl.col(actual).cast(pl.Float64, strict=False)
     raise ValueError(f"Could not resolve an executable option price column with suffix {suffix}")
 
 
@@ -369,72 +386,175 @@ def _resolve_include_equity(spec: OptionLabelSpec) -> bool:
 
 
 def solve_mean_variance_weights(
-    expected_returns: Sequence[float] | np.ndarray,
-    variances: Sequence[float] | np.ndarray | None = None,
+    expected_returns: Sequence[float] | torch.Tensor,
+    variances: Sequence[float] | torch.Tensor | None = None,
     *,
-    covariance: Sequence[Sequence[float]] | np.ndarray | None = None,
+    covariance: Sequence[Sequence[float]] | torch.Tensor | None = None,
     risk_aversion: float = 1.0,
-    eligible: Sequence[bool] | np.ndarray | None = None,
+    eligible: Sequence[bool] | torch.Tensor | None = None,
     long_only: bool = True,
     max_weight: float | None = None,
     max_gross_exposure: float | None = None,
     min_weight: float = 0.0,
     return_shrinkage: float = 0.0,
-) -> np.ndarray:
+) -> torch.Tensor:
     """Return mean-variance portfolio weights with net budget equal to one."""
 
-    mu = np.asarray(expected_returns, dtype=float)
-    n = len(mu)
-    if n == 0:
-        return np.array([], dtype=float)
-
-    mask = np.ones(n, dtype=bool) if eligible is None else np.asarray(eligible, dtype=bool)
-    mu = _shrink_expected_returns(mu, mask, return_shrinkage)
-    constraints = _mv_constraints_active(
-        max_weight=max_weight,
-        max_gross_exposure=max_gross_exposure,
-        min_weight=min_weight,
-    )
-
-    if covariance is not None:
-        cov = np.asarray(covariance, dtype=float)
-        if cov.shape != (n, n):
-            raise ValueError(f"covariance must be ({n}, {n}); got {cov.shape}")
-        return _solve_mean_variance_covariance(
-            mu,
-            cov,
-            risk_aversion=risk_aversion,
-            eligible=mask,
-            long_only=long_only,
-            max_weight=max_weight,
-            max_gross_exposure=max_gross_exposure,
-            min_weight=min_weight,
-            constraints=constraints,
-        )
-
-    if variances is None:
-        raise ValueError("variances or covariance must be provided")
-    return _solve_mean_variance_diagonal(
-        mu,
-        np.maximum(np.asarray(variances, dtype=float), 0.0),
+    solved = _solve_mean_variance_weights_torch(
+        expected_returns,
+        variances,
+        covariance=covariance,
         risk_aversion=risk_aversion,
-        eligible=mask,
+        eligible=eligible,
         long_only=long_only,
         max_weight=max_weight,
         max_gross_exposure=max_gross_exposure,
         min_weight=min_weight,
-        constraints=constraints,
+        return_shrinkage=return_shrinkage,
     )
+    return solved
 
+
+def _solve_mean_variance_weights_torch(
+    expected_returns: Sequence[float] | torch.Tensor,
+    variances: Sequence[float] | torch.Tensor | None = None,
+    *,
+    covariance: Sequence[Sequence[float]] | torch.Tensor | None = None,
+    risk_aversion: float = 1.0,
+    eligible: Sequence[bool] | torch.Tensor | None = None,
+    long_only: bool = True,
+    max_weight: float | None = None,
+    max_gross_exposure: float | None = None,
+    min_weight: float = 0.0,
+    return_shrinkage: float = 0.0,
+) -> torch.Tensor:
+    """Torch implementation of the portfolio solver."""
+    mu = torch.as_tensor(expected_returns, dtype=torch.float64, device=DEVICE)
+    n = int(mu.numel())
+    if n == 0:
+        return torch.empty(0, dtype=torch.float64, device=DEVICE)
+    mask = torch.ones(n, dtype=torch.bool, device=DEVICE) if eligible is None else torch.as_tensor(eligible, dtype=torch.bool, device=DEVICE)
+    if mask.numel() != n:
+        raise ValueError("eligible must have the same length as expected_returns")
+    alpha = min(max(float(return_shrinkage), 0.0), 1.0)
+    if alpha > 0.0 and bool(mask.any()):
+        mu = mu.clone()
+        target = mu[mask].mean()
+        mu[mask] = (1.0 - alpha) * mu[mask] + alpha * target
+    if covariance is not None:
+        cov = torch.as_tensor(covariance, dtype=torch.float64, device=DEVICE)
+        if tuple(cov.shape) != (n, n):
+            raise ValueError(f"covariance must be ({n}, {n}); got {tuple(cov.shape)}")
+        cov = _torch_psd(cov, 1e-8)
+    else:
+        if variances is None:
+            raise ValueError("variances or covariance must be provided")
+        variance = torch.clamp(torch.as_tensor(variances, dtype=torch.float64, device=DEVICE), min=0.0)
+        if variance.numel() != n:
+            raise ValueError("variances must have the same length as expected_returns")
+        cov = torch.diag(torch.clamp(variance, min=1e-12))
+    active = torch.nonzero(mask, as_tuple=False).flatten()
+    weights = torch.zeros(n, dtype=torch.float64, device=DEVICE)
+    if active.numel() == 0:
+        return weights
+    active_mu = mu[active]
+    active_cov = cov.index_select(0, active).index_select(1, active)
+    constrained = max_weight is not None or max_gross_exposure is not None or min_weight > 0.0
+    if covariance is None and long_only and not constrained:
+        scores = torch.clamp(active_mu, min=0.0) / (max(float(risk_aversion), 1e-12) * torch.diagonal(active_cov))
+        solved = torch.full_like(scores, 1.0 / active.numel()) if float(scores.sum()) <= 0.0 else scores / scores.sum()
+    elif not long_only and not constrained:
+        solved = _torch_budget_solution(active_mu, active_cov, risk_aversion)
+    else:
+        solved = _torch_projected_gradient(active_mu, active_cov, risk_aversion, long_only, max_weight, max_gross_exposure, min_weight)
+    weights[active] = solved
+    return weights
+
+
+def _torch_psd(matrix: torch.Tensor, floor: float) -> torch.Tensor:
+    symmetric = (matrix + matrix.T) * 0.5
+    values, vectors = torch.linalg.eigh(symmetric)
+    return (vectors * torch.clamp(values, min=floor)) @ vectors.T
+
+
+def _torch_budget_solution(mu: torch.Tensor, covariance: torch.Tensor, risk_aversion: float) -> torch.Tensor:
+    if mu.numel() == 1:
+        return torch.ones(1, dtype=torch.float64, device=DEVICE)
+    lam = max(float(risk_aversion), 1e-12)
+    inv_cov = torch.linalg.pinv(covariance)
+    ones = torch.ones_like(mu)
+    inv_mu, inv_ones = inv_cov @ mu, inv_cov @ ones
+    denom = ones @ inv_ones
+    if abs(float(denom)) <= 1e-12:
+        return ones / mu.numel()
+    nu = ((ones @ inv_mu) - lam) / denom
+    return (inv_mu - nu * inv_ones) / lam
+
+
+def _torch_simplex(values: torch.Tensor) -> torch.Tensor:
+    if values.numel() == 0:
+        return values
+    ordered, _ = torch.sort(values, descending=True)
+    cumulative = torch.cumsum(ordered, 0)
+    indices = torch.arange(1, values.numel() + 1, dtype=torch.float64, device=DEVICE)
+    valid = ordered * indices > (cumulative - 1.0)
+    if not bool(valid.any()):
+        return torch.full_like(values, 1.0 / values.numel())
+    rho = int(torch.nonzero(valid, as_tuple=False)[-1].item())
+    theta = (cumulative[rho] - 1.0) / (rho + 1)
+    projected = torch.clamp(values - theta, min=0.0)
+    total = projected.sum()
+    return projected / total if float(total) > 0.0 else torch.full_like(values, 1.0 / values.numel())
+
+
+def _torch_project_feasible(values: torch.Tensor, long_only: bool, max_weight: float | None, max_gross: float | None, min_weight: float) -> torch.Tensor:
+    out = values.clone()
+    if long_only:
+        out = torch.clamp(out, min=0.0)
+        if min_weight > 0.0:
+            out = torch.where(out > 0.0, torch.maximum(out, torch.tensor(float(min_weight), dtype=out.dtype, device=DEVICE)), out)
+        out = _torch_simplex(out)
+        if max_weight is not None:
+            cap = max(float(max_weight), 1.0 / out.numel())
+            out = torch.clamp(out, max=cap)
+            out = out / out.sum()
+    elif max_weight is not None:
+        out = torch.clamp(out, min=-float(max_weight), max=float(max_weight))
+    if not long_only and max_gross is not None:
+        gross = out.abs().sum()
+        if float(gross) > float(max_gross) and float(gross) > 0.0:
+            out = out * (float(max_gross) / gross)
+    elif not long_only and max_gross is None:
+        total = out.sum()
+        if abs(float(total)) > 1e-12:
+            out = out / total
+    return out
+
+
+def _torch_projected_gradient(mu: torch.Tensor, covariance: torch.Tensor, risk_aversion: float, long_only: bool, max_weight: float | None, max_gross: float | None, min_weight: float, max_iter: int = 1000) -> torch.Tensor:
+    if mu.numel() == 1:
+        return torch.ones(1, dtype=torch.float64, device=DEVICE)
+    lam = max(float(risk_aversion), 1e-12)
+    weights = torch.full_like(mu, 1.0 / mu.numel())
+    step = 0.25 / max(float(torch.diagonal(covariance).max()), 1e-6)
+    for iteration in range(max_iter):
+        proposal = _torch_project_feasible(weights + step * (mu - lam * (covariance @ weights)), long_only, max_weight, max_gross, min_weight)
+        if float(torch.abs(proposal - weights).sum()) <= 1e-9:
+            weights = proposal
+            break
+        weights = proposal
+        if iteration > 50:
+            step *= 0.995
+    return _torch_project_feasible(weights, long_only, max_weight, max_gross, min_weight)
 
 def solve_long_only_mean_variance_weights(
-    expected_returns: Sequence[float] | np.ndarray,
-    variances: Sequence[float] | np.ndarray | None = None,
+    expected_returns: Sequence[float] | torch.Tensor,
+    variances: Sequence[float] | torch.Tensor | None = None,
     *,
-    covariance: Sequence[Sequence[float]] | np.ndarray | None = None,
+    covariance: Sequence[Sequence[float]] | torch.Tensor | None = None,
     risk_aversion: float = 1.0,
-    eligible: Sequence[bool] | np.ndarray | None = None,
-) -> np.ndarray:
+    eligible: Sequence[bool] | torch.Tensor | None = None,
+) -> torch.Tensor:
     """Return long-only portfolio weights that sum to one (no short selling)."""
 
     return solve_mean_variance_weights(
@@ -448,23 +568,33 @@ def solve_long_only_mean_variance_weights(
 
 
 def compute_return_covariance_matrix(
-    returns: pd.DataFrame,
+    returns: pl.DataFrame,
     *,
     shrinkage: float = 0.1,
     variance_floor: float = 1e-8,
-) -> np.ndarray:
+) -> torch.Tensor:
     """Estimate a PSD return covariance matrix from an aligned return panel."""
 
-    if returns is None or returns.empty:
-        return np.array([[]], dtype=float)
+    if returns is None or returns.is_empty():
+        return torch.empty((0, 0), dtype=torch.float64, device=DEVICE)
 
-    sample = returns.astype(float).cov(min_periods=1).to_numpy(dtype=float)
-    sample = np.nan_to_num(sample, nan=0.0, posinf=0.0, neginf=0.0)
-    diag = np.diag(np.diag(sample))
-    alpha = float(np.clip(shrinkage, 0.0, 1.0))
+    values = torch.tensor(returns.cast(pl.Float64, strict=False).fill_null(0.0).fill_nan(0.0).rows(), dtype=torch.float64, device=DEVICE)
+    sample = torch.cov(values.T)
+    if sample.ndim == 0:
+        sample = sample.reshape(1, 1)
+    sample = torch.nan_to_num(sample, nan=0.0, posinf=0.0, neginf=0.0)
+    diag = torch.diag(torch.diagonal(sample))
+    alpha = min(max(float(shrinkage), 0.0), 1.0)
     cov = (1.0 - alpha) * sample + alpha * diag
     cov = _ensure_positive_semidefinite(cov, floor=variance_floor)
     return cov
+
+
+def _ensure_positive_semidefinite(matrix: torch.Tensor, *, floor: float) -> torch.Tensor:
+    """Clamp covariance eigenvalues to a small positive floor."""
+    symmetric = (matrix + matrix.T) * 0.5
+    values, vectors = torch.linalg.eigh(symmetric)
+    return (vectors * torch.clamp(values, min=float(floor))) @ vectors.T
 
 
 def _resolve_mv_spec(spec: OptionLabelSpec) -> OptionLabelSpec:
@@ -499,18 +629,18 @@ def _resolve_mv_spec(spec: OptionLabelSpec) -> OptionLabelSpec:
     )
 
 
-def _normalize_trade_returns(frame: pd.DataFrame, *, eligible: pd.Series) -> np.ndarray:
+def _normalize_trade_returns(frame: pl.DataFrame, *, eligible: torch.Tensor) -> torch.Tensor:
     """Scale realized returns to [0, 1] within a trade's eligible legs."""
 
-    returns = pd.to_numeric(frame["option_return_pct"], errors="coerce").fillna(-1.0).to_numpy(dtype=float)
-    active = eligible.to_numpy(dtype=bool)
-    normalized = np.zeros_like(returns, dtype=float)
-    if not active.any():
+    returns = torch.tensor(frame["option_return_pct"].cast(pl.Float64, strict=False).fill_null(-1.0).to_list(), dtype=torch.float64, device=DEVICE)
+    active = eligible.to(torch.bool)
+    normalized = torch.zeros_like(returns)
+    if not bool(active.any()):
         return normalized
 
     active_returns = returns[active]
-    lo = float(np.min(active_returns))
-    hi = float(np.max(active_returns))
+    lo = float(active_returns.min())
+    hi = float(active_returns.max())
     if hi <= lo:
         normalized[active] = 1.0
         return normalized
@@ -519,50 +649,38 @@ def _normalize_trade_returns(frame: pd.DataFrame, *, eligible: pd.Series) -> np.
     return normalized
 
 
-def _resolve_mv_expected_returns(frame: pd.DataFrame, *, spec: OptionLabelSpec) -> pd.Series:
+def _resolve_mv_expected_returns(frame: pl.DataFrame, *, spec: OptionLabelSpec) -> torch.Tensor:
     """Build MV expected-return vector from rank, return, or a hybrid blend."""
 
-    rank_y = pd.to_numeric(frame["rank_y"], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+    rank_y = torch.tensor(frame["rank_y"].cast(pl.Float64, strict=False).fill_null(0.0).to_list(), dtype=torch.float64, device=DEVICE)
     if spec.label_method == "mean_variance":
-        return pd.Series(rank_y, index=frame.index, dtype=float)
+        return rank_y
 
-    eligible = ~frame["expires_worthless"].astype(bool)
+    eligible = ~torch.tensor(frame["expires_worthless"].to_list(), dtype=torch.bool, device=DEVICE)
     return_norm = _normalize_trade_returns(frame, eligible=eligible)
-    rank_weight = float(np.clip(spec.hybrid_rank_weight, 0.0, 1.0))
+    rank_weight = min(max(float(spec.hybrid_rank_weight), 0.0), 1.0)
     mu = rank_weight * rank_y + (1.0 - rank_weight) * return_norm
-    return pd.Series(mu, index=frame.index, dtype=float)
+    return mu
 
 
 def _assign_mean_variance_weights(
-    frame: pd.DataFrame,
+    frame: pl.DataFrame,
     *,
-    snapshots: Mapping[pd.Timestamp, pd.DataFrame],
+    snapshots: Mapping[datetime, pl.DataFrame],
     trade: Mapping[str, Any],
-    entry_dt: pd.Timestamp,
-    exit_dt: pd.Timestamp,
+    entry_dt: datetime,
+    exit_dt: datetime,
     spec: OptionLabelSpec,
-) -> pd.Series:
+) -> torch.Tensor:
     spec = _resolve_mv_spec(spec)
-    eligible = ~frame["expires_worthless"].astype(bool)
+    eligible = ~torch.tensor(frame["expires_worthless"].to_list(), dtype=torch.bool, device=DEVICE)
     if "mv_mu" in frame.columns:
-        mu = pd.to_numeric(frame["mv_mu"], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+        mu = torch.tensor(frame["mv_mu"].cast(pl.Float64, strict=False).fill_null(0.0).to_list(), dtype=torch.float64, device=DEVICE)
     else:
-        mu = _resolve_mv_expected_returns(frame, spec=spec).to_numpy(dtype=float)
-    contract_symbols = frame["contract_symbol"].astype(str).tolist()
-    underlying_symbol = str(frame["underlying_symbol"].iloc[0] if "underlying_symbol" in frame.columns else "").strip().upper()
-
-    covariance = _resolve_return_covariance(
-        snapshots,
-        contract_symbols=contract_symbols,
-        trade=trade,
-        entry_dt=entry_dt,
-        exit_dt=exit_dt,
-        underlying_symbol=underlying_symbol,
-        spec=spec,
-    )
+        mu = _resolve_mv_expected_returns(frame, spec=spec)
 
     long_only = not spec.allow_short_selling
-    eligible_mask = eligible.to_numpy(dtype=bool)
+    eligible_mask = eligible
     solver_kwargs = {
         "risk_aversion": spec.risk_aversion,
         "eligible": eligible_mask,
@@ -571,646 +689,80 @@ def _assign_mean_variance_weights(
         "max_gross_exposure": spec.max_gross_exposure,
         "min_weight": spec.min_weight,
     }
-    if covariance is not None and covariance.shape == (len(mu), len(mu)):
-        weights = solve_mean_variance_weights(mu, covariance=covariance, **solver_kwargs)
-    else:
-        variances = _resolve_return_variances(frame, spec=spec)
-        weights = solve_mean_variance_weights(mu, variances, **solver_kwargs)
+    weights = solve_mean_variance_weights(mu, torch.ones(len(mu), dtype=torch.float64, device=DEVICE), **solver_kwargs)
 
-    weights = _finalize_mean_variance_weights(
-        weights,
-        eligible=eligible_mask,
-        long_only=long_only,
-        max_weight=spec.max_weight,
-        max_gross_exposure=spec.max_gross_exposure,
-        min_weight=spec.min_weight,
-    )
-    return pd.Series(weights, index=frame.index, dtype=float)
-
-
-def _resolve_return_covariance(
-    snapshots: Mapping[pd.Timestamp, pd.DataFrame],
-    *,
-    contract_symbols: Sequence[str],
-    trade: Mapping[str, Any],
-    entry_dt: pd.Timestamp,
-    exit_dt: pd.Timestamp,
-    underlying_symbol: str,
-    spec: OptionLabelSpec,
-) -> np.ndarray | None:
-    price_panel = _build_trade_window_price_panel(
-        snapshots,
-        contract_symbols=contract_symbols,
-        trade=trade,
-        entry_dt=entry_dt,
-        exit_dt=exit_dt,
-        underlying_symbol=underlying_symbol,
-        spec=spec,
-    )
-    if price_panel.shape[0] < 2 or price_panel.shape[1] == 0:
-        return None
-
-    returns = price_panel.pct_change().replace([np.inf, -np.inf], np.nan).dropna(how="all")
-    if len(returns) < int(spec.covariance_min_observations):
-        return None
-
-    return compute_return_covariance_matrix(
-        returns,
-        shrinkage=spec.covariance_shrinkage,
-        variance_floor=spec.variance_floor,
-    )
-
-
-def _build_trade_window_price_panel(
-    snapshots: Mapping[pd.Timestamp, pd.DataFrame],
-    *,
-    contract_symbols: Sequence[str],
-    trade: Mapping[str, Any],
-    entry_dt: pd.Timestamp,
-    exit_dt: pd.Timestamp,
-    underlying_symbol: str,
-    spec: OptionLabelSpec,
-) -> pd.DataFrame:
-    window = _snapshots_in_trade_window(snapshots, entry_dt, exit_dt)
-    if not window:
-        return pd.DataFrame()
-
-    rows: list[dict[str, Any]] = []
-    for snap_dt, chain in window:
-        norm = _normalize_chain(chain, snapshot_date=snap_dt, spec=spec)
-        if underlying_symbol:
-            norm = _filter_underlying(norm, underlying_symbol, spec.underlying_symbol_col)
-        for contract_symbol in contract_symbols:
-            if contract_symbol.endswith(spec.equity_contract_suffix):
-                quote = _resolve_underlying_price_at_date(
-                    trade,
-                    snap_dt,
-                    entry_dt=entry_dt,
-                    exit_dt=exit_dt,
-                    spec=spec,
-                )
-            else:
-                quote = _lookup_contract_quote(norm, contract_symbol, spec=spec)
-            rows.append(
-                {
-                    "snapshot_date": snap_dt.normalize(),
-                    "contract_symbol": contract_symbol,
-                    "quote": quote,
-                }
-            )
-
-    if not rows:
-        return pd.DataFrame()
-
-    frame = pd.DataFrame(rows)
-    if frame.duplicated(subset=["snapshot_date", "contract_symbol"]).any():
-        frame = (
-            frame.groupby(["snapshot_date", "contract_symbol"], as_index=False)["quote"]
-            .mean(numeric_only=True)
-        )
-    panel = frame.pivot(index="snapshot_date", columns="contract_symbol", values="quote").sort_index()
-    panel = panel.reindex(columns=list(contract_symbols))
-    numeric = panel.apply(pd.to_numeric, errors="coerce")
-    return numeric.ffill().bfill()
-
-
-def _snapshots_in_trade_window(
-    snapshots: Mapping[pd.Timestamp, pd.DataFrame],
-    entry_dt: pd.Timestamp,
-    exit_dt: pd.Timestamp,
-) -> list[tuple[pd.Timestamp, pd.DataFrame]]:
-    start = entry_dt.normalize()
-    end = exit_dt.normalize()
-    return [
-        (ts, frame.copy())
-        for ts, frame in sorted(snapshots.items(), key=lambda item: item[0])
-        if start <= ts.normalize() <= end
-    ]
-
-
-def _lookup_contract_quote(
-    chain: pd.DataFrame,
-    contract_symbol: str,
-    *,
-    spec: OptionLabelSpec,
-) -> float | None:
-    if chain.empty or "contract_symbol" not in chain.columns:
-        return None
-    match = chain.loc[chain["contract_symbol"].astype(str) == str(contract_symbol)]
-    if match.empty:
-        return None
-    return _resolve_row_quote(match.iloc[0], spec.covariance_quote_col, spec.price_fallback_cols)
-
-
-def _resolve_row_quote(row: pd.Series, primary: str, fallbacks: Sequence[str]) -> float | None:
-    candidates = [primary, *fallbacks]
-    for col in candidates:
-        if col not in row.index:
-            continue
-        value = pd.to_numeric(row[col], errors="coerce")
-        if pd.notna(value) and float(value) > 0.0:
-            return float(value)
-    return None
-
-
-def _resolve_underlying_price_at_date(
-    trade: Mapping[str, Any],
-    snapshot_date: pd.Timestamp,
-    *,
-    entry_dt: pd.Timestamp,
-    exit_dt: pd.Timestamp,
-    spec: OptionLabelSpec,
-) -> float | None:
-    snap = snapshot_date.normalize()
-    if spec.underlying_price_snapshots:
-        mapped = _normalize_price_snapshot_map(spec.underlying_price_snapshots)
-        if snap in mapped:
-            return mapped[snap]
-        prior = [ts for ts in mapped if ts <= snap]
-        if prior:
-            return mapped[max(prior)]
-
-    if snap == entry_dt.normalize():
-        return _resolve_underlying_entry_price(trade, spec=spec)
-    if snap == exit_dt.normalize():
-        return _resolve_underlying_exit_price(trade, spec=spec)
-    return None
-
-
-def _normalize_price_snapshot_map(values: Mapping[Any, float]) -> dict[pd.Timestamp, float]:
-    out: dict[pd.Timestamp, float] = {}
-    for key, value in values.items():
-        ts = _to_timestamp(key)
-        parsed = _float_or_none(value)
-        if ts is None or parsed is None or parsed <= 0.0:
-            continue
-        out[ts.normalize()] = parsed
-    return dict(sorted(out.items(), key=lambda item: item[0]))
-
-
-def _shrink_expected_returns(
-    expected_returns: np.ndarray,
-    eligible: np.ndarray,
-    shrinkage: float,
-) -> np.ndarray:
-    alpha = float(np.clip(shrinkage, 0.0, 1.0))
-    if alpha <= 0.0 or not eligible.any():
-        return expected_returns
-    active = expected_returns[eligible]
-    target = float(np.mean(active))
-    shrunk = expected_returns.copy()
-    shrunk[eligible] = (1.0 - alpha) * active + alpha * target
-    return shrunk
-
-
-def _mv_constraints_active(
-    *,
-    max_weight: float | None,
-    max_gross_exposure: float | None,
-    min_weight: float,
-) -> bool:
-    return max_weight is not None or max_gross_exposure is not None or float(min_weight) > 0.0
-
-
-def _finalize_mean_variance_weights(
-    weights: np.ndarray,
-    *,
-    eligible: np.ndarray,
-    long_only: bool,
-    max_weight: float | None,
-    max_gross_exposure: float | None,
-    min_weight: float,
-) -> np.ndarray:
-    return _project_feasible_weights(
-        weights,
-        eligible=eligible,
-        long_only=long_only,
-        max_weight=max_weight,
-        max_gross_exposure=max_gross_exposure,
-        min_weight=min_weight,
-    )
-
-
-def _effective_max_weight(max_weight: float | None, eligible_count: int) -> float | None:
-    if max_weight is None or eligible_count <= 0:
-        return max_weight
-    required = 1.0 / float(eligible_count)
-    return max(float(max_weight), required)
-
-
-def _project_feasible_weights(
-    weights: np.ndarray,
-    *,
-    eligible: np.ndarray,
-    long_only: bool,
-    max_weight: float | None,
-    max_gross_exposure: float | None,
-    min_weight: float,
-) -> np.ndarray:
-    vector = np.asarray(weights, dtype=float).copy()
-    eligible_idx = np.flatnonzero(eligible)
-    eligible_count = int(eligible_idx.size)
-    if eligible_count == 0:
-        return np.zeros_like(vector)
-
-    weight_cap = _effective_max_weight(max_weight, eligible_count)
-    for _ in range(20):
-        raw = np.zeros_like(vector)
-        source = vector.copy()
-        source[~eligible] = 0.0
-        if long_only:
-            source = np.maximum(source, 0.0)
-        if min_weight > 0.0 and long_only:
-            source[eligible_idx] = np.where(
-                source[eligible_idx] > 0.0,
-                np.maximum(source[eligible_idx], float(min_weight)),
-                source[eligible_idx],
-            )
-        if weight_cap is not None:
-            cap = float(weight_cap)
-            if long_only:
-                source[eligible_idx] = np.minimum(source[eligible_idx], cap)
-            else:
-                source[eligible_idx] = np.clip(source[eligible_idx], -cap, cap)
-
-        if long_only:
-            active = source[eligible_idx]
-            if float(active.sum()) <= 0.0:
-                active = np.full(eligible_count, 1.0 / eligible_count, dtype=float)
-            else:
-                active = _project_to_simplex(active)
-                if weight_cap is not None:
-                    active = np.minimum(active, float(weight_cap))
-                    total = float(active.sum())
-                    if total > 1e-12:
-                        active = active / total
-            raw[eligible_idx] = active
-        else:
-            active = source[eligible_idx]
-            if max_gross_exposure is not None:
-                gross = float(np.abs(active).sum())
-                if gross > 1e-12:
-                    active = active * (float(max_gross_exposure) / gross)
-            else:
-                total = float(active.sum())
-                if abs(total) > 1e-12:
-                    active = active / total
-            raw[eligible_idx] = active
-
-        vector = raw
-        gross_ok = max_gross_exposure is None or float(np.abs(vector).sum()) <= float(max_gross_exposure) + 1e-9
-        cap_ok = weight_cap is None or float(np.max(np.abs(vector[eligible_idx]))) <= float(weight_cap) + 1e-9
-        if gross_ok and cap_ok:
-            break
-
-    return vector
-
-
-def _solve_mean_variance_diagonal(
-    expected_returns: np.ndarray,
-    variances: np.ndarray,
-    *,
-    risk_aversion: float,
-    eligible: np.ndarray,
-    long_only: bool,
-    max_weight: float | None,
-    max_gross_exposure: float | None,
-    min_weight: float,
-    constraints: bool,
-) -> np.ndarray:
-    n = len(expected_returns)
-    idx = np.flatnonzero(eligible)
-    if idx.size == 0:
-        return np.zeros(n, dtype=float)
-
-    if constraints or not long_only:
-        cov = np.diag(np.maximum(variances[idx], 1e-12))
-        solved = _projected_gradient_mean_variance(
-            expected_returns[idx],
-            cov,
-            risk_aversion=risk_aversion,
-            long_only=long_only,
-            max_weight=max_weight,
-            max_gross_exposure=max_gross_exposure,
-            min_weight=min_weight,
-        )
-        weights = np.zeros(n, dtype=float)
-        weights[idx] = solved
-        return weights
-
-    lam = max(float(risk_aversion), 1e-12)
-    var = np.maximum(variances[idx], 1e-12)
-    scores = np.zeros(idx.size, dtype=float)
-    positive = expected_returns[idx] > 0.0
-    scores[positive] = expected_returns[idx][positive] / (lam * var[positive])
-    if float(scores.sum()) <= 0.0:
-        solved = np.full(idx.size, 1.0 / idx.size, dtype=float)
-    else:
-        solved = scores / scores.sum()
-    weights = np.zeros(n, dtype=float)
-    weights[idx] = solved
     return weights
-
-
-def _solve_mean_variance_covariance(
-    expected_returns: np.ndarray,
-    covariance: np.ndarray,
-    *,
-    risk_aversion: float = 1.0,
-    eligible: np.ndarray,
-    long_only: bool,
-    max_weight: float | None,
-    max_gross_exposure: float | None,
-    min_weight: float,
-    constraints: bool,
-    max_iter: int = 1000,
-    tol: float = 1e-9,
-) -> np.ndarray:
-    n = len(expected_returns)
-    weights = np.zeros(n, dtype=float)
-    idx = np.flatnonzero(eligible)
-    if idx.size == 0:
-        return weights
-
-    mu = expected_returns[idx]
-    cov = _ensure_positive_semidefinite(covariance[np.ix_(idx, idx)], floor=1e-8)
-    if constraints or not long_only:
-        solved = _projected_gradient_mean_variance(
-            mu,
-            cov,
-            risk_aversion=risk_aversion,
-            long_only=long_only,
-            max_weight=max_weight,
-            max_gross_exposure=max_gross_exposure,
-            min_weight=min_weight,
-            max_iter=max_iter,
-            tol=tol,
-        )
-    elif long_only:
-        solved = _projected_gradient_mean_variance(
-            mu,
-            cov,
-            risk_aversion=risk_aversion,
-            long_only=True,
-            max_weight=None,
-            max_gross_exposure=None,
-            min_weight=0.0,
-            max_iter=max_iter,
-            tol=tol,
-        )
-    else:
-        solved = _solve_budget_constrained_mean_variance(mu, cov, risk_aversion=risk_aversion)
-    weights[idx] = solved
-    return weights
-
-
-def _solve_budget_constrained_mean_variance(
-    expected_returns: np.ndarray,
-    covariance: np.ndarray,
-    *,
-    risk_aversion: float,
-) -> np.ndarray:
-    """Solve max w'mu - (lambda/2) w'Sigma w s.t. sum(w) = 1, shorts allowed."""
-
-    n = len(expected_returns)
-    if n == 1:
-        return np.array([1.0], dtype=float)
-
-    lam = max(float(risk_aversion), 1e-12)
-    ones = np.ones(n, dtype=float)
-    inv_cov = np.linalg.pinv(covariance)
-    inv_mu = inv_cov @ expected_returns
-    inv_ones = inv_cov @ ones
-    denom = float(ones @ inv_ones)
-    if abs(denom) <= 1e-12:
-        return ones / n
-
-    nu = (float(ones @ inv_mu) - lam) / denom
-    weights = (inv_mu - nu * inv_ones) / lam
-    return weights
-
-
-def _projected_gradient_mean_variance(
-    expected_returns: np.ndarray,
-    covariance: np.ndarray,
-    *,
-    risk_aversion: float,
-    long_only: bool,
-    max_weight: float | None,
-    max_gross_exposure: float | None,
-    min_weight: float,
-    max_iter: int = 1000,
-    tol: float = 1e-9,
-) -> np.ndarray:
-    n = len(expected_returns)
-    if n == 1:
-        return np.array([1.0], dtype=float)
-
-    eligible = np.ones(n, dtype=bool)
-    lam = max(float(risk_aversion), 1e-12)
-    w = np.full(n, 1.0 / n, dtype=float)
-    step = 0.25 / max(float(np.max(np.diag(covariance))), 1e-6)
-
-    for iteration in range(max_iter):
-        gradient = expected_returns - lam * (covariance @ w)
-        proposal = _project_feasible_weights(
-            w + step * gradient,
-            eligible=eligible,
-            long_only=long_only,
-            max_weight=max_weight,
-            max_gross_exposure=max_gross_exposure,
-            min_weight=min_weight,
-        )
-        if float(np.linalg.norm(proposal - w, ord=1)) <= tol:
-            w = proposal
-            break
-        w = proposal
-        step *= 0.995 if iteration > 50 else 1.0
-
-    return _project_feasible_weights(
-        w,
-        eligible=eligible,
-        long_only=long_only,
-        max_weight=max_weight,
-        max_gross_exposure=max_gross_exposure,
-        min_weight=min_weight,
-    )
-
-
-def _project_to_simplex(values: np.ndarray) -> np.ndarray:
-    """Euclidean projection onto the probability simplex."""
-
-    vector = np.asarray(values, dtype=float)
-    if vector.size == 0:
-        return vector
-    sorted_values = np.sort(vector)[::-1]
-    cumulative = np.cumsum(sorted_values)
-    rho = np.nonzero(sorted_values * np.arange(1, vector.size + 1) > (cumulative - 1.0))[0]
-    if rho.size == 0:
-        return np.full(vector.size, 1.0 / vector.size, dtype=float)
-    rho_idx = int(rho[-1])
-    theta = (cumulative[rho_idx] - 1.0) / float(rho_idx + 1)
-    projected = np.maximum(vector - theta, 0.0)
-    total = float(projected.sum())
-    if total <= 0.0:
-        return np.full(vector.size, 1.0 / vector.size, dtype=float)
-    return projected / total
-
-
-def _ensure_positive_semidefinite(matrix: np.ndarray, *, floor: float) -> np.ndarray:
-    arr = np.asarray(matrix, dtype=float)
-    if arr.size == 0:
-        return arr
-    sym = 0.5 * (arr + arr.T)
-    eigvals, eigvecs = np.linalg.eigh(sym)
-    clipped = np.maximum(eigvals, float(floor))
-    return eigvecs @ np.diag(clipped) @ eigvecs.T
-
-
-def _resolve_return_variances(frame: pd.DataFrame, *, spec: OptionLabelSpec) -> np.ndarray:
-    duration_days = int(frame["trade_duration_days"].iloc[0]) if "trade_duration_days" in frame.columns else 1
-    duration_scale = max(duration_days, 1) / 252.0
-    entry_quotes = frame["entry_quote"].to_numpy(dtype=float)
-    variances = np.maximum(entry_quotes**2, spec.variance_floor)
-    if "is_equity" in frame.columns:
-        equity_mask = frame["is_equity"].astype(bool).to_numpy()
-        equity_var = max(float(spec.equity_annual_vol), 1e-6) ** 2 * duration_scale
-        variances = np.where(equity_mask, equity_var, variances)
-    return variances
-
-
-def _resolve_underlying_exit_price(trade: Mapping[str, Any], *, spec: OptionLabelSpec) -> float | None:
-    for key in (spec.trade_exit_price_col, "exit_px", "exit_price"):
-        value = _float_or_none(trade.get(key))
-        if value is not None and value > 0.0:
-            return value
-    return None
-
-
-def _resolve_underlying_entry_price(trade: Mapping[str, Any], *, spec: OptionLabelSpec) -> float | None:
-    for key in (spec.trade_entry_price_col, "entry_px", "entry_price"):
-        value = _float_or_none(trade.get(key))
-        if value is not None and value > 0.0:
-            return value
-    return None
-
-
-def _build_equity_candidate_row(
-    trade: Mapping[str, Any],
-    *,
-    underlying_symbol: str,
-    entry_dt: pd.Timestamp,
-    exit_dt: pd.Timestamp,
-    trade_id: str,
-    entry_snapshot_date: pd.Timestamp | None,
-    exit_snapshot_date: pd.Timestamp | None,
-    spec: OptionLabelSpec,
-) -> dict[str, Any] | None:
-    entry_px = _resolve_underlying_entry_price(trade, spec=spec)
-    exit_px = _resolve_underlying_exit_price(trade, spec=spec)
-    if entry_px is None or exit_px is None or entry_px <= 0.0:
-        return None
-
-    contract_symbol = f"{underlying_symbol}{spec.equity_contract_suffix}"
-    return {
-        "contract_symbol": contract_symbol,
-        "option_type": "equity",
-        "expiration": pd.NaT,
-        "strike": np.nan,
-        "entry_quote": float(entry_px),
-        "exit_quote": float(max(exit_px, 0.0)),
-        "option_return_pct": float((exit_px - entry_px) / entry_px),
-        "expires_worthless": False,
-        "is_equity": True,
-        "trade_id": trade_id,
-        "trade_entry_date": entry_dt,
-        "trade_exit_date": exit_dt,
-        "trade_duration_days": int((exit_dt - entry_dt).days),
-        "underlying_symbol": underlying_symbol,
-        "underlying_return_pct": _float(trade.get("trade_return")),
-        "entry_snapshot_date": entry_snapshot_date,
-        "exit_snapshot_date": exit_snapshot_date,
-    }
-
-
-def _expires_worthless_mask(
-    frame: pd.DataFrame,
-    *,
-    trade_exit_date: pd.Timestamp,
-    underlying_exit_price: float | None,
-    spec: OptionLabelSpec,
-) -> pd.Series:
-    exit_quotes = pd.to_numeric(frame["exit_quote"], errors="coerce").fillna(0.0)
-    worthless = exit_quotes <= float(spec.worthless_exit_threshold)
-
-    expiration_col = "expiration_exit" if "expiration_exit" in frame.columns else "expiration"
-    strike_col = "strike_exit" if "strike_exit" in frame.columns else "strike"
-    option_type_col = f"{spec.option_type_col}_exit" if f"{spec.option_type_col}_exit" in frame.columns else spec.option_type_col
-
-    if expiration_col in frame.columns and strike_col in frame.columns and option_type_col in frame.columns:
-        expirations = pd.to_datetime(frame[expiration_col], errors="coerce").dt.normalize()
-        strikes = pd.to_numeric(frame[strike_col], errors="coerce")
-        option_types = frame[option_type_col].astype(str).str.strip().str.lower()
-        expired = expirations.notna() & (expirations <= trade_exit_date.normalize())
-        if underlying_exit_price is not None and underlying_exit_price > 0.0:
-            spot = float(underlying_exit_price)
-            call_otm = option_types.str.startswith("c") & (strikes >= spot)
-            put_otm = option_types.str.startswith("p") & (strikes <= spot)
-            worthless = worthless | (expired & (call_otm | put_otm))
-        else:
-            worthless = worthless | expired
-
-    return worthless.astype(bool)
 
 
 def _postprocess_option_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    df = pd.DataFrame(rows).copy()
-    if df.empty:
+    normalized_rows = _normalize_rows_for_polars(rows)
+    columns = sorted({key for row in normalized_rows for key in row})
+    df = pl.DataFrame({column: [row.get(column) for row in normalized_rows] for column in columns}, strict=False)
+    if df.is_empty():
         return []
     id_cols = [col for col in ("trade_id", "contract_symbol", "option_type", "expiration", "strike") if col in df.columns]
-    if "rank_y" in df.columns:
-        df["rank_y"] = pd.to_numeric(df["rank_y"], errors="coerce")
-    if "option_return_pct" in df.columns:
-        df["option_return_pct"] = pd.to_numeric(df["option_return_pct"], errors="coerce")
-    if "mv_mu" in df.columns:
-        df["mv_mu"] = pd.to_numeric(df["mv_mu"], errors="coerce").fillna(0.0)
-    if "mv_weight" in df.columns:
-        df["mv_weight"] = pd.to_numeric(df["mv_weight"], errors="coerce").fillna(0.0)
-    if "expires_worthless" in df.columns:
-        df["expires_worthless"] = df["expires_worthless"].astype(bool)
-    if "is_equity" in df.columns:
-        df["is_equity"] = df["is_equity"].astype(bool)
+    numeric = [column for column in ("rank_y", "option_return_pct", "mv_mu", "mv_weight") if column in df.columns]
+    if numeric:
+        df = df.with_columns([pl.col(column).cast(pl.Float64, strict=False).fill_null(0.0).alias(column) if column in {"mv_mu", "mv_weight"} else pl.col(column).cast(pl.Float64, strict=False).alias(column) for column in numeric])
+    bools = [column for column in ("expires_worthless", "is_equity") if column in df.columns]
+    if bools:
+        df = df.with_columns([pl.col(column).cast(pl.Boolean, strict=False).fill_null(False).alias(column) for column in bools])
     sort_cols = [col for col in ("trade_id", "rank_order", "option_return_pct") if col in df.columns]
     if sort_cols:
-        df = df.sort_values(sort_cols, ascending=[True] * len(sort_cols))
+        df = df.sort(sort_cols)
     if id_cols:
-        df = df.drop_duplicates(subset=id_cols, keep="first")
-    return df.to_dict(orient="records")
+        df = df.unique(subset=id_cols, keep="first", maintain_order=True)
+    return df.to_dicts()
 
 
 def _build_option_statistics(rows: list[dict[str, Any]]) -> dict[str, Any]:
     if not rows:
         return {"trade_stats": {}, "option_group_stats": []}
-    df = pd.DataFrame(rows)
+    normalized_rows = _normalize_rows_for_polars(rows)
+    columns = sorted({key for row in normalized_rows for key in row})
+    df = pl.DataFrame({column: [row.get(column) for row in normalized_rows] for column in columns}, strict=False)
+    avg_return = df.select(pl.col("option_return_pct").cast(pl.Float64, strict=False).mean()).item() if "option_return_pct" in df.columns else 0.0
     stats = {
         "trade_stats": {
-            "trades": int(df["trade_id"].nunique()) if "trade_id" in df.columns else 0,
-            "contracts": int(len(df)),
-            "avg_option_return_pct": round(float(pd.to_numeric(df["option_return_pct"], errors="coerce").mean() or 0.0) * 100.0, 4),
+            "trades": int(df.select(pl.col("trade_id").n_unique()).item()) if "trade_id" in df.columns else 0,
+            "contracts": int(df.height),
+            "avg_option_return_pct": round(float(avg_return or 0.0) * 100.0, 4),
         },
         "option_group_stats": [],
     }
     if "mv_weight" in df.columns:
-        stats["trade_stats"]["avg_mv_weight"] = round(float(pd.to_numeric(df["mv_weight"], errors="coerce").mean() or 0.0), 6)
-        stats["trade_stats"]["worthless_contracts"] = int(df["expires_worthless"].sum()) if "expires_worthless" in df.columns else 0
+        avg_weight = df.select(pl.col("mv_weight").cast(pl.Float64, strict=False).mean()).item()
+        stats["trade_stats"]["avg_mv_weight"] = round(float(avg_weight or 0.0), 6)
+        stats["trade_stats"]["worthless_contracts"] = int(df.select(pl.col("expires_worthless").cast(pl.Int64).sum()).item()) if "expires_worthless" in df.columns else 0
     if "option_type" in df.columns:
-        grouped = (
-            df.groupby(["trade_id", "option_type"], dropna=False)["option_return_pct"]
-            .agg(["count", "mean", "median"])
-            .reset_index()
-        )
-        stats["option_group_stats"] = grouped.to_dict(orient="records")
+        stats["option_group_stats"] = df.group_by(["trade_id", "option_type"], maintain_order=True).agg(
+            pl.col("option_return_pct").count().alias("count"),
+            pl.col("option_return_pct").cast(pl.Float64, strict=False).mean().alias("mean"),
+            pl.col("option_return_pct").cast(pl.Float64, strict=False).median().alias("median"),
+        ).to_dicts()
     return stats
+
+
+def _normalize_rows_for_polars(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    string_columns = {
+        "trade_id", "contract_symbol", "underlying_symbol", "underlying_symbol_entry",
+        "underlying_symbol_exit", "option_type", "option_type_entry", "option_type_exit",
+    }
+    normalized: list[dict[str, Any]] = []
+    for row in rows:
+        clean: dict[str, Any] = {}
+        for key, value in row.items():
+            if isinstance(value, datetime):
+                value = value
+            elif value is None or (isinstance(value, float) and not math.isfinite(value)):
+                value = None
+            if isinstance(value, float) and not math.isfinite(value):
+                value = None
+            if key in string_columns and value is not None and not isinstance(value, str):
+                value = None
+            clean[key] = value
+        normalized.append(clean)
+    return normalized
 
 
 def _trade_id(trade: Mapping[str, Any], *, fallback: str | None = None) -> str:
@@ -1223,16 +775,14 @@ def _trade_id(trade: Mapping[str, Any], *, fallback: str | None = None) -> str:
     return fallback or "trade"
 
 
-def _to_timestamp(value: Any) -> pd.Timestamp | None:
+def _to_timestamp(value: Any) -> datetime | None:
     if value is None or value == "":
         return None
     try:
-        ts = pd.Timestamp(value)
+        ts = value if isinstance(value, datetime) else datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     except Exception:
         return None
-    if pd.isna(ts):
-        return None
-    return ts
+    return ts.replace(tzinfo=None)
 
 
 def _float(value: Any) -> float:
@@ -1249,6 +799,6 @@ def _float_or_none(value: Any) -> float | None:
         parsed = float(str(value).replace(",", "").replace("%", "").strip())
     except Exception:
         return None
-    if pd.isna(parsed):
+    if not math.isfinite(parsed):
         return None
     return float(parsed)

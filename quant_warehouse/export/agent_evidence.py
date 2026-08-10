@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from typing import Any
 
-import pandas as pd
+import polars as pl
 
 
 def build_agent_evidence(
@@ -17,9 +18,9 @@ def build_agent_evidence(
 ) -> dict[str, Any]:
     """Build a compact point-in-time packet from warehouse-owned data."""
     ticker = str(symbol).strip().upper()
-    as_of = pd.Timestamp(as_of_date).normalize()
-    start = as_of - pd.Timedelta(days=int(lookback_days))
-    prices = pd.DataFrame()
+    as_of = datetime.fromisoformat(as_of_date).replace(hour=0, minute=0, second=0, microsecond=0)
+    start = as_of - timedelta(days=int(lookback_days))
+    prices = pl.DataFrame()
     price_provider = ""
     for provider in price_providers:
         candidate = warehouse.read_prices(
@@ -28,8 +29,8 @@ def build_agent_evidence(
             start=start.strftime("%Y-%m-%d"),
             end=as_of.strftime("%Y-%m-%d"),
         )
-        if candidate is not None and not candidate.empty:
-            prices = candidate.copy()
+        if candidate is not None and not candidate.is_empty():
+            prices = candidate
             price_provider = provider
             break
 
@@ -43,21 +44,21 @@ def build_agent_evidence(
     }
     for section in ("income", "balance", "cash", "metrics", "ratios"):
         frame = warehouse.read_fundamentals(ticker, section=section, provider="fmp", end=as_of)
-        if frame is not None and not frame.empty:
+        if frame is not None and not frame.is_empty():
             packet["fundamentals"][section] = _latest_record(frame)
 
-    news_start = as_of - pd.Timedelta(days=int(news_lookback_days))
+    news_start = as_of - timedelta(days=int(news_lookback_days))
     if refresh_news_if_missing and hasattr(warehouse.news, "ensure_date"):
         warehouse.news.ensure_date(ticker, as_of, provider="fmp")
     news = warehouse.read_news(
         ticker,
         provider="fmp",
         start=news_start.strftime("%Y-%m-%d"),
-        end=(as_of + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)).isoformat(),
+        end=(as_of + timedelta(days=1) - timedelta(microseconds=1)).isoformat(),
     )
-    if news is not None and not news.empty:
-        rows = news.sort_index(ascending=False).head(20).reset_index()
-        for _, row in rows.iterrows():
+    if news is not None and not news.is_empty():
+        rows = news.sort("published_at", descending=True).head(20)
+        for row in rows.iter_rows(named=True):
             packet["news"].append(
                 {
                     "published_at": _json_value(row.get("published_at")),
@@ -96,52 +97,54 @@ def build_agent_evidence(
     return packet
 
 
-def _price_summary(frame: pd.DataFrame) -> dict[str, Any]:
-    if frame is None or frame.empty:
+def _price_summary(frame: pl.DataFrame) -> dict[str, Any]:
+    if frame is None or frame.is_empty():
         return {}
-    out = frame.sort_index().copy()
+    out = frame.sort("date")
     close_column = next((name for name in ("close", "Close", "adj_close") if name in out), None)
     if close_column is None:
         return {}
-    close = pd.to_numeric(out[close_column], errors="coerce").dropna()
-    if close.empty:
+    close = out.select(pl.col(close_column).cast(pl.Float64, strict=False)).to_series().drop_nulls()
+    if close.is_empty():
         return {}
-    latest = close.index[-1]
+    latest = out.select("date").tail(1).item()
     result: dict[str, Any] = {
-        "latest_date": pd.Timestamp(latest).strftime("%Y-%m-%d"),
-        "close": float(close.iloc[-1]),
-        "observations": int(len(close)),
+        "latest_date": latest.strftime("%Y-%m-%d") if hasattr(latest, "strftime") else str(latest),
+        "close": float(close[-1]),
+        "observations": close.len(),
     }
     for days in (5, 20, 60):
         if len(close) > days:
-            result[f"return_{days}d"] = float(close.iloc[-1] / close.iloc[-days - 1] - 1.0)
+            result[f"return_{days}d"] = float(close[-1] / close[-days - 1] - 1.0)
         if len(close) >= days:
             result[f"sma_{days}"] = float(close.tail(days).mean())
     if len(close) > 20:
         result["volatility_20d"] = float(close.pct_change().tail(20).std())
     for column in ("open", "high", "low", "volume"):
         if column in out:
-            value = pd.to_numeric(out[column], errors="coerce").dropna()
-            if not value.empty:
-                result[column] = float(value.iloc[-1])
+            value = out.select(pl.col(column).cast(pl.Float64, strict=False)).to_series().drop_nulls()
+            if not value.is_empty():
+                result[column] = float(value[-1])
     return result
 
 
-def _latest_record(frame: pd.DataFrame) -> dict[str, Any]:
-    row = frame.sort_index().iloc[-1]
+def _latest_record(frame: pl.DataFrame) -> dict[str, Any]:
+    ordered = frame.sort("date") if "date" in frame.columns else frame
+    row = ordered.tail(1).to_dicts()[0]
     record = {str(key): _json_value(value) for key, value in row.items()}
-    record["period"] = pd.Timestamp(frame.sort_index().index[-1]).strftime("%Y-%m-%d")
+    date_column = "date" if "date" in ordered.columns else ordered.columns[0]
+    record["period"] = row[date_column].strftime("%Y-%m-%d") if hasattr(row[date_column], "strftime") else str(row[date_column])
     return {key: value for key, value in record.items() if value not in (None, "")}
 
 
 def _json_value(value: Any) -> Any:
-    if value is None or value is pd.NA:
+    if value is None:
         return None
-    if isinstance(value, pd.Timestamp):
+    if isinstance(value, datetime):
         return value.isoformat()
     if hasattr(value, "item"):
         value = value.item()
-    if isinstance(value, float) and pd.isna(value):
+    if isinstance(value, float) and value != value:
         return None
     if isinstance(value, (str, int, float, bool)):
         return value

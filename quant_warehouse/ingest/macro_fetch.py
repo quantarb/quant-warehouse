@@ -1,394 +1,174 @@
 from __future__ import annotations
 
 import re
+from datetime import date, datetime, timedelta
 from typing import Any
 
-import pandas as pd
+import polars as pl
 
-from quant_warehouse.ingest.credentials import configure_openbb_credentials, resolve_fmp_api_key
+from quant_warehouse.ingest.credentials import configure_openbb_credentials
 from quant_warehouse.ingest.normalize import clip_to_min_historical_date
 from quant_warehouse.warehouse.sections import MIN_HISTORICAL_DATE
 
+def _as_polars(value: Any) -> pl.DataFrame:
+    if value is None:
+        return pl.DataFrame()
+    if isinstance(value, pl.DataFrame):
+        return value
+    if hasattr(value, "to_polars"):
+        return value.to_polars()
+    if isinstance(value, list):
+        return pl.DataFrame(value)
+    return pl.DataFrame(value)
 
-def _records_to_frame(records: Any, *, value_column: str = "value") -> pd.DataFrame:
-    if not isinstance(records, list) or not records:
-        return pd.DataFrame()
-    frame = pd.DataFrame(records)
-    if "date" not in frame.columns:
-        return pd.DataFrame()
-    frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
-    frame = frame.dropna(subset=["date"]).sort_values("date")
+
+def _date_expr(frame: pl.DataFrame, column: str) -> pl.Expr:
+    expr = pl.col(column)
+    if frame.schema[column] == pl.String:
+        expr = expr.str.to_datetime(strict=False, time_zone="UTC")
+    else:
+        expr = expr.cast(pl.Datetime, strict=False)
+    return expr.dt.replace_time_zone(None).dt.truncate("1d")
+
+
+def _records_to_frame(records: Any, *, value_column: str = "value") -> pl.DataFrame:
+    frame = _as_polars(records)
+    if frame.is_empty() or "date" not in frame.columns:
+        return pl.DataFrame()
+    frame = frame.with_columns(_date_expr(frame, "date").alias("date")).drop_nulls("date")
     if value_column not in frame.columns:
-        numeric_cols = [
-            column
-            for column in frame.columns
-            if column != "date" and pd.api.types.is_numeric_dtype(frame[column])
-        ]
-        if not numeric_cols:
-            return pd.DataFrame()
-        value_column = numeric_cols[0]
-    out = frame[["date", value_column]].rename(columns={value_column: "value"}).set_index("date")
-    out["value"] = pd.to_numeric(out["value"], errors="coerce")
-    return clip_to_min_historical_date(out.dropna(subset=["value"]))
+        candidates = [c for c in frame.columns if c != "date" and frame.schema[c].is_numeric()]
+        if not candidates:
+            return pl.DataFrame()
+        value_column = candidates[0]
+    return clip_to_min_historical_date(
+        frame.select(["date", pl.col(value_column).cast(pl.Float64, strict=False).alias("value")]).drop_nulls("value")
+    )
 
 
-def fetch_economic_indicator_series(
-    name: str,
-    *,
-    provider: str = "fmp",
-    start_date: str | None = None,
-    end_date: str | None = None,
-) -> pd.DataFrame:
-    provider_name = str(provider or "fmp").strip().lower()
-    if provider_name != "fmp":
-        raise ValueError(f"Unsupported macro economic provider: {provider_name}")
+def fetch_economic_indicator_series(name: str, *, provider: str = "fmp", start_date: str | None = None,
+                                    end_date: str | None = None) -> pl.DataFrame:
+    if str(provider or "fmp").lower() != "fmp":
+        raise ValueError(f"Unsupported macro economic provider: {provider}")
     configure_openbb_credentials()
     from openbb import obb
-
     kwargs: dict[str, Any] = {"symbol": str(name).strip(), "provider": "fmp"}
-    if start_date:
-        kwargs["start_date"] = str(start_date)[:10]
-    if end_date:
-        kwargs["end_date"] = str(end_date)[:10]
-    try:
-        result = obb.economy.indicators(**kwargs)
-        return _records_to_frame(result.to_df())
-    except Exception:
-        return _fetch_fmp_economic_indicator_series_direct(
-            str(name).strip(),
-            start_date=start_date,
-            end_date=end_date,
-        )
-
-
-def _fetch_fmp_economic_indicator_series_direct(
-    name: str,
-    *,
-    start_date: str | None = None,
-    end_date: str | None = None,
-) -> pd.DataFrame:
-    import requests
-
-    params: dict[str, str] = {
-        "apikey": resolve_fmp_api_key(required=True),
-        "name": str(name).strip(),
-    }
-    if start_date:
-        params["from"] = str(start_date)[:10]
-    if end_date:
-        params["to"] = str(end_date)[:10]
-    response = requests.get(
-        "https://financialmodelingprep.com/stable/economic-indicators",
-        params=params,
-        timeout=(5, 30),
-    )
-    response.raise_for_status()
-    records = response.json()
-    return _records_to_frame(records)
+    if start_date: kwargs["start_date"] = str(start_date)[:10]
+    if end_date: kwargs["end_date"] = str(end_date)[:10]
+    result = obb.economy.indicators(**kwargs)
+    return _records_to_frame(result.to_polars())
 
 
 def _normalize_treasury_column_name(column: str) -> str:
     name = str(column).strip()
-    if name == "date":
-        return name
-    if name.startswith("macro__ust_"):
-        return name[len("macro__ust_") :]
+    if name == "date": return name
+    if name.startswith("macro__ust_"): return name[len("macro__ust_"):]
     normalized = re.sub(r"_+", "_", name).strip("_")
     if "_" in normalized:
         head, tail = normalized.split("_", 1)
-        if head in {"month", "year"} and tail.isdigit():
-            return f"{head}{tail}"
+        if head in {"month", "year"} and tail.isdigit(): return f"{head}{tail}"
     return normalized
 
 
-def _treasury_wide_frame(raw: pd.DataFrame) -> pd.DataFrame:
-    if raw is None or raw.empty:
-        return pd.DataFrame()
-    frame = raw.copy()
-    if "date" not in frame.columns:
-        index_name = str(frame.index.name or "").strip().lower()
-        if isinstance(frame.index, pd.DatetimeIndex) or index_name in {"date", "period_ending"}:
-            frame = frame.reset_index().rename(columns={frame.index.name or "index": "date"})
-        else:
-            return pd.DataFrame()
-    frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
-    frame = frame.dropna(subset=["date"]).sort_values("date").drop_duplicates(subset=["date"], keep="last")
-    rename_map = {
-        column: _normalize_treasury_column_name(column)
-        for column in frame.columns
-        if column != "date"
-    }
-    frame = frame.rename(columns=rename_map)
-    numeric_cols = [column for column in frame.columns if column != "date"]
-    for column in numeric_cols:
-        frame[column] = pd.to_numeric(frame[column], errors="coerce")
-    return clip_to_min_historical_date(frame.set_index("date"))
+def _treasury_wide_frame(raw: Any) -> pl.DataFrame:
+    frame = _as_polars(raw)
+    if frame.is_empty() or "date" not in frame.columns: return pl.DataFrame()
+    frame = frame.with_columns(_date_expr(frame, "date").alias("date")).drop_nulls("date")
+    rename = {c: _normalize_treasury_column_name(c) for c in frame.columns if c != "date"}
+    frame = frame.rename(rename)
+    numeric = [c for c in frame.columns if c != "date"]
+    return clip_to_min_historical_date(frame.with_columns([pl.col(c).cast(pl.Float64, strict=False) for c in numeric])
+                                       .unique("date", keep="last").sort("date"))
 
 
-def fetch_treasury_rates_wide(
-    *,
-    provider: str = "fmp",
-    start_date: str | None = None,
-    end_date: str | None = None,
-) -> pd.DataFrame:
-    provider_name = str(provider or "fmp").strip().lower()
-    if provider_name != "fmp":
-        raise ValueError(f"Unsupported macro treasury provider: {provider_name}")
+def fetch_treasury_rates_wide(*, provider: str = "fmp", start_date: str | None = None,
+                              end_date: str | None = None) -> pl.DataFrame:
+    if str(provider or "fmp").lower() != "fmp": raise ValueError(f"Unsupported macro treasury provider: {provider}")
     configure_openbb_credentials()
     from openbb import obb
-
     kwargs: dict[str, Any] = {"provider": "fmp"}
-    if start_date:
-        kwargs["start_date"] = str(start_date)[:10]
-    if end_date:
-        kwargs["end_date"] = str(end_date)[:10]
-    result = obb.fixedincome.government.treasury_rates(**kwargs)
-    return _treasury_wide_frame(result.to_df())
+    if start_date: kwargs["start_date"] = str(start_date)[:10]
+    if end_date: kwargs["end_date"] = str(end_date)[:10]
+    return _treasury_wide_frame(obb.fixedincome.government.treasury_rates(**kwargs).to_polars())
 
 
-def treasury_series_code(column: str) -> str:
-    normalized = _normalize_treasury_column_name(column)
-    return f"macro__ust_{normalized}"
+def treasury_series_code(column: str) -> str: return f"macro__ust_{_normalize_treasury_column_name(column)}"
+def yield_curve_series_code(column: str) -> str: return f"macro__yc_{_normalize_treasury_column_name(column)}"
 
 
-def yield_curve_series_code(column: str) -> str:
-    normalized = _normalize_treasury_column_name(column)
-    return f"macro__yc_{normalized}"
+def _yield_curve_wide_from_long(raw: Any) -> pl.DataFrame:
+    frame = _as_polars(raw)
+    if frame.is_empty() or not {"date", "maturity", "rate"}.issubset(frame.columns): return pl.DataFrame()
+    frame = frame.with_columns([
+        _date_expr(frame, "date").alias("date"),
+        pl.col("maturity").cast(pl.String).map_elements(_normalize_treasury_column_name, return_dtype=pl.String),
+        pl.col("rate").cast(pl.Float64, strict=False),
+    ]).drop_nulls(["date", "rate"])
+    return clip_to_min_historical_date(frame.pivot(on="maturity", index="date", values="rate", aggregate_function="last").sort("date"))
 
 
-def _yield_curve_wide_from_long(raw: pd.DataFrame) -> pd.DataFrame:
-    if raw is None or raw.empty:
-        return pd.DataFrame()
-    frame = raw.copy()
-    if "date" not in frame.columns:
-        if isinstance(frame.index, pd.DatetimeIndex) or str(frame.index.name or "").lower() == "date":
-            frame = frame.reset_index().rename(columns={frame.index.name or "index": "date"})
-        else:
-            return pd.DataFrame()
-    frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
-    frame = frame.dropna(subset=["date"])
-    if "maturity" not in frame.columns or "rate" not in frame.columns:
-        return pd.DataFrame()
-    frame["maturity"] = frame["maturity"].map(_normalize_treasury_column_name)
-    frame["rate"] = pd.to_numeric(frame["rate"], errors="coerce")
-    wide = (
-        frame.pivot_table(index="date", columns="maturity", values="rate", aggfunc="last")
-        .sort_index()
-    )
-    wide.index = pd.DatetimeIndex(wide.index)
-    return clip_to_min_historical_date(wide)
-
-
-def fetch_yield_curve_snapshot(
-    date: str,
-    *,
-    provider: str = "fmp",
-) -> pd.DataFrame:
-    provider_name = str(provider or "fmp").strip().lower()
-    if provider_name != "fmp":
-        raise ValueError(f"Unsupported yield curve provider: {provider_name}")
+def fetch_yield_curve_snapshot(date: str, *, provider: str = "fmp") -> pl.DataFrame:
+    if str(provider or "fmp").lower() != "fmp": raise ValueError(f"Unsupported yield curve provider: {provider}")
     configure_openbb_credentials()
     from openbb import obb
-
-    result = obb.fixedincome.government.yield_curve(date=str(date)[:10], provider="fmp")
-    return _yield_curve_wide_from_long(result.to_df())
+    return _yield_curve_wide_from_long(obb.fixedincome.government.yield_curve(date=str(date)[:10], provider="fmp").to_polars())
 
 
-def fetch_yield_curve_history(
-    *,
-    provider: str = "fmp",
-    start_date: str | None = None,
-    end_date: str | None = None,
-    existing_dates: set[pd.Timestamp] | None = None,
-    step_days: int = 1,
-) -> pd.DataFrame:
-    provider_name = str(provider or "fmp").strip().lower()
-    if provider_name != "fmp":
-        raise ValueError(f"Unsupported yield curve provider: {provider_name}")
-    start = pd.Timestamp(start_date or MIN_HISTORICAL_DATE)
-    end = pd.Timestamp(end_date or pd.Timestamp.utcnow().tz_convert("America/New_York").date())
-    known = {pd.Timestamp(value).normalize() for value in (existing_dates or set())}
-    step = max(1, int(step_days))
-    business_days = pd.bdate_range(start=start, end=end)[::step]
-    frames: list[pd.DataFrame] = []
-    for day in business_days:
-        normalized = pd.Timestamp(day).normalize()
-        if normalized in known:
-            continue
-        try:
-            snapshot = fetch_yield_curve_snapshot(normalized.strftime("%Y-%m-%d"), provider=provider_name)
-            if not snapshot.empty:
-                frames.append(snapshot)
-        except Exception:
-            continue
-    if not frames:
-        return pd.DataFrame()
-    combined = pd.concat(frames)
-    combined = combined[~combined.index.duplicated(keep="last")].sort_index()
-    return clip_to_min_historical_date(combined)
+def _days(start: datetime, end: datetime) -> list[datetime]:
+    return [start + timedelta(days=i) for i in range((end - start).days + 1) if (start + timedelta(days=i)).weekday() < 5]
 
 
-def normalize_calendar_frame(raw: pd.DataFrame) -> pd.DataFrame:
-    if raw is None or raw.empty:
-        return pd.DataFrame()
-    frame = raw.copy()
-    # OpenBB uses the standard-model names while the direct FMP response uses
-    # the endpoint names.  Normalize both into the names consumed by macro
-    # target engineering without discarding either representation.
-    aliases = {
-        "consensus": "estimate",
-        "importance": "impact",
-        "change_percent": "changePercentage",
-    }
-    for source, target in aliases.items():
-        if source in frame.columns and target not in frame.columns:
-            frame = frame.rename(columns={source: target})
-    if "date" not in frame.columns:
-        if isinstance(frame.index, pd.DatetimeIndex) or str(frame.index.name or "").lower() == "date":
-            frame = frame.reset_index().rename(columns={frame.index.name or "index": "date"})
-        else:
-            return pd.DataFrame()
-    frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
-    frame = frame.dropna(subset=["date"]).sort_values("date")
-    for column in frame.columns:
-        if column == "date":
-            continue
-        if column in {
-            "estimate", "consensus", "previous", "actual", "change",
-            "changePercentage", "change_percent",
-        }:
-            frame[column] = pd.to_numeric(frame[column], errors="coerce")
-    frame = frame.set_index("date")
-    frame.index = pd.DatetimeIndex(frame.index)
-    frame.index.name = "date"
-    return clip_to_min_historical_date(frame)
+def fetch_yield_curve_history(*, provider: str = "fmp", start_date: str | None = None, end_date: str | None = None,
+                              existing_dates: set[datetime] | None = None, step_days: int = 1) -> pl.DataFrame:
+    start = datetime.fromisoformat(str(start_date or MIN_HISTORICAL_DATE)[:10]); end = datetime.fromisoformat(str(end_date or date.today())[:10])
+    known = {value.replace(hour=0, minute=0, second=0, microsecond=0) for value in existing_dates or set()}
+    frames = [fetch_yield_curve_snapshot(day.strftime("%Y-%m-%d"), provider=provider)
+              for day in _days(start, end)[::max(1, int(step_days))] if day not in known]
+    frames = [frame for frame in frames if not frame.is_empty()]
+    return pl.concat(frames, how="diagonal_relaxed").unique("date", keep="last").sort("date") if frames else pl.DataFrame()
 
 
-def _fetch_fmp_economic_calendar_direct(
-    *,
-    start_date: str,
-    end_date: str,
-) -> pd.DataFrame:
-    """Fetch the raw FMP calendar while preserving zero-valued observations."""
-    import requests
-
-    response = requests.get(
-        "https://financialmodelingprep.com/stable/economic-calendar",
-        params={
-            "apikey": resolve_fmp_api_key(required=True),
-            "from": str(start_date)[:10],
-            "to": str(end_date)[:10],
-        },
-        timeout=(5, 30),
-    )
-    response.raise_for_status()
-    payload = response.json()
-    if not isinstance(payload, list) or not payload:
-        return pd.DataFrame()
-    return normalize_calendar_frame(pd.DataFrame(payload))
+def normalize_calendar_frame(raw: Any) -> pl.DataFrame:
+    frame = _as_polars(raw)
+    if frame.is_empty() or "date" not in frame.columns: return pl.DataFrame()
+    aliases = {"consensus": "estimate", "importance": "impact", "change_percent": "changePercentage"}
+    frame = frame.rename({source: target for source, target in aliases.items() if source in frame.columns and target not in frame.columns})
+    frame = frame.with_columns(_date_expr(frame, "date").alias("date")).drop_nulls("date")
+    numeric = [c for c in ("estimate", "previous", "actual", "change", "changePercentage") if c in frame.columns]
+    return clip_to_min_historical_date(frame.with_columns([pl.col(c).cast(pl.Float64, strict=False) for c in numeric]).sort("date"))
 
 
-def fetch_economy_calendar(
-    *,
-    provider: str = "fmp",
-    start_date: str,
-    end_date: str,
-) -> pd.DataFrame:
-    provider_name = str(provider or "fmp").strip().lower()
-    if provider_name != "fmp":
-        raise ValueError(f"Unsupported macro calendar provider: {provider_name}")
+def fetch_economy_calendar(*, provider: str = "fmp", start_date: str, end_date: str,
+                           ) -> pl.DataFrame:
+    if str(provider or "fmp").lower() != "fmp": raise ValueError(f"Unsupported macro calendar provider: {provider}")
     configure_openbb_credentials()
     from openbb import obb
-
-    # Prefer the raw endpoint because the provider model historically coerced
-    # valid numeric zeros to missing values.  OpenBB remains a fallback for
-    # environments where direct FMP requests are unavailable.
-    try:
-        direct = _fetch_fmp_economic_calendar_direct(
-            start_date=start_date,
-            end_date=end_date,
-        )
-        if not direct.empty:
-            return direct
-    except Exception:
-        pass
-    try:
-        result = obb.economy.calendar(
-            start_date=str(start_date)[:10],
-            end_date=str(end_date)[:10],
-            provider="fmp",
-        )
-        return normalize_calendar_frame(result.to_df())
-    except Exception:
-        return pd.DataFrame()
+    result = obb.economy.calendar(start_date=str(start_date)[:10], end_date=str(end_date)[:10], provider="fmp")
+    return normalize_calendar_frame(result.to_polars())
 
 
-def fetch_economy_calendar_range(
-    *,
-    provider: str = "fmp",
-    start_date: str | None = None,
-    end_date: str | None = None,
-) -> pd.DataFrame:
-    start = pd.Timestamp(start_date or MIN_HISTORICAL_DATE)
-    end = pd.Timestamp(end_date or pd.Timestamp.utcnow().tz_convert("America/New_York").date())
-    frames: list[pd.DataFrame] = []
-    cursor = start.normalize()
+def fetch_economy_calendar_range(*, provider: str = "fmp", start_date: str | None = None, end_date: str | None = None,
+                                 ) -> pl.DataFrame:
+    start = datetime.fromisoformat(str(start_date or MIN_HISTORICAL_DATE)[:10]); end = datetime.fromisoformat(str(end_date or date.today())[:10])
+    frames = []
+    cursor = start
     while cursor <= end:
-        # FMP supports at most a 90-day calendar window.  Monthly requests
-        # create unnecessary rate-limit pressure and can silently lose data.
-        chunk_end = min(cursor + pd.Timedelta(days=89), end)
-        chunk = fetch_economy_calendar(
-            provider=provider,
-            start_date=cursor.strftime("%Y-%m-%d"),
-            end_date=chunk_end.strftime("%Y-%m-%d"),
-        )
-        if not chunk.empty:
-            frames.append(chunk)
-        cursor = (chunk_end + pd.Timedelta(days=1)).normalize()
-    if not frames:
-        return pd.DataFrame()
-    # Multiple releases commonly share the same timestamp.  They are distinct
-    # events and must remain separate for target engineering.
-    combined = pd.concat(frames).sort_index()
-    return clip_to_min_historical_date(combined)
+        chunk_end = min(cursor + timedelta(days=89), end)
+        frame = fetch_economy_calendar(provider=provider, start_date=cursor.strftime("%Y-%m-%d"), end_date=chunk_end.strftime("%Y-%m-%d"))
+        if not frame.is_empty(): frames.append(frame)
+        cursor = chunk_end + timedelta(days=1)
+    return pl.concat(frames, how="diagonal_relaxed").sort("date") if frames else pl.DataFrame()
 
 
-def normalize_risk_premium_frame(raw: pd.DataFrame) -> pd.DataFrame:
-    if raw is None or raw.empty:
-        return pd.DataFrame()
-    frame = raw.copy().reset_index(drop=True)
-    for column in ("total_equity_risk_premium", "country_risk_premium"):
-        if column in frame.columns:
-            frame[column] = pd.to_numeric(frame[column], errors="coerce")
-    if "country" not in frame.columns:
-        return pd.DataFrame()
-    frame = frame.drop_duplicates(subset=["country"], keep="last")
-    frame = frame.set_index("country")
-    frame.index.name = "country"
-    return frame
+def normalize_risk_premium_frame(raw: Any) -> pl.DataFrame:
+    frame = _as_polars(raw)
+    if frame.is_empty() or "country" not in frame.columns: return pl.DataFrame()
+    numeric = [c for c in ("total_equity_risk_premium", "country_risk_premium") if c in frame.columns]
+    return frame.with_columns([pl.col(c).cast(pl.Float64, strict=False) for c in numeric]).unique("country", keep="last")
 
 
-def fetch_risk_premium_snapshot(*, provider: str = "fmp") -> pd.DataFrame:
-    provider_name = str(provider or "fmp").strip().lower()
-    if provider_name != "fmp":
-        raise ValueError(f"Unsupported risk premium provider: {provider_name}")
+def fetch_risk_premium_snapshot(*, provider: str = "fmp") -> pl.DataFrame:
+    if str(provider or "fmp").lower() != "fmp": raise ValueError(f"Unsupported risk premium provider: {provider}")
     configure_openbb_credentials()
     from openbb import obb
-
-    result = obb.economy.risk_premium(provider="fmp")
-    return normalize_risk_premium_frame(result.to_df())
-
-
-__all__ = [
-    "fetch_economic_indicator_series",
-    "fetch_economy_calendar",
-    "fetch_economy_calendar_range",
-    "fetch_risk_premium_snapshot",
-    "fetch_treasury_rates_wide",
-    "fetch_yield_curve_history",
-    "fetch_yield_curve_snapshot",
-    "normalize_calendar_frame",
-    "normalize_risk_premium_frame",
-    "treasury_series_code",
-    "yield_curve_series_code",
-]
+    return normalize_risk_premium_frame(obb.economy.risk_premium(provider="fmp").to_polars())

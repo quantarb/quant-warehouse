@@ -6,10 +6,10 @@ from __future__ import annotations
 import argparse
 import json
 import re
+from datetime import datetime
 from pathlib import Path
 
-import pandas as pd
-import pyarrow as pa
+import polars as pl
 import pyarrow.parquet as pq
 
 from quant_warehouse.warehouse.api import Warehouse
@@ -34,7 +34,7 @@ def _library_candidates(section: str, provider: str) -> list[str]:
     return list(dict.fromkeys([provider_library(fundamental, provider), provider_library(section, provider)]))
 
 
-def _read_section(warehouse: Warehouse, symbol: str, state, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame | None:
+def _read_section(warehouse: Warehouse, symbol: str, state, start: datetime, end: datetime) -> pl.DataFrame | None:
     frame = None
     for library in _library_candidates(state.section, state.provider):
         frame = warehouse.backend.read(
@@ -42,29 +42,26 @@ def _read_section(warehouse: Warehouse, symbol: str, state, start: pd.Timestamp,
             date_range=(start, end),
             columns=[str(column) for column in state.columns_present] or None,
         )
-        if frame is not None and not frame.empty:
+        if frame is not None and not frame.is_empty():
             break
-    if frame is None or frame.empty:
+    if frame is None or frame.is_empty():
         return None
-    frame = frame.copy()
-    if isinstance(frame.index, pd.DatetimeIndex):
-        dates = frame.index.tz_localize(None) if frame.index.tz is not None else frame.index
-        frame["date"] = dates.normalize()
-    elif "date" not in frame.columns:
-        frame = frame.reset_index(names="date")
-        frame["date"] = pd.to_datetime(frame["date"], errors="coerce").dt.normalize()
-    else:
-        frame["date"] = pd.to_datetime(frame["date"], errors="coerce").dt.normalize()
-    frame = frame.loc[frame["date"].between(start, end)].copy()
-    if frame.empty:
+    frame = frame.clone()
+    if "date" not in frame.columns:
+        raise ValueError(f"Stored section {state.section} has no date column")
+    frame = frame.with_columns(
+        pl.col("date").cast(pl.Datetime, strict=False).dt.replace_time_zone(None).dt.truncate("1d")
+    ).filter(pl.col("date").is_between(start, end, closed="both"))
+    if frame.is_empty():
         return None
-    frame["symbol"] = symbol
-    frame["section"] = str(state.section)
-    frame["provider"] = str(state.provider)
-    return frame.reset_index(drop=True)
+    return frame.with_columns(
+        pl.lit(symbol).alias("symbol"),
+        pl.lit(str(state.section)).alias("section"),
+        pl.lit(str(state.provider)).alias("provider"),
+    )
 
 
-def materialize(symbols: list[str], output: Path, start: pd.Timestamp, end: pd.Timestamp, skip: set[str]) -> dict[str, object]:
+def materialize(symbols: list[str], output: Path, start: datetime, end: datetime, skip: set[str]) -> dict[str, object]:
     warehouse = Warehouse()
     output.mkdir(parents=True, exist_ok=True)
     written: list[str] = []
@@ -77,10 +74,11 @@ def materialize(symbols: list[str], output: Path, start: pd.Timestamp, end: pd.T
             if frame is None:
                 continue
             sections_seen.add(state.section)
-            for year, year_frame in frame.groupby(frame["date"].dt.year, sort=True):
+            for year_frame in frame.with_columns(pl.col("date").dt.year().alias("_year")).partition_by("_year", as_dict=False, maintain_order=True):
+                year = year_frame["_year"][0]
                 destination = output / f"symbol={_safe_name(symbol)}" / f"year={int(year)}" / f"section={_safe_name(state.section)}.parquet"
                 destination.parent.mkdir(parents=True, exist_ok=True)
-                pq.write_table(pa.Table.from_pandas(year_frame, preserve_index=False), destination, compression="zstd", use_dictionary=True)
+                pq.write_table(year_frame.drop("_year").to_arrow(), destination, compression="zstd", use_dictionary=True)
                 written.append(str(destination))
     manifest = {"format": "parquet", "partitioning": ["symbol", "year", "section"], "start": start.strftime("%Y-%m-%d"), "end": end.strftime("%Y-%m-%d"), "symbols": symbols, "sections": sorted(sections_seen), "files": written}
     (output / "manifest.json").write_text(json.dumps(manifest, indent=2))
@@ -97,7 +95,7 @@ def main() -> None:
     args = parser.parse_args()
     symbols = [value.strip().upper() for value in args.symbols.split(",") if value.strip()]
     skip = DEFAULT_SKIP.difference({value.strip() for value in args.include.split(",") if value.strip()})
-    print(json.dumps(materialize(symbols, args.output, pd.Timestamp(args.start), pd.Timestamp(args.end), skip), indent=2))
+    print(json.dumps(materialize(symbols, args.output, datetime.fromisoformat(args.start), datetime.fromisoformat(args.end), skip), indent=2))
 
 
 if __name__ == "__main__":

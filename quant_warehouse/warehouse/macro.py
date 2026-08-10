@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Sequence
 
-import pandas as pd
+import polars as pl
 
 from quant_warehouse.catalog.store import CatalogStore
 from quant_warehouse.config import WarehouseConfig
@@ -41,6 +41,10 @@ from quant_warehouse.warehouse.sections import (
 )
 
 GAP_OVERLAP_DAYS = 5
+
+def _date_expr_for_frame(frame: pl.DataFrame, name: str) -> pl.Expr:
+    return ((pl.col(name).str.to_datetime(strict=False, time_zone="UTC") if frame.schema[name] == pl.String else pl.col(name).cast(pl.Datetime, strict=False))
+            .dt.replace_time_zone(None).dt.truncate("1d"))
 
 
 class MacroStore:
@@ -87,7 +91,7 @@ class MacroStore:
             symbol=storage_symbol,
         )
         merged = merge_upsert(existing, frame)
-        if not merged.empty:
+        if not merged.is_empty():
             self.backend.write(library, storage_symbol, merged)
         self._upsert_catalog_state(
             symbol=series_name,
@@ -127,7 +131,7 @@ class MacroStore:
         updated: dict[str, int] = {}
         for column in [col for col in wide.columns]:
             code = treasury_series_code(column)
-            series_frame = wide[[column]].rename(columns={column: "value"})
+            series_frame = wide.select(["date", column]).rename({column: "value"})
             storage_symbol = symbol_provider_key(code, provider)
             library = provider_library(MACRO_TREASURY_LIBRARY, provider)
             existing = read_provider_frame(
@@ -137,7 +141,7 @@ class MacroStore:
                 symbol=storage_symbol,
             )
             merged = merge_upsert(existing, series_frame)
-            if not merged.empty:
+            if not merged.is_empty():
                 self.backend.write(library, storage_symbol, merged)
             self._upsert_catalog_state(
                 symbol=code,
@@ -180,7 +184,7 @@ class MacroStore:
             )
             if state is not None and state.max_date:
                 fetch_start = (
-                    pd.Timestamp(state.max_date) - timedelta(days=GAP_OVERLAP_DAYS)
+                    datetime.fromisoformat(str(state.max_date)[:10]) - timedelta(days=GAP_OVERLAP_DAYS)
                 ).strftime("%Y-%m-%d")
 
         yield_curve_library = provider_library(MACRO_YIELD_CURVE_LIBRARY, provider)
@@ -190,9 +194,9 @@ class MacroStore:
             provider=provider,
             symbol=symbol_provider_key(YIELD_CURVE_BUNDLE_SYMBOL, provider),
         )
-        existing_dates: set[pd.Timestamp] = set()
-        if existing_bundle is not None and not existing_bundle.empty:
-            existing_dates = {pd.Timestamp(value).normalize() for value in existing_bundle.index}
+        existing_dates: set[datetime] = set()
+        if existing_bundle is not None and not existing_bundle.is_empty() and "date" in existing_bundle.columns:
+            existing_dates = {value.replace(hour=0, minute=0, second=0, microsecond=0) for value in existing_bundle["date"].drop_nulls().to_list()}
 
         incoming = fetch_yield_curve_history(
             provider=provider,
@@ -205,7 +209,7 @@ class MacroStore:
         updated: dict[str, int] = {}
         for column in [col for col in wide.columns]:
             code = yield_curve_series_code(column)
-            series_frame = wide[[column]].rename(columns={column: "value"})
+            series_frame = wide.select(["date", column]).rename({column: "value"})
             storage_symbol = symbol_provider_key(code, provider)
             existing = read_provider_frame(
                 self.backend,
@@ -214,7 +218,7 @@ class MacroStore:
                 symbol=storage_symbol,
             )
             merged = merge_upsert(existing, series_frame)
-            if not merged.empty:
+            if not merged.is_empty():
                 self.backend.write(yield_curve_library, storage_symbol, merged)
             self._upsert_catalog_state(
                 symbol=code,
@@ -225,7 +229,7 @@ class MacroStore:
             updated[code] = int(len(merged))
 
         bundle_symbol = symbol_provider_key(YIELD_CURVE_BUNDLE_SYMBOL, provider)
-        if not wide.empty:
+        if not wide.is_empty():
             self.backend.write(
                 yield_curve_library,
                 bundle_symbol,
@@ -264,9 +268,7 @@ class MacroStore:
                 provider=provider,
             )
             if state is not None and state.max_date:
-                fetch_start = (
-                    pd.Timestamp(state.max_date) - timedelta(days=GAP_OVERLAP_DAYS)
-                ).strftime("%Y-%m-%d")
+                fetch_start = (datetime.fromisoformat(str(state.max_date)[:10]) - timedelta(days=GAP_OVERLAP_DAYS)).strftime("%Y-%m-%d")
 
         storage_symbol = symbol_provider_key(MACRO_CALENDAR_SYMBOL, provider)
         calendar_library = provider_library(MACRO_CALENDAR_LIBRARY, provider)
@@ -277,7 +279,7 @@ class MacroStore:
             symbol=storage_symbol,
         )
         if full_refresh:
-            existing = pd.DataFrame()
+            existing = pl.DataFrame()
 
         incoming = fetch_economy_calendar_range(
             provider=provider,
@@ -285,7 +287,7 @@ class MacroStore:
             end_date=end_date,
         )
         merged = merge_panel_upsert(existing, incoming)
-        if not merged.empty:
+        if not merged.is_empty():
             self.backend.write(calendar_library, storage_symbol, merged)
         self._upsert_catalog_state(
             symbol=MACRO_CALENDAR_SYMBOL,
@@ -307,11 +309,9 @@ class MacroStore:
         frame = fetch_risk_premium_snapshot(provider=provider)
         storage_symbol = symbol_provider_key(RISK_PREMIUM_SYMBOL, provider)
         library = provider_library(MACRO_RISK_PREMIUM_LIBRARY, provider)
-        if not frame.empty:
-            snapshot = frame.reset_index()
-            as_of = pd.Timestamp.utcnow().normalize()
-            snapshot.index = pd.DatetimeIndex([as_of] * len(snapshot))
-            snapshot.index.name = "as_of"
+        if not frame.is_empty():
+            as_of = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+            snapshot = frame.with_columns(pl.lit(as_of).alias("as_of"))
             self.backend.write(library, storage_symbol, snapshot)
             frame = snapshot
         self.catalog.upsert(
@@ -384,7 +384,7 @@ class MacroStore:
         provider: str = "fmp",
         start: str | None = None,
         end: str | None = None,
-    ) -> pd.Series:
+    ) -> pl.DataFrame:
         series_code = str(series_code).strip()
         provider = str(provider or "fmp").strip().lower()
         lowered = series_code.lower()
@@ -401,18 +401,14 @@ class MacroStore:
             provider=provider,
             symbol=storage_symbol,
         )
-        if frame is None or frame.empty:
-            return pd.Series(dtype=float)
+        if frame is None or frame.is_empty():
+            return pl.DataFrame(schema={"date": pl.Datetime, "value": pl.Float64})
         sliced = _slice_dates(frame, start=start, end=end)
-        if sliced.empty:
-            return pd.Series(dtype=float)
+        if sliced.is_empty():
+            return pl.DataFrame(schema={"date": pl.Datetime, "value": pl.Float64})
         column = "value" if "value" in sliced.columns else sliced.columns[0]
-        series = pd.to_numeric(sliced[column], errors="coerce")
-        series.index = pd.DatetimeIndex(sliced.index).normalize()
-        series = series.dropna()
-        if series.index.has_duplicates:
-            series = series.groupby(level=0).last()
-        return series
+        return (sliced.select([_date_expr_for_frame(sliced, "date").alias("date"), pl.col(column).cast(pl.Float64, strict=False).alias("value")])
+                .drop_nulls("value").unique("date", keep="last").sort("date"))
 
     def read_panel(
         self,
@@ -421,20 +417,21 @@ class MacroStore:
         provider: str = "fmp",
         start: str | None = None,
         end: str | None = None,
-    ) -> pd.DataFrame:
-        columns: dict[str, pd.Series] = {}
+    ) -> pl.DataFrame:
+        frames: list[pl.DataFrame] = []
         for code in series_codes:
             series_name = str(code).strip()
             if not series_name:
                 continue
             series = self.read_series(series_name, provider=provider, start=start, end=end)
-            if not series.empty:
-                columns[series_name] = series
-        if not columns:
-            return pd.DataFrame()
-        panel = pd.DataFrame(columns).sort_index()
-        panel.index = pd.DatetimeIndex(panel.index).normalize()
-        return panel
+            if not series.is_empty():
+                frames.append(series.rename({"value": series_name}))
+        if not frames:
+            return pl.DataFrame()
+        panel = frames[0]
+        for frame in frames[1:]:
+            panel = panel.join(frame, on="date", how="full", coalesce=True)
+        return panel.sort("date")
 
     def read_calendar(
         self,
@@ -442,7 +439,7 @@ class MacroStore:
         provider: str = "fmp",
         start: str | None = None,
         end: str | None = None,
-    ) -> pd.DataFrame:
+    ) -> pl.DataFrame:
         provider = str(provider or "fmp").strip().lower()
         storage_symbol = symbol_provider_key(MACRO_CALENDAR_SYMBOL, provider)
         frame = read_provider_frame(
@@ -450,12 +447,17 @@ class MacroStore:
             base_library=MACRO_CALENDAR_LIBRARY,
             provider=provider,
             symbol=storage_symbol,
+            output_format="polars",
         )
-        if frame is None or frame.empty:
-            return pd.DataFrame()
+        if frame is None or frame.is_empty():
+            return pl.DataFrame()
         return _slice_dates(frame, start=start, end=end)
 
-    def read_risk_premium(self, *, provider: str = "fmp") -> pd.DataFrame:
+    def read_risk_premium(
+        self,
+        *,
+        provider: str = "fmp",
+    ) -> pl.DataFrame:
         provider = str(provider or "fmp").strip().lower()
         storage_symbol = symbol_provider_key(RISK_PREMIUM_SYMBOL, provider)
         frame = read_provider_frame(
@@ -463,13 +465,11 @@ class MacroStore:
             base_library=MACRO_RISK_PREMIUM_LIBRARY,
             provider=provider,
             symbol=storage_symbol,
+            output_format="polars",
         )
-        if frame is None or frame.empty:
-            return pd.DataFrame()
-        latest = frame.loc[frame.index.max()]
-        if isinstance(latest, pd.Series):
-            return latest.to_frame().T
-        return latest.copy()
+        if frame is None or frame.is_empty():
+            return pl.DataFrame()
+        return frame.tail(1)
 
     def list_treasury_series_codes(self, *, provider: str = "fmp") -> list[str]:
         provider = str(provider or "fmp").strip().lower()
@@ -485,7 +485,7 @@ class MacroStore:
         state = self.catalog.get(symbol=symbol, section=section, provider=provider)
         if state is None or not state.max_date:
             return None
-        resume = pd.Timestamp(state.max_date) - timedelta(days=GAP_OVERLAP_DAYS)
+        resume = datetime.fromisoformat(str(state.max_date)[:10]) - timedelta(days=GAP_OVERLAP_DAYS)
         return resume.strftime("%Y-%m-%d")
 
     def _upsert_catalog_state(
@@ -494,7 +494,7 @@ class MacroStore:
         symbol: str,
         section: str,
         provider: str,
-        frame: pd.DataFrame,
+        frame: pl.DataFrame,
     ) -> None:
         min_date = _min_date_text(frame)
         max_date = _max_date_text(frame)
@@ -511,13 +511,13 @@ class MacroStore:
         )
 
 
-def _min_date_text(frame: pd.DataFrame) -> str | None:
-    if frame is None or frame.empty or not isinstance(frame.index, pd.DatetimeIndex):
+def _min_date_text(frame: pl.DataFrame) -> str | None:
+    if frame is None or frame.is_empty() or "date" not in frame.columns:
         return None
-    return frame.index.min().strftime("%Y-%m-%d")
+    return frame["date"].min().strftime("%Y-%m-%d")
 
 
-def _max_date_text(frame: pd.DataFrame) -> str | None:
-    if frame is None or frame.empty or not isinstance(frame.index, pd.DatetimeIndex):
+def _max_date_text(frame: pl.DataFrame) -> str | None:
+    if frame is None or frame.is_empty() or "date" not in frame.columns:
         return None
-    return frame.index.max().strftime("%Y-%m-%d")
+    return frame["date"].max().strftime("%Y-%m-%d")

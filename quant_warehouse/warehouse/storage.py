@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime
 
-import pandas as pd
+import polars as pl
 
-from quant_warehouse.warehouse.backend import StorageBackend
+from quant_warehouse.warehouse.backend import FrameFormat, StorageBackend
 
 
 def normalize_storage_provider(provider: str) -> str:
@@ -67,10 +68,11 @@ def read_provider_frame(
     provider: str,
     symbol: str,
     fallback_legacy: bool = False,
-    start_date: pd.Timestamp | None = None,
-    end_date: pd.Timestamp | None = None,
+    start_date: datetime | None = None,
+    end_date: datetime | None = None,
     columns: list[str] | None = None,
-) -> pd.DataFrame | None:
+    output_format: FrameFormat = "polars",
+) -> pl.DataFrame | None:
     """Read from provider-scoped storage.
 
     Legacy shared-library fallback is opt-in and should only be used by
@@ -85,8 +87,9 @@ def read_provider_frame(
         symbol,
         date_range=date_range,
         columns=columns,
+        output_format=output_format,
     )
-    if frame is not None and not frame.empty:
+    if frame is not None and not _frame_empty(frame):
         return frame
     if fallback_legacy:
         return _read_backend(
@@ -95,6 +98,7 @@ def read_provider_frame(
             symbol,
             date_range=date_range,
             columns=columns,
+            output_format=output_format,
         )
     return frame
 
@@ -104,24 +108,25 @@ def _read_backend(
     library: str,
     symbol: str,
     *,
-    date_range: tuple[pd.Timestamp | None, pd.Timestamp | None] | None = None,
+    date_range: tuple[datetime | None, datetime | None] | None = None,
     columns: list[str] | None = None,
-) -> pd.DataFrame | None:
+    output_format: FrameFormat = "polars",
+) -> pl.DataFrame | None:
     try:
-        return backend.read(library, symbol, date_range=date_range, columns=columns)
+        return backend.read(
+            library,
+            symbol,
+            date_range=date_range,
+            columns=columns,
+            output_format=output_format,
+        )
     except TypeError:
-        frame = backend.read(library, symbol)
-        if frame is None or frame.empty:
-            return frame
-        out = frame.copy()
-        if date_range is not None:
-            start, end = date_range
-            if isinstance(out.index, pd.DatetimeIndex):
-                if start is not None:
-                    out = out.loc[out.index >= start]
-                if end is not None:
-                    out = out.loc[out.index <= end]
-        if columns is not None:
-            keep = [column for column in columns if column in out.columns]
-            out = out.loc[:, keep]
-        return out
+        # A backend that cannot provide the Polars contract is not a valid
+        # warehouse backend; silently falling back would reintroduce a legacy
+        # dataframe path.
+        raise
+
+
+def _frame_empty(frame: object) -> bool:
+    """Check emptiness for a Polars frame."""
+    return frame.is_empty()

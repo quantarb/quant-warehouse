@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-import pandas as pd
+from datetime import datetime
+
+import polars as pl
 import pytest
 
 from quant_warehouse.platforms.data_providers.fmp import (
@@ -15,11 +17,8 @@ from quant_warehouse.platforms.data_providers.fmp import (
 )
 
 
-def _prices() -> pd.DataFrame:
-    return pd.DataFrame(
-        {"close": [100.0, 101.0, 102.0, 104.0]},
-        index=pd.to_datetime(["2025-01-02", "2025-01-03", "2025-01-06", "2025-01-07"]),
-    )
+def _prices() -> pl.DataFrame:
+    return pl.DataFrame({"date": [datetime(2025, 1, 2), datetime(2025, 1, 3), datetime(2025, 1, 6), datetime(2025, 1, 7)], "close": [100.0, 101.0, 102.0, 104.0]})
 
 
 def _spec() -> FmpSyntheticOptionSpec:
@@ -46,12 +45,12 @@ def test_build_fmp_synthetic_option_chain_uses_adjusted_price_basis() -> None:
 
     assert len(chain) == 2
     assert set(chain["option_type"]) == {"call", "put"}
-    assert chain[["snapshot_date", "contract_symbol"]].duplicated().sum() == 0
+    assert chain.select(["snapshot_date", "contract_symbol"]).unique().height == chain.height
     assert set(chain["option_source"]) == {FMP_SYNTHETIC_OPTION_SOURCE}
     assert set(chain["underlying_price_basis"]) == {FMP_SYNTHETIC_UNDERLYING_PRICE_BASIS}
-    assert chain["underlying_price"].tolist() == [101.0, 101.0]
-    assert chain["moneyness"].tolist() == pytest.approx([0.0, 0.0])
-    assert chain[["delta", "gamma", "theta", "vega", "rho", "iv"]].notna().all().all()
+    assert chain["underlying_price"].to_list() == [101.0, 101.0]
+    assert chain["moneyness"].to_list() == pytest.approx([0.0, 0.0])
+    assert chain.select(pl.all_horizontal([pl.col(c).is_not_null() for c in ["delta", "gamma", "theta", "vega", "rho", "iv"]])).to_series().all()
 
 
 def test_read_fmp_synthetic_option_chain_projects_requested_columns() -> None:
@@ -64,8 +63,8 @@ def test_read_fmp_synthetic_option_chain_projects_requested_columns() -> None:
         prices=_prices(),
     )
 
-    assert frame.columns.tolist() == ["snapshot_date", "contract_symbol", "missing_col"]
-    assert frame["missing_col"].isna().all()
+    assert frame.columns == ["snapshot_date", "contract_symbol", "missing_col"]
+    assert frame["missing_col"].is_null().all()
 
 
 def test_price_fmp_synthetic_contract_settles_intrinsic_at_expiration() -> None:

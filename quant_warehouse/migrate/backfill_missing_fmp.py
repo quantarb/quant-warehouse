@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import polars as pl
+
 import json
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Sequence
 
-import pandas as pd
 
 from quant_warehouse.config import WarehouseConfig
 from quant_warehouse.refresh.planner import macro_backfill_needs_update
@@ -172,7 +173,7 @@ def backfill_missing_fmp_historical(
             should_refresh_macro = macro_backfill_needs_update(
                 warehouse.catalog,
                 provider=equity_provider,
-                history_start_date=pd.Timestamp(macro_start_text).date(),
+                history_start_date=datetime.fromisoformat(str(macro_start_text)[:10]).date(),
                 skip_recent_hours=skip_recent_hours,
             )
 

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import polars as pl
+
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-import pandas as pd
 
 from quant_warehouse.platforms.data_providers.thetadata.target_engineering.option_labels import (
     OptionLabelSpec,
@@ -34,7 +36,7 @@ class OptionMlDatasetResult:
 
 
 def build_option_ml_dataset(
-    trades: Sequence[Mapping[str, Any]] | pd.DataFrame,
+    trades: Sequence[Mapping[str, Any]] | pl.DataFrame,
     *,
     dataset_spec: OptionMlDatasetSpec | None = None,
     label_specs: Sequence[OptionLabelSpec] | None = None,
@@ -51,11 +53,11 @@ def build_option_ml_dataset(
     if not trade_rows:
         return OptionMlDatasetResult()
 
-    combined_frames: list[pd.DataFrame] = []
+    combined_frames: list[pl.DataFrame] = []
     for trade in trade_rows:
         symbol = str(trade.get("symbol") or trade.get("underlying_symbol") or "").strip().upper()
-        entry_dt = pd.Timestamp(trade["entry_date"]).normalize()
-        exit_dt = pd.Timestamp(trade["exit_date"]).normalize()
+        entry_dt = datetime.fromisoformat(str(trade["entry_date"])[:10])
+        exit_dt = datetime.fromisoformat(str(trade["exit_date"])[:10])
         if not symbol:
             continue
 
@@ -71,24 +73,24 @@ def build_option_ml_dataset(
 
         for label_spec in specs:
             panel = build_option_label_panel([trade], snapshots, spec=label_spec)
-            if panel.empty:
+            if panel.is_empty():
                 continue
-            tagged = panel.copy()
-            tagged["label_method"] = label_spec.label_method
-            tagged["task_name"] = _task_name_for_spec(label_spec)
-            tagged["target_col"] = _target_col_for_spec(label_spec)
-            tagged["target_value"] = tagged[_target_col_for_spec(label_spec)]
+            target_column = _target_col_for_spec(label_spec)
+            tagged = panel.with_columns(
+                pl.lit(label_spec.label_method).alias("label_method"),
+                pl.lit(_task_name_for_spec(label_spec)).alias("task_name"),
+                pl.lit(target_column).alias("target_col"),
+                pl.col(target_column).alias("target_value"),
+            )
             combined_frames.append(tagged)
 
     if not combined_frames:
         return OptionMlDatasetResult()
 
-    dataset = pd.concat(combined_frames, ignore_index=True, sort=False)
-    dataset = dataset.drop_duplicates(
-        subset=[col for col in ("trade_id", "contract_symbol", "label_method") if col in dataset.columns],
-        keep="first",
-    )
-    rows = dataset.to_dict(orient="records")
+    dataset = pl.concat(combined_frames, how="diagonal_relaxed")
+    identity = [col for col in ("trade_id", "contract_symbol", "label_method") if col in dataset.columns]
+    dataset = dataset.unique(identity, keep="first") if identity else dataset
+    rows = dataset.to_dicts()
     stats = _build_dataset_statistics(dataset)
     return OptionMlDatasetResult(rows=rows, statistics=stats)
 
@@ -101,26 +103,27 @@ def save_option_ml_dataset(
 ) -> Path:
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    frame = pd.DataFrame(result.rows)
+    frame = pl.DataFrame(result.rows)
     if file_format == "parquet":
-        frame.to_parquet(path, index=False)
+        frame.write_parquet(path)
     elif file_format == "csv":
-        frame.to_csv(path, index=False)
+        frame.write_csv(path)
     else:
         raise ValueError("file_format must be 'parquet' or 'csv'")
     return path
 
 
-def _normalize_trade_rows(trades: Sequence[Mapping[str, Any]] | pd.DataFrame) -> list[dict[str, Any]]:
-    if isinstance(trades, pd.DataFrame):
-        rows = trades.to_dict(orient="records")
+def _normalize_trade_rows(trades: Sequence[Mapping[str, Any]] | pl.DataFrame) -> list[dict[str, Any]]:
+    if isinstance(trades, pl.DataFrame):
+        rows = trades.to_dicts()
     else:
         rows = [dict(row) for row in trades]
     out: list[dict[str, Any]] = []
     for row in rows:
-        entry = pd.to_datetime(row.get("entry_date"), errors="coerce")
-        exit_ = pd.to_datetime(row.get("exit_date"), errors="coerce")
-        if pd.isna(entry) or pd.isna(exit_):
+        try:
+            entry = datetime.fromisoformat(str(row.get("entry_date"))[:10])
+            exit_ = datetime.fromisoformat(str(row.get("exit_date"))[:10])
+        except (TypeError, ValueError):
             continue
         normalized = dict(row)
         normalized["entry_date"] = entry
@@ -143,23 +146,17 @@ def _target_col_for_spec(spec: OptionLabelSpec) -> str:
     return "label"
 
 
-def _build_dataset_statistics(dataset: pd.DataFrame) -> dict[str, Any]:
+def _build_dataset_statistics(dataset: pl.DataFrame) -> dict[str, Any]:
     stats: dict[str, Any] = {
         "rows": int(len(dataset)),
-        "trades": int(dataset["trade_id"].nunique()) if "trade_id" in dataset.columns else 0,
+        "trades": int(dataset["trade_id"].n_unique()) if "trade_id" in dataset.columns else 0,
         "tasks": [],
     }
     if "task_name" not in dataset.columns:
         return stats
 
-    grouped = (
-        dataset.groupby("task_name", dropna=False)
-        .agg(
-            rows=("contract_symbol", "count"),
-            trades=("trade_id", "nunique"),
-            avg_target=("target_value", "mean"),
-        )
-        .reset_index()
+    grouped = dataset.group_by("task_name").agg(
+        pl.len().alias("rows"), pl.col("trade_id").n_unique().alias("trades"), pl.col("target_value").mean().alias("avg_target")
     )
-    stats["tasks"] = grouped.to_dict(orient="records")
+    stats["tasks"] = grouped.to_dicts()
     return stats

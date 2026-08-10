@@ -7,7 +7,7 @@ import tempfile
 import time
 from pathlib import Path
 
-import pandas as pd
+import polars as pl
 
 from quant_warehouse.config import WarehouseConfig
 from quant_warehouse.platforms.data_providers.thetadata.options import (
@@ -38,16 +38,16 @@ def _temp_config(root: Path) -> WarehouseConfig:
     )
 
 
-def _read_source(symbol: str, max_days: int) -> pd.DataFrame:
+def _read_source(symbol: str, max_days: int) -> pl.DataFrame:
     source = read_option_chain_arctic(symbol)
-    if source.empty:
+    if source.is_empty():
         raise SystemExit(f"No cached option rows found for {symbol}. Download one symbol first.")
-    snapshot_dates = pd.to_datetime(source["snapshot_date"], errors="coerce").dt.normalize()
-    selected_days = sorted(snapshot_dates.dropna().unique())[: max(1, int(max_days))]
-    return source.loc[snapshot_dates.isin(selected_days)].copy()
+    snapshot_dates = source["snapshot_date"].cast(pl.Datetime, strict=False).dt.truncate("1d")
+    selected_days = snapshot_dates.drop_nulls().unique().sort().head(max(1, int(max_days))).to_list()
+    return source.with_columns(snapshot_dates.alias("snapshot_date")).filter(pl.col("snapshot_date").is_in(selected_days))
 
 
-def _bench_per_day(symbol: str, frame: pd.DataFrame, root: Path) -> tuple[float, int, int]:
+def _bench_per_day(symbol: str, frame: pl.DataFrame, root: Path) -> tuple[float, int, int]:
     backend = open_backend(_temp_config(root))
     snapshots = split_snapshots_by_date(frame)
     start = time.perf_counter()
@@ -60,7 +60,7 @@ def _bench_per_day(symbol: str, frame: pd.DataFrame, root: Path) -> tuple[float,
     return elapsed, 0 if stored is None else len(stored), writes
 
 
-def _bench_per_symbol(symbol: str, frame: pd.DataFrame, root: Path) -> tuple[float, int]:
+def _bench_per_symbol(symbol: str, frame: pl.DataFrame, root: Path) -> tuple[float, int]:
     backend = open_backend(_temp_config(root))
     start = time.perf_counter()
     write_option_chain_arctic(symbol, frame, backend=backend, merge=True)
@@ -73,7 +73,7 @@ def main() -> int:
     args = _parse_args()
     symbol = str(args.symbol).strip().upper()
     frame = _read_source(symbol, args.max_days)
-    days = int(pd.to_datetime(frame["snapshot_date"], errors="coerce").dt.normalize().nunique())
+    days = int(frame["snapshot_date"].n_unique())
     rows = int(len(frame))
 
     temp_root = Path(tempfile.mkdtemp(prefix=f"qw_thetadata_write_bench_{symbol}_"))

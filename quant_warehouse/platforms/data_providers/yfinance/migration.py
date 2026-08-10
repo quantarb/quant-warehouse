@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import polars as pl
+
 import argparse
 import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Sequence
 
-import pandas as pd
 
 from quant_warehouse.config import WarehouseConfig
 from quant_warehouse.catalog.store import CatalogStore
@@ -89,13 +90,13 @@ def migrate_yfinance_storage(
                             target_uri,
                             target_library,
                             target_symbol,
-                            frame=pd.DataFrame(),
+                            frame=pl.DataFrame(),
                             status="skipped_catalog_fund_or_etf",
                         )
                     )
                     continue
                 frame = source.read(source_library, source_symbol)
-                if frame is None or frame.empty:
+                if frame is None or frame.is_empty():
                     rows.append(
                         _row(
                             config,
@@ -104,7 +105,7 @@ def migrate_yfinance_storage(
                             target_uri,
                             target_library,
                             target_symbol,
-                            frame=pd.DataFrame(),
+                            frame=pl.DataFrame(),
                             status="skipped_empty",
                         )
                     )
@@ -144,7 +145,7 @@ def migrate_yfinance_storage(
                         target_uri,
                         target_library,
                         target_symbol,
-                        frame=pd.DataFrame(),
+                        frame=pl.DataFrame(),
                         status="error",
                         error=f"{type(exc).__name__}: {exc}",
                     )
@@ -214,7 +215,7 @@ def _row(
     target_library: str,
     target_symbol: str,
     *,
-    frame: pd.DataFrame,
+    frame: pl.DataFrame,
     status: str,
     error: str | None = None,
     deleted_legacy: bool = False,
@@ -248,8 +249,8 @@ def _safe_list_symbols(backend: ArcticBackend, library: str) -> list[str]:
         return []
 
 
-def _assert_verified_copy(source_frame: pd.DataFrame, copied_frame: pd.DataFrame | None) -> None:
-    if copied_frame is None or copied_frame.empty:
+def _assert_verified_copy(source_frame: pl.DataFrame, copied_frame: pl.DataFrame | None) -> None:
+    if copied_frame is None or copied_frame.is_empty():
         raise RuntimeError("copied frame is empty")
     if len(source_frame) != len(copied_frame):
         raise RuntimeError(f"row count mismatch: source={len(source_frame)} copied={len(copied_frame)}")
@@ -259,16 +260,16 @@ def _assert_verified_copy(source_frame: pd.DataFrame, copied_frame: pd.DataFrame
         raise RuntimeError("max date mismatch")
 
 
-def _min_date_text(frame: pd.DataFrame) -> str | None:
-    if frame is None or frame.empty or not isinstance(frame.index, pd.DatetimeIndex):
+def _min_date_text(frame: pl.DataFrame) -> str | None:
+    if frame is None or frame.is_empty() or "date" not in frame.columns:
         return None
-    return frame.index.min().strftime("%Y-%m-%d")
+    return frame.get_column("date").min().strftime("%Y-%m-%d")
 
 
-def _max_date_text(frame: pd.DataFrame) -> str | None:
-    if frame is None or frame.empty or not isinstance(frame.index, pd.DatetimeIndex):
+def _max_date_text(frame: pl.DataFrame) -> str | None:
+    if frame is None or frame.is_empty() or "date" not in frame.columns:
         return None
-    return frame.index.max().strftime("%Y-%m-%d")
+    return frame.get_column("date").max().strftime("%Y-%m-%d")
 
 
 if __name__ == "__main__":

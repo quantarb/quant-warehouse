@@ -13,11 +13,11 @@ authors = [{ name = "Quant Warehouse" }]
 keywords = ["quant", "finance", "openbb", "arcticdb", "feature-store", "point-in-time"]
 dependencies = [
     "numpy>=2.0,<2.5",
-    "pandas>=2.1,<3",
+    "polars>=1.0,<2",
+    "torch>=2.0,<3",
     "protobuf<7",
     "financetoolkit>=2.1,<3",
     "ortools>=9.12,<10",
-    "pandas-ta-classic @ git+https://github.com/quantarb/pandas-ta-classic.git@main",
     "pyarrow>=14.0",
     "scipy>=1.14,<2",
     "thetadata>=1.0.9",

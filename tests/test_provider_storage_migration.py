@@ -1,6 +1,7 @@
 from pathlib import Path
+from datetime import datetime
 
-import pandas as pd
+import polars as pl
 
 from quant_warehouse.config import WarehouseConfig
 from quant_warehouse.migrate.provider_storage import migrate_legacy_provider_storage
@@ -17,10 +18,8 @@ def _config(tmp_path: Path) -> WarehouseConfig:
     )
 
 
-def _frame() -> pd.DataFrame:
-    frame = pd.DataFrame({"close": [100.0, 101.0]}, index=pd.to_datetime(["2024-01-02", "2024-01-03"]))
-    frame.index.name = "date"
-    return frame
+def _frame() -> pl.DataFrame:
+    return pl.DataFrame({"close": [100.0, 101.0], "date": [datetime(2024, 1, 2), datetime(2024, 1, 3)]})
 
 
 def test_migrate_provider_storage_copies_and_deletes_provider_keyed_symbol(tmp_path: Path) -> None:

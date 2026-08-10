@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from datetime import datetime
 from typing import Literal, Sequence
 
-import pandas as pd
+import polars as pl
 
 from quant_warehouse.catalog.store import CatalogStore
 from quant_warehouse.config import WarehouseConfig
@@ -147,14 +148,14 @@ class PricesStore:
             history_floor = self.catalog.equity_historical_start(symbol)
             frame = normalize_prices(raw, provider=provider, min_date=history_floor)
             if (
-                frame.empty
+                frame.is_empty()
                 and fetch_start
                 and not full_refresh
                 and end_date
             ):
                 state = self.catalog.get(symbol=symbol, section=section, provider=provider)
                 if state is not None and state.max_date:
-                    wider_start = pd.Timestamp(state.max_date) - timedelta(
+                    wider_start = datetime.fromisoformat(state.max_date) - timedelta(
                         days=GAP_FILL_RETRY_LOOKBACK_DAYS
                     )
                     retry_kwargs = dict(kwargs)
@@ -167,7 +168,7 @@ class PricesStore:
                         **retry_kwargs,
                     )
                     frame = normalize_prices(raw, provider=provider, min_date=history_floor)
-                    if not frame.empty:
+                    if not frame.is_empty():
                         fetch_start = retry_kwargs["start_date"]
             storage_symbol = symbol_provider_key(symbol, provider)
 
@@ -180,15 +181,15 @@ class PricesStore:
             )
             merged = merge_upsert(existing, frame)
             rows_written = 0
-            if not merged.empty:
+            if not merged.is_empty():
                 self.backend.write(library, storage_symbol, merged)
                 rows_written = len(merged)
 
             min_date = None
             max_date = None
-            if not merged.empty:
-                min_date = merged.index.min().strftime("%Y-%m-%d")
-                max_date = merged.index.max().strftime("%Y-%m-%d")
+            if not merged.is_empty():
+                min_date = merged["date"].min().strftime("%Y-%m-%d")
+                max_date = merged["date"].max().strftime("%Y-%m-%d")
 
             self.catalog.upsert(
                 symbol=symbol,
@@ -218,7 +219,7 @@ class PricesStore:
         symbol: str,
         *,
         provider: str,
-        frame: pd.DataFrame,
+        frame: pl.DataFrame,
         merge: bool = True,
         adjustment: str = EQUITY_PRICE_ADJUSTMENT,
     ) -> dict[str, object]:
@@ -245,15 +246,15 @@ class PricesStore:
             library = provider_library(base_library, provider)
 
         rows_written = 0
-        if not merged.empty:
+        if not merged.is_empty():
             self.backend.write(library, storage_symbol, merged)
             rows_written = len(merged)
 
         min_date = None
         max_date = None
-        if not merged.empty:
-            min_date = merged.index.min().strftime("%Y-%m-%d")
-            max_date = merged.index.max().strftime("%Y-%m-%d")
+        if not merged.is_empty():
+            min_date = merged["date"].min().strftime("%Y-%m-%d")
+            max_date = merged["date"].max().strftime("%Y-%m-%d")
 
         self.catalog.upsert(
             symbol=symbol,
@@ -283,7 +284,8 @@ class PricesStore:
         start: str | None = None,
         end: str | None = None,
         adjustment: str = EQUITY_PRICE_ADJUSTMENT,
-    ) -> pd.DataFrame:
+        output_format: Literal["polars"] = "polars",
+    ) -> pl.DataFrame:
         provider = validate_price_provider(provider)
         adjustment = validate_price_adjustment(adjustment)
         base_library = price_library_for_adjustment(adjustment)
@@ -293,23 +295,26 @@ class PricesStore:
             base_library=base_library,
             provider=provider,
             symbol=storage_symbol,
+            output_format=output_format,
         )
-        if adjustment == EQUITY_PRICE_ADJUSTMENT and (df is None or df.empty):
+        if adjustment == EQUITY_PRICE_ADJUSTMENT and (df is None or df.is_empty()):
             df = read_provider_frame(
                 self.backend,
                 base_library=ETF_PRICES_LIBRARY,
                 provider=provider,
                 symbol=storage_symbol,
+                output_format=output_format,
             )
-        if adjustment == EQUITY_PRICE_ADJUSTMENT and (df is None or df.empty):
+        if adjustment == EQUITY_PRICE_ADJUSTMENT and (df is None or df.is_empty()):
             df = read_provider_frame(
                 self.backend,
                 base_library=FUND_PRICES_LIBRARY,
                 provider=provider,
                 symbol=storage_symbol,
+                output_format=output_format,
             )
-        if df is None or df.empty:
-            return pd.DataFrame()
+        if df is None or df.is_empty():
+            return pl.DataFrame()
         return _slice_dates(df, start=start, end=end)
 
     def list_providers(
@@ -333,30 +338,21 @@ class PricesStore:
         state = self.catalog.get(symbol=symbol, section=section, provider=provider)
         if state is None or not state.max_date:
             return None
-        resume = pd.Timestamp(state.max_date) - timedelta(days=GAP_OVERLAP_DAYS)
+        resume = datetime.fromisoformat(state.max_date) - timedelta(days=GAP_OVERLAP_DAYS)
         return resume.strftime("%Y-%m-%d")
 
 
 def _slice_dates(
-    df: pd.DataFrame,
+    df: pl.DataFrame,
     *,
     start: str | None,
     end: str | None,
-) -> pd.DataFrame:
-    out = df.copy()
-    index_tz = getattr(out.index, "tz", None)
+) -> pl.DataFrame:
+    if "date" not in df.columns:
+        return df
+    predicate = pl.lit(True)
     if start is not None:
-        start_ts = pd.Timestamp(start)
-        if index_tz is not None and start_ts.tzinfo is None:
-            start_ts = start_ts.tz_localize(index_tz)
-        elif index_tz is None and start_ts.tzinfo is not None:
-            start_ts = start_ts.tz_convert(None)
-        out = out.loc[out.index >= start_ts]
+        predicate = predicate & (pl.col("date") >= pl.lit(datetime.fromisoformat(start)))
     if end is not None:
-        end_ts = pd.Timestamp(end)
-        if index_tz is not None and end_ts.tzinfo is None:
-            end_ts = end_ts.tz_localize(index_tz)
-        elif index_tz is None and end_ts.tzinfo is not None:
-            end_ts = end_ts.tz_convert(None)
-        out = out.loc[out.index <= end_ts]
-    return out
+        predicate = predicate & (pl.col("date") <= pl.lit(datetime.fromisoformat(end)))
+    return df.filter(predicate)

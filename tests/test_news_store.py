@@ -1,6 +1,6 @@
 from pathlib import Path
 
-import pandas as pd
+import polars as pl
 
 from quant_warehouse.config import WarehouseConfig
 from quant_warehouse.warehouse.api import Warehouse
@@ -13,7 +13,7 @@ def test_company_news_store_upserts_and_reads_point_in_time(tmp_path: Path):
         catalog_path=tmp_path / "catalog.sqlite",
     )
     warehouse = Warehouse(config)
-    frame = pd.DataFrame(
+    frame = pl.DataFrame(
         {
             "symbol": ["AAPL", "AAPL", "MSFT"],
             "observation_date": ["2024-01-02", "2024-01-03", "2024-01-02"],
@@ -37,9 +37,9 @@ def test_company_news_store_upserts_and_reads_point_in_time(tmp_path: Path):
     warehouse.news.import_frame(frame)
 
     assert counts == {"AAPL": 2, "MSFT": 1}
-    assert len(warehouse.read_news("AAPL")) == 2
+    assert warehouse.read_news("AAPL").height == 2
     selected = warehouse.news.read("AAPL", observation_dates=["2024-01-03"])
-    assert selected["title"].tolist() == ["two"]
+    assert selected["title"].to_list() == ["two"]
     state = warehouse.catalog.get(symbol="AAPL", section="company_news", provider="fmp")
     assert state is not None
     assert state.row_count == 2
@@ -52,7 +52,7 @@ def test_ensure_news_date_uses_storage_before_provider(tmp_path: Path, monkeypat
         catalog_path=tmp_path / "catalog.sqlite",
     )
     warehouse = Warehouse(config)
-    frame = pd.DataFrame(
+    frame = pl.DataFrame(
         {
             "symbol": ["AAPL"],
             "observation_date": ["2024-01-02"],
@@ -67,4 +67,4 @@ def test_ensure_news_date_uses_storage_before_provider(tmp_path: Path, monkeypat
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("provider should not run")),
     )
     result = warehouse.news.ensure_date("AAPL", "2024-01-02")
-    assert result["title"].tolist() == ["stored"]
+    assert result["title"].to_list() == ["stored"]

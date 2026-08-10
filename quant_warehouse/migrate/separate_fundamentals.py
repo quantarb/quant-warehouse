@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import polars as pl
+
 import re
 from typing import Sequence
 
-import pandas as pd
 
 from quant_warehouse.catalog.store import CatalogStore
 from quant_warehouse.ingest.normalize import symbol_provider_key
@@ -89,16 +90,16 @@ def _migrate_symbol_section(
 
     storage_symbol = symbol_provider_key(symbol, provider)
     legacy = warehouse.backend.read(LEGACY_FUNDAMENTALS_LIBRARY, storage_symbol)
-    if legacy is None or legacy.empty:
+    if legacy is None or legacy.is_empty():
         return {"symbol": symbol, "section": section, "provider": provider, "rows": 0, "skipped": True}
 
     target_library = provider_library(fundamental_library(section), provider)
     existing = warehouse.backend.read(target_library, storage_symbol)
-    if existing is not None and not existing.empty:
+    if existing is not None and not existing.is_empty():
         if not dry_run and delete_verified_legacy:
             columns = _resolve_legacy_columns(legacy, state.columns_present, provider=provider)
-            frame = _strip_provider_prefix(legacy[columns].copy(), provider=provider) if columns else pd.DataFrame()
-            if not frame.empty:
+            frame = _strip_provider_prefix(legacy.select(columns), provider=provider) if columns else pl.DataFrame()
+            if not frame.is_empty():
                 _assert_verified_copy(frame, existing)
                 deleted = warehouse.backend.delete(LEGACY_FUNDAMENTALS_LIBRARY, storage_symbol)
                 return {
@@ -117,10 +118,10 @@ def _migrate_symbol_section(
     if not columns:
         return {"symbol": symbol, "section": section, "provider": provider, "rows": 0, "error": "no_columns"}
 
-    frame = legacy[columns].copy()
+    frame = legacy.select(columns)
     frame = _strip_provider_prefix(frame, provider=provider)
     deleted = False
-    if not dry_run and not frame.empty:
+    if not dry_run and not frame.is_empty():
         warehouse.backend.write(target_library, storage_symbol, frame)
         copied = warehouse.backend.read(target_library, storage_symbol)
         _assert_verified_copy(frame, copied)
@@ -139,7 +140,7 @@ def _migrate_symbol_section(
 
 
 def _resolve_legacy_columns(
-    legacy: pd.DataFrame,
+    legacy: pl.DataFrame,
     catalog_columns: Sequence[str],
     *,
     provider: str,
@@ -156,7 +157,7 @@ def _resolve_legacy_columns(
     return resolved
 
 
-def _strip_provider_prefix(frame: pd.DataFrame, *, provider: str) -> pd.DataFrame:
+def _strip_provider_prefix(frame: pl.DataFrame, *, provider: str) -> pl.DataFrame:
     rename: dict[str, str] = {}
     prefix = f"{provider}__"
     for column in frame.columns:
@@ -164,14 +165,11 @@ def _strip_provider_prefix(frame: pd.DataFrame, *, provider: str) -> pd.DataFram
             rename[column] = column[len(prefix) :]
         elif _PREFIX_RE.match(column):
             rename[column] = column.split("__", 1)[1]
-    out = frame.rename(columns=rename)
-    if isinstance(out.index, pd.DatetimeIndex):
-        out = out.sort_index()
-    return out
+    return frame.rename(rename).sort("date") if "date" in frame.columns else frame.rename(rename)
 
 
-def _assert_verified_copy(source_frame: pd.DataFrame, copied_frame: pd.DataFrame | None) -> None:
-    if copied_frame is None or copied_frame.empty:
+def _assert_verified_copy(source_frame: pl.DataFrame, copied_frame: pl.DataFrame | None) -> None:
+    if copied_frame is None or copied_frame.is_empty():
         raise RuntimeError("copied frame is empty")
     if len(source_frame) != len(copied_frame):
         raise RuntimeError(f"row count mismatch: source={len(source_frame)} copied={len(copied_frame)}")
@@ -183,13 +181,13 @@ def _assert_verified_copy(source_frame: pd.DataFrame, copied_frame: pd.DataFrame
         raise RuntimeError("max date mismatch")
 
 
-def _min_date_text(frame: pd.DataFrame) -> str | None:
-    if frame is None or frame.empty or not isinstance(frame.index, pd.DatetimeIndex):
+def _min_date_text(frame: pl.DataFrame) -> str | None:
+    if frame is None or frame.is_empty() or "date" not in frame.columns:
         return None
-    return frame.index.min().strftime("%Y-%m-%d")
+    return frame.get_column("date").min().strftime("%Y-%m-%d")
 
 
-def _max_date_text(frame: pd.DataFrame) -> str | None:
-    if frame is None or frame.empty or not isinstance(frame.index, pd.DatetimeIndex):
+def _max_date_text(frame: pl.DataFrame) -> str | None:
+    if frame is None or frame.is_empty() or "date" not in frame.columns:
         return None
-    return frame.index.max().strftime("%Y-%m-%d")
+    return frame.get_column("date").max().strftime("%Y-%m-%d")

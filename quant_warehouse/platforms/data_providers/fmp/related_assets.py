@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import polars as pl
+
 import re
+from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections.abc import Callable, Iterable
 
-import pandas as pd
 import requests
 
 from quant_warehouse.platforms.data_providers.fmp.feature_engineering.technical import (
@@ -56,8 +58,12 @@ def parse_related_maturity_date(name: str) -> str | None:
     )
     if not match:
         return None
-    parsed = pd.to_datetime(match.group(1), errors="coerce")
-    return None if pd.isna(parsed) else pd.Timestamp(parsed).strftime("%Y-%m-%d")
+    for fmt in ("%m/%d/%Y", "%m-%d-%Y", "%m/%d/%y", "%m-%d-%y"):
+        try:
+            return datetime.strptime(match.group(1), fmt).strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+    return None
 
 
 def discover_related_instruments(
@@ -93,7 +99,7 @@ def fetch_related_adjusted_ohlcv(
     start: str = "1900-01-01",
     end: str = "2025-12-31",
     session: requests.Session | None = None,
-) -> pd.DataFrame:
+) -> pl.DataFrame:
     """Fetch dividend-adjusted OHLCV using canonical warehouse column names."""
     client = session or requests.Session()
     response = client.get(
@@ -101,11 +107,11 @@ def fetch_related_adjusted_ohlcv(
         params={"symbol": symbol, "from": start, "to": end, "apikey": api_key}, timeout=60,
     )
     data = response.json()
-    frame = pd.DataFrame(data) if isinstance(data, list) else pd.DataFrame()
-    if frame.empty:
+    frame = pl.DataFrame(data) if isinstance(data, list) else pl.DataFrame()
+    if frame.is_empty():
         return frame
-    frame = frame.rename(columns={"adjOpen": "open", "adjHigh": "high", "adjLow": "low", "adjClose": "close"})
-    return frame[[column for column in RELATED_OHLCV_COLUMNS if column in frame.columns]]
+    frame = frame.rename({"adjOpen": "open", "adjHigh": "high", "adjLow": "low", "adjClose": "close"})
+    return frame.select([column for column in RELATED_OHLCV_COLUMNS if column in frame.columns])
 
 
 def _build_related_instrument_frame(
@@ -113,27 +119,18 @@ def _build_related_instrument_frame(
     instrument_symbol: str,
     security_class: str,
     maturity: str | None,
-    prices: pd.DataFrame,
-) -> pd.DataFrame:
-    prices = prices.copy()
-    prices["symbol"] = instrument_symbol
+    prices: pl.DataFrame,
+) -> pl.DataFrame:
+    prices = prices.with_columns(pl.lit(instrument_symbol).alias("symbol"))
     built = build_historical_price_eod_features(instrument_symbol, prices)
-    if built.df.empty:
-        return pd.DataFrame()
-    technical = built.df.reset_index().rename(columns={"symbol": "instrument_symbol"})
-    technical["date"] = pd.to_datetime(technical["date"], errors="coerce").dt.normalize()
-    technical = technical.drop_duplicates(["date", "instrument_symbol"], keep="last")
-    raw = prices[[column for column in ("date", "open", "high", "low", "close", "volume") if column in prices]].copy()
-    raw["date"] = pd.to_datetime(raw["date"], errors="coerce").dt.normalize()
-    raw.insert(1, "instrument_symbol", instrument_symbol)
-    frame = raw.merge(technical, on=["date", "instrument_symbol"], how="left", validate="one_to_one")
+    if built.df.is_empty():
+        return pl.DataFrame()
+    technical = built.df.rename({"symbol": "instrument_symbol"})
+    raw = prices.select([column for column in ("date", "open", "high", "low", "close", "volume") if column in prices.columns]).with_columns(pl.lit(instrument_symbol).alias("instrument_symbol"))
+    frame = raw.join(technical, on=["date", "instrument_symbol"], how="left")
     feature_columns = [column for column in frame.columns if column.startswith("px__") or column in {"open", "high", "low", "close", "volume"}]
-    frame = frame[["date", "instrument_symbol", *feature_columns]]
-    frame = frame.rename(columns={column: f"{security_class}__{column}" for column in feature_columns})
-    frame.insert(0, "symbol", issuer)
-    frame.insert(2, "asset_class", security_class)
-    frame.insert(3, "maturity_date", maturity)
-    return frame
+    frame = frame.select(["date", "instrument_symbol", *feature_columns]).rename({column: f"{security_class}__{column}" for column in feature_columns})
+    return frame.with_columns(pl.lit(issuer).alias("symbol"), pl.lit(security_class).alias("asset_class"), pl.lit(maturity).alias("maturity_date")).select(["symbol", "date", "asset_class", "maturity_date", "instrument_symbol", *[column for column in frame.columns if column not in {"date", "instrument_symbol"}]])
 
 
 def build_related_asset_panel(
@@ -145,7 +142,7 @@ def build_related_asset_panel(
     discover_workers: int = 6,
     fetch_workers: int = 4,
     progress_logger: Callable[[object], None] = print,
-) -> tuple[pd.DataFrame, dict[str, object]]:
+) -> tuple[pl.DataFrame, dict[str, object]]:
     """Discover and build adjusted related-security features for issuers."""
     issuer_values = sorted({str(value).strip().upper() for value in issuers if str(value).strip()})
     discovered: dict[str, list[tuple[str, str, str | None]]] = {}
@@ -155,7 +152,7 @@ def build_related_asset_panel(
             issuer, candidates = future.result()
             discovered[issuer] = candidates
     requests_by_symbol = sorted({symbol for values in discovered.values() for symbol, _, _ in values})
-    raw: dict[str, pd.DataFrame] = {}
+    raw: dict[str, pl.DataFrame] = {}
     with ThreadPoolExecutor(max_workers=max(1, fetch_workers)) as pool:
         futures = {pool.submit(fetch_related_adjusted_ohlcv, symbol, api_key, start=start, end=end): symbol for symbol in requests_by_symbol}
         for future in as_completed(futures):
@@ -164,29 +161,29 @@ def build_related_asset_panel(
                 raw[symbol] = future.result()
             except Exception as exc:
                 progress_logger({"symbol": symbol, "error": str(exc)})
-    frames: list[pd.DataFrame] = []
+    frames: list[pl.DataFrame] = []
     for issuer, candidates in discovered.items():
         for instrument_symbol, security_class, maturity in candidates:
             prices = raw.get(instrument_symbol)
-            if prices is None or prices.empty:
+            if prices is None or prices.is_empty():
                 continue
             try:
                 frame = _build_related_instrument_frame(issuer, instrument_symbol, security_class, maturity, prices)
             except Exception as exc:
                 progress_logger({"issuer": issuer, "instrument": instrument_symbol, "error": str(exc)})
                 continue
-            if not frame.empty:
+            if not frame.is_empty():
                 frames.append(frame)
-    panel = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-    if not panel.empty:
-        panel = panel.sort_values(["symbol", "asset_class", "instrument_symbol", "date"]).reset_index(drop=True)
+    panel = pl.concat(frames, how="diagonal_relaxed") if frames else pl.DataFrame()
+    if not panel.is_empty():
+        panel = panel.sort(["symbol", "asset_class", "instrument_symbol", "date"])
     stats = {
         "issuers": len(issuer_values),
         "candidate_symbols": len(requests_by_symbol),
-        "rows": len(panel),
-        "covered_issuers": int(panel["symbol"].nunique()) if not panel.empty else 0,
-        "unique_instruments": int(panel["instrument_symbol"].nunique()) if not panel.empty else 0,
-        "classes": sorted(panel["asset_class"].unique().tolist()) if not panel.empty else [],
+        "rows": panel.height,
+        "covered_issuers": panel["symbol"].n_unique() if not panel.is_empty() else 0,
+        "unique_instruments": panel["instrument_symbol"].n_unique() if not panel.is_empty() else 0,
+        "classes": sorted(panel["asset_class"].unique().to_list()) if not panel.is_empty() else [],
     }
     return panel, stats
 

@@ -16,5 +16,5 @@ def test_feature_engineering_benchmark_smoke():
     assert report.baseline.feature_count > 0
     assert report.baseline.total_rows == 80
     assert report.candidate is None
-    assert "current_pandas" in format_report(report)
+    assert "current_polars" in format_report(report)
     assert json.loads(json.dumps(report, default=_json_default))["baseline"]["total_rows"] == 80

@@ -4,7 +4,7 @@ import argparse
 import json
 from pathlib import Path
 
-import pandas as pd
+import polars as pl
 
 from quant_warehouse import Warehouse
 from quant_warehouse.platforms.data_providers.fmp.target_engineering import LabelBuildSpec, build_trade_results
@@ -15,13 +15,11 @@ from quant_warehouse.platforms.data_providers.thetadata.target_engineering.optio
 )
 
 
-def _load_price_frame(symbol: str, start: str, end: str) -> pd.DataFrame:
+def _load_price_frame(symbol: str, start: str, end: str) -> pl.DataFrame:
     df = Warehouse().read_prices(symbol, provider="fmp", start=start, end=end)
-    if df.empty:
+    if df.is_empty():
         raise RuntimeError(f"No warehouse price history returned for {symbol}")
-    frame = df.reset_index().rename(columns={"index": "date"})
-    frame["date"] = pd.to_datetime(frame["date"]).dt.tz_localize(None)
-    return frame.set_index("date").sort_index()
+    return df.sort("date")
 
 
 def _parse_args() -> argparse.Namespace:

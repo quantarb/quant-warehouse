@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import polars as pl
+
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Literal
 
-import pandas as pd
 
 
 OptionExitPriceSource = Literal[
@@ -15,7 +17,7 @@ OptionExitPriceSource = Literal[
 
 @dataclass(frozen=True)
 class OptionQuote:
-    snapshot_date: pd.Timestamp
+    snapshot_date: datetime
     bid: float
     ask: float
     mid: float
@@ -23,7 +25,7 @@ class OptionQuote:
 
 @dataclass(frozen=True)
 class OptionSettlement:
-    snapshot_date: pd.Timestamp
+    snapshot_date: datetime
     bid: float
     ask: float
     mid: float

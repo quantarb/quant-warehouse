@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from typing import Any, Callable, Mapping, Sequence
 
-import numpy as np
-import pandas as pd
+import polars as pl
 
 from quant_warehouse.platforms.data_providers.fmp.target_engineering.operations import (
     apply_trade_deduplication,
@@ -23,16 +23,16 @@ from quant_warehouse.platforms.data_providers.fmp.target_engineering.strategy_so
 )
 
 
-def normalize_label_frame(df: pd.DataFrame) -> pd.DataFrame:
+def normalize_label_frame(df: pl.DataFrame) -> pl.DataFrame:
     """Return a shallow-normalized frame with lowercase string column names."""
 
-    out = df.copy()
-    out.columns = [str(col).strip().lower() for col in out.columns]
-    return out
+    if isinstance(df, pl.DataFrame):
+        return df.rename({col: str(col).strip().lower() for col in df.columns})
+    return df.rename({col: str(col).strip().lower() for col in df.columns})
 
 
 def add_binary_classification_labels(
-    events: pd.DataFrame,
+    events: pl.DataFrame,
     *,
     use_sample_weight: bool = True,
     r_clip: float = 0.10,
@@ -41,90 +41,105 @@ def add_binary_classification_labels(
     horizon_balance_mode: str = "mass",
     entry_only_weighting: bool = True,
     horizon_factor_cap: float | None = 3.0,
-) -> pd.DataFrame:
+) -> pl.DataFrame:
     """Convert per-event rows into binary long-vs-short labels."""
 
     if events is None or len(events) == 0:
-        return pd.DataFrame()
+        return pl.DataFrame()
 
     ev = normalize_label_frame(events)
-    _require_columns(ev, ["event", "side", "horizon"], ctx="add_binary_classification_labels")
-    base_cols = ["event", "side", "horizon"]
-    extra_cols = ["trade_return"] if "trade_return" in ev.columns else []
-    out = ev[base_cols + extra_cols].copy()
-
-    is_long_entry = (out["side"] == "long") & (out["event"] == "entry")
-    is_short_exit = (out["side"] == "short") & (out["event"] == "exit")
-    out["target"] = (is_long_entry | is_short_exit).astype(int)
-    if use_sample_weight and "trade_return" in out.columns:
-        returns = pd.to_numeric(out["trade_return"], errors="coerce").fillna(0.0).to_numpy()
-        clipped = np.clip(returns, 0.0, float(r_clip))
-        denom = float(r_clip) if float(r_clip) > 0 else 1.0
-        out["sample_weight"] = (1.0 + float(alpha) * (clipped / denom)).astype(float)
-        is_entry = out["event"] == "entry"
-        if entry_only_weighting:
-            out.loc[~is_entry, "sample_weight"] = 1.0
-        if horizon_balance:
-            if horizon_balance_mode not in {"mass", "count"}:
-                raise ValueError("horizon_balance_mode must be 'mass' or 'count'")
-            if horizon_balance_mode == "count":
-                denom_series = out.loc[is_entry].groupby(["side", "horizon"]).size().astype(float)
-            else:
-                denom_series = out.loc[is_entry].groupby(["side", "horizon"])["sample_weight"].sum().astype(float)
-            inv = 1.0 / denom_series
-            inv = (inv / inv.mean()).clip(lower=1.0)
-            if horizon_factor_cap is not None:
-                inv = inv.clip(upper=float(horizon_factor_cap))
-            entry_keys = pd.MultiIndex.from_arrays(
-                [out.loc[is_entry, "side"], out.loc[is_entry, "horizon"]],
-                names=["side", "horizon"],
+    if isinstance(ev, pl.DataFrame):
+        _require_columns(ev, ["event", "side", "horizon"], ctx="add_binary_classification_labels")
+        extra = ["trade_return"] if "trade_return" in ev.columns else []
+        out = ev.select(["event", "side", "horizon"] + extra).with_columns(
+            ((pl.col("side") == "long") & (pl.col("event") == "entry")
+             | ((pl.col("side") == "short") & (pl.col("event") == "exit")))
+            .cast(pl.Int8)
+            .alias("target")
+        )
+        if use_sample_weight and "trade_return" in out.columns:
+            out = out.with_columns(
+                (1.0 + float(alpha) * pl.col("trade_return").cast(pl.Float64, strict=False).fill_null(0.0).clip(0.0, float(r_clip)) / (float(r_clip) if float(r_clip) > 0 else 1.0)).alias("sample_weight")
             )
-            out.loc[is_entry, "sample_weight"] *= entry_keys.map(inv).to_numpy(dtype=float)
-
-    keep = ["target", "side", "horizon"]
-    if "trade_return" in out.columns:
-        keep.append("trade_return")
-    if "sample_weight" in out.columns:
-        keep.append("sample_weight")
-    return out[keep].sort_index()
-
-
-def add_action_labels(events: pd.DataFrame) -> pd.DataFrame:
+            is_entry = (pl.col("event") == "entry")
+            if entry_only_weighting:
+                out = out.with_columns(pl.when(is_entry).then(pl.col("sample_weight")).otherwise(1.0).alias("sample_weight"))
+            if horizon_balance:
+                if horizon_balance_mode not in {"mass", "count"}:
+                    raise ValueError("horizon_balance_mode must be 'mass' or 'count'")
+                entries = out.filter(is_entry)
+                denom_col = "sample_weight" if horizon_balance_mode == "mass" else "target"
+                grouped = entries.group_by(["side", "horizon"]).agg(
+                    pl.col(denom_col).sum().alias("denom") if horizon_balance_mode == "mass" else pl.len().alias("denom")
+                ).with_columns((1.0 / pl.col("denom")).alias("raw_factor"))
+                mean_factor = grouped.select(pl.col("raw_factor").mean()).item()
+                grouped = grouped.with_columns((pl.col("raw_factor") / mean_factor).clip(lower_bound=1.0, upper_bound=horizon_factor_cap).alias("factor"))
+                out = out.join(grouped.select(["side", "horizon", "factor"]), on=["side", "horizon"], how="left")
+                out = out.with_columns(pl.when(is_entry).then(pl.col("sample_weight") * pl.col("factor")).otherwise(pl.col("sample_weight")).alias("sample_weight")).drop("factor")
+        keep = ["target", "side", "horizon"] + extra + (["sample_weight"] if "sample_weight" in out.columns else [])
+        return out.select(keep)
+def add_action_labels(events: pl.DataFrame) -> pl.DataFrame:
     """Convert per-event rows into explicit trading action labels."""
 
     if events is None or len(events) == 0:
-        return pd.DataFrame()
+        return pl.DataFrame()
 
     ev = normalize_label_frame(events)
-    _require_columns(ev, ["event", "side", "horizon"], ctx="add_action_labels")
-    base_cols = ["event", "side", "horizon"]
-    extra_cols = ["trade_return"] if "trade_return" in ev.columns else []
-    out = ev[base_cols + extra_cols].copy()
-
-    conditions = [
-        (out["side"] == "long") & (out["event"] == "entry"),
-        (out["side"] == "long") & (out["event"] == "exit"),
-        (out["side"] == "short") & (out["event"] == "entry"),
-        (out["side"] == "short") & (out["event"] == "exit"),
-    ]
-    out["label"] = np.select(conditions, ["buy", "sell", "short", "cover"], default="unknown")
-    out["market_position"] = out["label"].map({"buy": 0, "short": 0, "sell": 1, "cover": -1}).astype(int)
-    keep = ["label", "market_position", "side", "horizon"]
-    if "trade_return" in out.columns:
-        keep.append("trade_return")
-    return out[keep].sort_index()
-
-
-def add_rank_regression_labels(labels: pd.DataFrame) -> pd.DataFrame:
+    if isinstance(ev, pl.DataFrame):
+        _require_columns(ev, ["event", "side", "horizon"], ctx="add_action_labels")
+        keep = ["event", "side", "horizon"]
+        if "trade_return" in ev.columns:
+            keep.append("trade_return")
+        return (
+            ev.select(keep)
+            .with_columns(
+                pl.when((pl.col("side") == "long") & (pl.col("event") == "entry"))
+                .then(pl.lit("buy"))
+                .when((pl.col("side") == "long") & (pl.col("event") == "exit"))
+                .then(pl.lit("sell"))
+                .when((pl.col("side") == "short") & (pl.col("event") == "entry"))
+                .then(pl.lit("short"))
+                .when((pl.col("side") == "short") & (pl.col("event") == "exit"))
+                .then(pl.lit("cover"))
+                .otherwise(pl.lit("unknown"))
+                .alias("label")
+            )
+            .with_columns(
+                pl.when(pl.col("label").is_in(["buy", "short"]))
+                .then(pl.lit(0))
+                .when(pl.col("label") == "sell")
+                .then(pl.lit(1))
+                .when(pl.col("label") == "cover")
+                .then(pl.lit(-1))
+                .otherwise(pl.lit(0))
+                .alias("market_position")
+            )
+            .select(["label", "market_position", "side", "horizon"] + (["trade_return"] if "trade_return" in ev.columns else []))
+        )
+def add_rank_regression_labels(labels: pl.DataFrame) -> pl.DataFrame:
     """Add global percentile-rank regression targets from `trade_return`."""
 
     if labels is None or len(labels) == 0:
-        return pd.DataFrame() if labels is None else labels.copy()
+        return pl.DataFrame() if labels is None else labels.clone()
     df = normalize_label_frame(labels)
+    if isinstance(df, pl.DataFrame):
+        _require_columns(df, ["trade_return"], ctx="add_rank_regression_labels")
+        out = df.with_columns(pl.col("trade_return").cast(pl.Float64, strict=False).alias("_return"))
+        if "target" in out.columns:
+            out = out.with_columns(
+                pl.when(pl.col("target").cast(pl.Int64, strict=False) == 1)
+                .then(pl.col("_return"))
+                .otherwise(-pl.col("_return"))
+                .alias("side_profit")
+            )
+        else:
+            out = out.with_columns(pl.col("_return").alias("side_profit"))
+        out = out.with_columns(pl.col("_return").rank(method="average").truediv(pl.len()).alias("rank_y"))
+        return out.drop("_return")
     _require_columns(df, ["trade_return"], ctx="add_rank_regression_labels")
-    ret = pd.to_numeric(df["trade_return"], errors="coerce")
+    ret = df["trade_return"].cast(pl.Float64, strict=False)
     if "target" in df.columns:
-        target = pd.to_numeric(df["target"], errors="coerce")
+        target = df["target"].cast(pl.Float64, strict=False)
         df["side_profit"] = ret.where(target == 1, -ret).astype(float)
     else:
         df["side_profit"] = ret.astype(float)
@@ -133,7 +148,7 @@ def add_rank_regression_labels(labels: pd.DataFrame) -> pd.DataFrame:
 
 
 def generate_optimal_events(
-    df_daily: pd.DataFrame,
+    df_daily: pl.DataFrame,
     k_params: Mapping[str, int | Sequence[int]],
     *,
     solver_mode: str = "period_top_k",
@@ -145,26 +160,21 @@ def generate_optimal_events(
     sell_execution: str | None = None,
     short_execution: str | None = None,
     cover_execution: str | None = None,
-) -> pd.DataFrame:
+) -> pl.DataFrame:
     """Generate entry/exit event rows from a daily price frame."""
 
-    if df_daily is None or df_daily.empty:
-        return pd.DataFrame()
+    if df_daily is None or df_daily.is_empty():
+        return pl.DataFrame()
     df = normalize_label_frame(df_daily)
     px = _get_price_series(df, price_col=price_col)
-    if not px.index.is_unique:
-        px = px.groupby(level=0).last()
-
     rows: list[dict[str, Any]] = []
     trade_counter = 0
 
-    def _safe_loc_price(ts: pd.Timestamp) -> float:
-        if ts not in px.index:
-            prev = px.index[px.index <= ts]
-            if len(prev) == 0:
+    def _safe_loc_price(ts: Any) -> float:
+        available = px.filter(pl.col("date") <= ts).sort("date")
+        if available.is_empty():
                 raise KeyError(f"No price available on or before {ts}")
-            ts = prev[-1]
-        return float(px.loc[ts])
+        return float(available["price"][available.height - 1])
 
     for freq, k_value in k_params.items():
         ks = [k_value] if isinstance(k_value, int) else list(k_value)
@@ -210,12 +220,12 @@ def generate_optimal_events(
                 )
 
     if not rows:
-        return pd.DataFrame()
-    return pd.DataFrame(rows).set_index("date").sort_index()
+        return pl.DataFrame()
+    return pl.DataFrame(rows).sort("date")
 
 
 def build_label_panel(
-    daily_by_symbol: Mapping[str, pd.DataFrame],
+    daily_by_symbol: Mapping[str, pl.DataFrame],
     *,
     k_params: Mapping[str, int | Sequence[int]],
     execution_params: Mapping[str, Any] | None = None,
@@ -224,7 +234,7 @@ def build_label_panel(
     add_rank_labels: bool = True,
     deduplicate: bool = True,
     max_workers: int = 1,
-) -> pd.DataFrame:
+) -> pl.DataFrame:
     """Build a combined label panel, optionally parallelized by symbol."""
 
     execution = dict(execution_params or {})
@@ -232,12 +242,12 @@ def build_label_panel(
     tasks = [
         (symbol, frame, dict(k_params), execution, weighting_params, solver_mode)
         for symbol, frame in daily_by_symbol.items()
-        if frame is not None and not frame.empty
+        if frame is not None and not frame.is_empty()
     ]
 
-    all_label_frames: list[pd.DataFrame] = []
+    all_label_frames: list[pl.DataFrame] = []
     if max_workers > 1:
-        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {executor.submit(_build_one_symbol_labels, task): task[0] for task in tasks}
             for future in as_completed(futures):
                 symbol, result, error = future.result()
@@ -256,8 +266,8 @@ def build_label_panel(
             all_label_frames.append(result)
 
     if not all_label_frames:
-        return pd.DataFrame()
-    full_labels = pd.concat(all_label_frames, ignore_index=True).set_index(["date", "symbol"]).sort_index()
+        return pl.DataFrame()
+    full_labels = pl.concat(all_label_frames, how="diagonal_relaxed").sort(["date", "symbol"])
     if deduplicate:
         full_labels = deduplicate_labels(full_labels)
     if add_rank_labels:
@@ -269,7 +279,7 @@ def build_trade_results(
     symbols: Sequence[str],
     *,
     spec: LabelBuildSpec,
-    price_frames: Mapping[str, pd.DataFrame],
+    price_frames: Mapping[str, pl.DataFrame],
     progress_callback: Callable[..., None] | None = None,
 ) -> TradeGenerationResult:
     """Build raw oracle trade candidates from supplied price frames."""
@@ -318,7 +328,7 @@ def build_trade_results(
         if frame is None:
             frame = price_frames.get(symbol.lower())
         daily_prices = _slice_dates(frame, spec.start_date, spec.end_date)
-        if daily_prices.empty:
+        if daily_prices.is_empty():
             if callable(progress_callback):
                 progress_callback(completed=idx, total=total_symbols, current_symbol=symbol)
             continue
@@ -359,7 +369,7 @@ def build_oracle_labels(
     symbols: Sequence[str],
     *,
     spec: LabelBuildSpec,
-    price_frames: Mapping[str, pd.DataFrame],
+    price_frames: Mapping[str, pl.DataFrame],
     progress_callback: Callable[..., None] | None = None,
 ) -> OracleLabelResult:
     """Build canonical label rows and summary statistics from oracle trades."""
@@ -374,23 +384,16 @@ def build_oracle_labels(
     )
 
 
-def deduplicate_labels(df: pd.DataFrame) -> pd.DataFrame:
+def deduplicate_labels(df: pl.DataFrame) -> pl.DataFrame:
     """Keep one signal per date/symbol/side/action, preferring highest return."""
 
-    if df.empty:
+    if df.is_empty():
         return df
-    idx_names = list(df.index.names)
-    tmp = df.reset_index()
-    subset = ["date", "symbol", "side"]
-    if "label" in tmp.columns:
-        subset.append("label")
-    if "trade_return" in tmp.columns:
-        tmp = tmp.sort_values("trade_return", ascending=False)
-    unique = tmp.drop_duplicates(subset=subset, keep="first")
-    return unique.set_index(idx_names).sort_index()
+    subset = ["date", "symbol", "side"] + (["label"] if "label" in df.columns else [])
+    return df.sort("trade_return", descending=True) .unique(subset, keep="first") if "trade_return" in df.columns else df.unique(subset, keep="first")
 
 
-def _build_one_symbol_labels(args: tuple[Any, ...]) -> tuple[str, pd.DataFrame | None, str | None]:
+def _build_one_symbol_labels(args: tuple[Any, ...]) -> tuple[str, pl.DataFrame | None, str | None]:
     symbol, df_daily, k_params, execution, weighting, solver_mode = args
     try:
         events = generate_optimal_events(
@@ -406,20 +409,18 @@ def _build_one_symbol_labels(args: tuple[Any, ...]) -> tuple[str, pd.DataFrame |
             short_execution=execution.get("short_execution"),
             cover_execution=execution.get("cover_execution"),
         )
-        if events.empty:
+        if events.is_empty():
             return (symbol, None, "no events produced")
 
         actions = add_action_labels(events)
         labels = add_binary_classification_labels(events, **weighting)
-        labels["label"] = actions["label"]
-        labels["market_position"] = actions["market_position"]
-        labels["symbol"] = symbol
+        labels = labels.with_columns(events["date"], actions["label"], actions["market_position"], pl.lit(symbol).alias("symbol"))
         for column in ("event", "trade_id", "entry_date", "exit_date", "entry_px", "exit_px", "trade_duration_days"):
             if column in events.columns:
-                labels[column] = events[column]
+                labels = labels.with_columns(events[column])
         if "trade_duration_days" in labels.columns and "hold_days" not in labels.columns:
-            labels["hold_days"] = labels["trade_duration_days"]
-        return (symbol, labels.reset_index(), None)
+            labels = labels.with_columns(pl.col("trade_duration_days").alias("hold_days"))
+        return (symbol, labels, None)
     except Exception as exc:
         return (symbol, None, f"{type(exc).__name__}: {exc}")
 
@@ -430,15 +431,15 @@ def _event_rows(
     freq: str,
     k: int,
     trade_counter: int,
-    price_at: Callable[[pd.Timestamp], float],
+    price_at: Callable[[Any], float],
     fee_bps: float,
     slippage_bps: float,
 ) -> list[dict[str, Any]]:
     side = str(trade.get("side") or "").strip().lower()
     if side not in {"long", "short"}:
         return []
-    entry_dt = pd.Timestamp(trade["entry_row"].name)
-    exit_dt = pd.Timestamp(trade["exit_row"].name)
+    entry_dt = trade["entry_row"].get("date")
+    exit_dt = trade["exit_row"].get("date")
     entry_px = price_at(entry_dt)
     exit_px = price_at(exit_dt)
     gross_r = (exit_px - entry_px) / entry_px if side == "long" else (entry_px - exit_px) / entry_px
@@ -469,8 +470,8 @@ def _append_completed(
         side = str(trade.get("side") or "").strip().lower()
         if side not in {"long", "short"}:
             continue
-        entry_dt = pd.Timestamp(trade["entry_row"].name)
-        exit_dt = pd.Timestamp(trade["exit_row"].name)
+        entry_dt = trade["entry_row"].get("date")
+        exit_dt = trade["exit_row"].get("date")
         entry_px = float(trade["entry_price"])
         exit_px = float(trade["exit_price"])
         ret_dec = trade_return_pct(side, entry_px, exit_px)
@@ -495,35 +496,28 @@ def _append_completed(
         )
 
 
-def _get_price_series(df: pd.DataFrame, price_col: str = "close") -> pd.Series:
+def _get_price_series(df: pl.DataFrame, price_col: str = "close") -> pl.DataFrame:
     col_map = {str(col).lower(): col for col in df.columns}
     requested = str(price_col).lower()
     if requested in col_map:
-        return df[col_map[requested]]
+        return df.select(["date", pl.col(col_map[requested]).cast(pl.Float64, strict=False).alias("price")]).sort("date")
     for fallback in ("close", "adj_close", "adjclose", "price", "adj_low", "low"):
         if fallback in col_map:
-            return df[col_map[fallback]]
+            return df.select(["date", pl.col(col_map[fallback]).cast(pl.Float64, strict=False).alias("price")]).sort("date")
     raise ValueError(f"Could not find a usable price column. Available: {list(df.columns)}")
 
 
-def _slice_dates(df: pd.DataFrame | None, start_date: str | None, end_date: str | None) -> pd.DataFrame:
-    if df is None or df.empty:
-        return pd.DataFrame()
-    out = df.copy()
-    if not isinstance(out.index, pd.DatetimeIndex):
-        if "date" not in out.columns:
-            raise ValueError("Price frames must have a DatetimeIndex or a 'date' column")
-        out["date"] = pd.to_datetime(out["date"], errors="coerce")
-        out = out.dropna(subset=["date"]).set_index("date")
-    out = out.sort_index()
-    if start_date:
-        out = out.loc[out.index >= pd.Timestamp(start_date)]
-    if end_date:
-        out = out.loc[out.index <= pd.Timestamp(end_date)]
-    return out[~out.index.duplicated(keep="last")]
+def _slice_dates(df: pl.DataFrame | None, start_date: str | None, end_date: str | None) -> pl.DataFrame:
+    if df is None or df.is_empty(): return pl.DataFrame()
+    if "date" not in df.columns: raise ValueError("Price frames must have a date column")
+    expr = pl.col("date").str.to_datetime(strict=False) if df.schema["date"] == pl.String else pl.col("date").cast(pl.Datetime, strict=False)
+    out = df.with_columns(expr.dt.truncate("1d").alias("date")).drop_nulls("date").sort("date").unique("date", keep="last")
+    if start_date: out = out.filter(pl.col("date") >= datetime.fromisoformat(start_date[:10]))
+    if end_date: out = out.filter(pl.col("date") <= datetime.fromisoformat(end_date[:10]))
+    return out
 
 
-def _require_columns(df: pd.DataFrame, columns: Sequence[str], *, ctx: str) -> None:
+def _require_columns(df: pl.DataFrame, columns: Sequence[str], *, ctx: str) -> None:
     missing = [column for column in columns if column not in df.columns]
     if missing:
         raise ValueError(f"{ctx} missing required columns: {missing}")

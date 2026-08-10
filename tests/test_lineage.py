@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-import pandas as pd
+import polars as pl
 import pytest
 
 from quant_warehouse.lineage import (
@@ -13,8 +13,8 @@ from quant_warehouse.lineage import (
 )
 
 
-def _frame() -> pd.DataFrame:
-    return pd.DataFrame(
+def _frame() -> pl.DataFrame:
+    return pl.DataFrame(
         [
             {"symbol": "MSFT", "date": "2024-01-03", "value": 2.0},
             {"symbol": "AAPL", "date": "2024-01-02", "value": 1.0},
@@ -25,13 +25,13 @@ def _frame() -> pd.DataFrame:
 def test_dataframe_fingerprint_is_stable_for_key_sorted_rows():
     frame = _frame()
     assert dataframe_fingerprint(frame, key_columns=("symbol", "date")) == dataframe_fingerprint(
-        frame.iloc[::-1], key_columns=("symbol", "date")
+        frame.reverse(), key_columns=("symbol", "date")
     )
 
 
 def test_dataframe_fingerprint_changes_with_content():
     changed = _frame()
-    changed.loc[0, "value"] = 3.0
+    changed = changed.with_row_index("_row").with_columns(pl.when(pl.col("_row") == 0).then(3.0).otherwise(pl.col("value")).alias("value")).drop("_row")
     assert dataframe_fingerprint(_frame()) != dataframe_fingerprint(changed)
 
 

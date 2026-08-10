@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+from datetime import datetime
 
-import pandas as pd
+import polars as pl
 
 from quant_warehouse.catalog.store import CatalogStore
 from quant_warehouse.migrate.backfill_thetadata_options import (
@@ -133,28 +134,28 @@ def test_resolve_backfill_symbols_filters_non_us_by_default() -> None:
 
 
 def test_options_range_cached_delegates_to_arctic_range_cache(monkeypatch) -> None:
-    calls: list[tuple[str, pd.Timestamp, pd.Timestamp]] = []
+    calls: list[tuple[str, datetime, datetime]] = []
 
     def _fake_range_cached(symbol, start_date, end_date, **kwargs):
         assert "required_columns" in kwargs
         calls.append((symbol, start_date, end_date))
-        return pd.Timestamp(end_date).normalize() == pd.Timestamp("2025-01-06")
+        return datetime.fromisoformat(str(end_date)[:10]) == datetime(2025, 1, 6)
 
     monkeypatch.setattr(
         "quant_warehouse.migrate.backfill_thetadata_options.option_chain_range_cached",
         _fake_range_cached,
     )
 
-    assert _options_range_cached("AAPL", pd.Timestamp("2025-01-06"), pd.Timestamp("2025-01-06"))
-    assert not _options_range_cached("AAPL", pd.Timestamp("2025-01-06"), pd.Timestamp("2025-01-07"))
+    assert _options_range_cached("AAPL", datetime(2025, 1, 6), datetime(2025, 1, 6))
+    assert not _options_range_cached("AAPL", datetime(2025, 1, 6), datetime(2025, 1, 7))
     assert calls == [
-        ("AAPL", pd.Timestamp("2025-01-06"), pd.Timestamp("2025-01-06")),
-        ("AAPL", pd.Timestamp("2025-01-06"), pd.Timestamp("2025-01-07")),
+        ("AAPL", datetime(2025, 1, 6), datetime(2025, 1, 6)),
+        ("AAPL", datetime(2025, 1, 6), datetime(2025, 1, 7)),
     ]
 
 
 def test_normalize_oracle_trade_windows_sorts_most_recent_entry_first() -> None:
-    trades = pd.DataFrame(
+    trades = pl.DataFrame(
         [
             {"trade_id": "old", "symbol": "msft", "entry_date": "2024-01-02", "exit_date": "2024-01-05"},
             {"trade_id": "new_b", "symbol": "goog", "entry_date": "2024-03-01", "exit_date": "2024-03-04"},
@@ -167,11 +168,11 @@ def test_normalize_oracle_trade_windows_sorts_most_recent_entry_first() -> None:
 
     assert list(windows["trade_id"]) == ["new_a", "new_b"]
     assert list(windows["symbol"]) == ["AAPL", "GOOG"]
-    assert list(windows["entry_date"]) == [pd.Timestamp("2024-03-01"), pd.Timestamp("2024-03-01")]
+    assert list(windows["entry_date"]) == [datetime(2024, 3, 1), datetime(2024, 3, 1)]
 
 
 def test_normalize_oracle_trade_windows_sorts_globally_across_symbols() -> None:
-    trades = pd.DataFrame(
+    trades = pl.DataFrame(
         [
             {"trade_id": "aapl_old", "symbol": "AAPL", "entry_date": "2024-01-02", "exit_date": "2024-01-05"},
             {"trade_id": "aapl_new", "symbol": "AAPL", "entry_date": "2024-03-01", "exit_date": "2024-03-05"},
@@ -186,7 +187,7 @@ def test_normalize_oracle_trade_windows_sorts_globally_across_symbols() -> None:
 
 
 def test_normalize_oracle_trade_windows_deduplicates_k_variants_before_limit() -> None:
-    trades = pd.DataFrame(
+    trades = pl.DataFrame(
         [
             {"trade_id": "aapl_k1", "symbol": "AAPL", "entry_date": "2024-03-01", "exit_date": "2024-03-05", "k": 1},
             {"trade_id": "aapl_k2", "symbol": "AAPL", "entry_date": "2024-03-01", "exit_date": "2024-03-05", "k": 2},
@@ -201,8 +202,8 @@ def test_normalize_oracle_trade_windows_deduplicates_k_variants_before_limit() -
 
 
 def test_backfill_thetadata_options_for_oracle_trades_skips_cached_windows(monkeypatch) -> None:
-    cached_calls: list[tuple[str, pd.Timestamp, pd.Timestamp]] = []
-    download_calls: list[tuple[str, pd.Timestamp, pd.Timestamp]] = []
+    cached_calls: list[tuple[str, datetime, datetime]] = []
+    download_calls: list[tuple[str, datetime, datetime]] = []
 
     class _Catalog:
         def upsert(self, **kwargs):
@@ -212,22 +213,20 @@ def test_backfill_thetadata_options_for_oracle_trades_skips_cached_windows(monke
         catalog = _Catalog()
 
     def _fake_cached_summary_bulk(symbols, start_date, end_date, **kwargs):
-        cached_calls.append(("bulk", pd.Timestamp(start_date), pd.Timestamp(end_date)))
+        cached_calls.append(("bulk", datetime.fromisoformat(str(start_date)[:10]), datetime.fromisoformat(str(end_date)[:10])))
         return {
             "AAPL": ({
-                pd.Timestamp("2024-02-01"),
-                pd.Timestamp("2024-02-02"),
-                pd.Timestamp("2024-02-05"),
+                datetime(2024, 2, 1), datetime(2024, 2, 2), datetime(2024, 2, 5),
             }, 10),
             "MSFT": (set(), 0),
         }
 
     def _fake_download(symbol, start_date, end_date, **kwargs):
-        download_calls.append((symbol, pd.Timestamp(start_date), pd.Timestamp(end_date)))
+        download_calls.append((symbol, datetime.fromisoformat(str(start_date)[:10]), datetime.fromisoformat(str(end_date)[:10])))
         return {
             "symbol": symbol,
-            "start_date": pd.Timestamp(start_date).date().isoformat(),
-            "end_date": pd.Timestamp(end_date).date().isoformat(),
+            "start_date": datetime.fromisoformat(str(start_date)[:10]).date().isoformat(),
+            "end_date": datetime.fromisoformat(str(end_date)[:10]).date().isoformat(),
             "snapshot_days": 2,
             "contracts_total": 10,
             "cached_days": 0,
@@ -249,7 +248,7 @@ def test_backfill_thetadata_options_for_oracle_trades_skips_cached_windows(monke
     )
 
     summary = backfill_thetadata_options_for_oracle_trades(
-        pd.DataFrame(
+        pl.DataFrame(
             [
                 {"trade_id": "older", "symbol": "MSFT", "entry_date": "2024-01-02", "exit_date": "2024-01-05"},
                 {"trade_id": "newer", "symbol": "AAPL", "entry_date": "2024-02-01", "exit_date": "2024-02-05"},
@@ -262,19 +261,19 @@ def test_backfill_thetadata_options_for_oracle_trades_skips_cached_windows(monke
     assert summary["trade_windows_requested"] == 2
     assert summary["trade_windows_skipped"] == 1
     assert [row["trade_id"] for row in summary["results"]] == ["newer", "older"]
-    assert cached_calls == [("bulk", pd.Timestamp("2024-01-02"), pd.Timestamp("2024-02-05"))]
+    assert cached_calls == [("bulk", datetime(2024, 1, 2), datetime(2024, 2, 5))]
     assert download_calls == [
-        ("AAPL", pd.Timestamp("2024-02-01"), pd.Timestamp("2024-02-01")),
-        ("MSFT", pd.Timestamp("2024-01-02"), pd.Timestamp("2024-01-02")),
-        ("MSFT", pd.Timestamp("2024-01-05"), pd.Timestamp("2024-01-05")),
+        ("AAPL", datetime(2024, 2, 1), datetime(2024, 2, 1)),
+        ("MSFT", datetime(2024, 1, 2), datetime(2024, 1, 2)),
+        ("MSFT", datetime(2024, 1, 5), datetime(2024, 1, 5)),
     ]
     assert summary["results"][0]["snapshot_mode"] == "entry_exit"
     assert summary["results"][1]["snapshot_dates"] == ["2024-01-02", "2024-01-05"]
 
 
 def test_backfill_thetadata_options_for_oracle_trades_skips_current_or_future_endpoints(monkeypatch) -> None:
-    cached_calls: list[tuple[str, pd.Timestamp, pd.Timestamp]] = []
-    download_calls: list[tuple[str, pd.Timestamp, pd.Timestamp]] = []
+    cached_calls: list[tuple[str, datetime, datetime]] = []
+    download_calls: list[tuple[str, datetime, datetime]] = []
 
     class _Catalog:
         def upsert(self, **kwargs):
@@ -284,15 +283,15 @@ def test_backfill_thetadata_options_for_oracle_trades_skips_current_or_future_en
         catalog = _Catalog()
 
     def _fake_cached_summary_bulk(symbols, start_date, end_date, **kwargs):
-        cached_calls.append(("bulk", pd.Timestamp(start_date), pd.Timestamp(end_date)))
+        cached_calls.append(("bulk", datetime.fromisoformat(str(start_date)[:10]), datetime.fromisoformat(str(end_date)[:10])))
         return {str(symbol): (set(), 0) for symbol in symbols}
 
     def _fake_download(symbol, start_date, end_date, **kwargs):
-        download_calls.append((symbol, pd.Timestamp(start_date), pd.Timestamp(end_date)))
+        download_calls.append((symbol, datetime.fromisoformat(str(start_date)[:10]), datetime.fromisoformat(str(end_date)[:10])))
         return {
             "symbol": symbol,
-            "start_date": pd.Timestamp(start_date).date().isoformat(),
-            "end_date": pd.Timestamp(end_date).date().isoformat(),
+            "start_date": datetime.fromisoformat(str(start_date)[:10]).date().isoformat(),
+            "end_date": datetime.fromisoformat(str(end_date)[:10]).date().isoformat(),
             "snapshot_days": 1,
             "contracts_total": 5,
             "cached_days": 0,
@@ -314,7 +313,7 @@ def test_backfill_thetadata_options_for_oracle_trades_skips_current_or_future_en
     )
 
     summary = backfill_thetadata_options_for_oracle_trades(
-        pd.DataFrame(
+        pl.DataFrame(
             [
                 {"trade_id": "future", "symbol": "AAPL", "entry_date": "2099-01-02", "exit_date": "2099-01-05"},
             ]
@@ -325,13 +324,13 @@ def test_backfill_thetadata_options_for_oracle_trades_skips_current_or_future_en
 
     assert summary["trade_windows_requested"] == 1
     assert summary["trade_windows_skipped"] == 1
-    assert cached_calls == [("bulk", pd.Timestamp("2099-01-02"), pd.Timestamp("2099-01-05"))]
+    assert cached_calls == [("bulk", datetime(2099, 1, 2), datetime(2099, 1, 5))]
     assert download_calls == []
     assert {row["reason"] for row in summary["results"][0]["date_results"]} == {"current_or_future_eod_snapshot"}
 
 
 def test_backfill_thetadata_options_for_oracle_trades_removes_symbol_after_empty_download(monkeypatch) -> None:
-    download_calls: list[tuple[str, pd.Timestamp, pd.Timestamp]] = []
+    download_calls: list[tuple[str, datetime, datetime]] = []
 
     class _Catalog:
         def upsert(self, **kwargs):
@@ -346,11 +345,11 @@ def test_backfill_thetadata_options_for_oracle_trades_removes_symbol_after_empty
     )
 
     def _fake_download(symbol, start_date, end_date, **kwargs):
-        download_calls.append((symbol, pd.Timestamp(start_date), pd.Timestamp(end_date)))
+        download_calls.append((symbol, datetime.fromisoformat(str(start_date)[:10]), datetime.fromisoformat(str(end_date)[:10])))
         return {
             "symbol": symbol,
-            "start_date": pd.Timestamp(start_date).date().isoformat(),
-            "end_date": pd.Timestamp(end_date).date().isoformat(),
+            "start_date": datetime.fromisoformat(str(start_date)[:10]).date().isoformat(),
+            "end_date": datetime.fromisoformat(str(end_date)[:10]).date().isoformat(),
             "snapshot_days": 0,
             "contracts_total": 0,
             "cached_days": 0,
@@ -368,7 +367,7 @@ def test_backfill_thetadata_options_for_oracle_trades_removes_symbol_after_empty
     )
 
     summary = backfill_thetadata_options_for_oracle_trades(
-        pd.DataFrame(
+        pl.DataFrame(
             [
                 {"trade_id": "newer", "symbol": "BRK-A", "entry_date": "2024-03-01", "exit_date": "2024-03-05"},
                 {"trade_id": "older", "symbol": "BRK-A", "entry_date": "2024-02-01", "exit_date": "2024-02-05"},
@@ -378,7 +377,7 @@ def test_backfill_thetadata_options_for_oracle_trades_removes_symbol_after_empty
         request_sleep=0.0,
     )
 
-    assert download_calls == [("BRK-A", pd.Timestamp("2024-03-01"), pd.Timestamp("2024-03-01"))]
+    assert download_calls == [("BRK-A", datetime(2024, 3, 1), datetime(2024, 3, 1))]
     reasons = [
         date_result.get("reason")
         for row in summary["results"]

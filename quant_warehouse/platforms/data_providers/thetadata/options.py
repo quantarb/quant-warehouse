@@ -1,16 +1,42 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timedelta
 from typing import Any, Iterator, Literal, Mapping, Sequence
 
-import pandas as pd
-from pandas.api.types import is_object_dtype, is_string_dtype
+import polars as pl
 
 from quant_warehouse.config import WarehouseConfig
 from quant_warehouse.ingest.openbb_fetch import fetch_openbb
 from quant_warehouse.warehouse.backend import ArcticBackend, open_backend
 from quant_warehouse.warehouse.storage import read_provider_frame, provider_library
+
+Frame = pl.DataFrame
+
+def _day(value: object) -> datetime:
+    if isinstance(value, datetime):
+        return value.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=None)
+    if isinstance(value, date):
+        return datetime.combine(value, datetime.min.time())
+    return datetime.fromisoformat(str(value)[:10])
+
+
+def _partition_day(value: object) -> datetime:
+    """Normalize Polars partition keys across Polars versions."""
+    if isinstance(value, tuple):
+        value = value[0]
+    if isinstance(value, pl.Series):
+        value = value[0]
+    return _day(value)
+
+def _business_days(start: datetime, end: datetime) -> list[datetime]:
+    start = _day(start); end = _day(end)
+    return [start + timedelta(days=offset) for offset in range((end - start).days + 1)
+            if (start + timedelta(days=offset)).weekday() < 5]
+
+def _datetime_expr(frame: pl.DataFrame, column: str) -> pl.Expr:
+    return ((pl.col(column).str.to_datetime(strict=False, time_zone="UTC") if frame.schema[column] == pl.String
+             else pl.col(column).cast(pl.Datetime, strict=False)).dt.replace_time_zone(None).dt.truncate("1d"))
 
 # ThetaData EOD history rejects spans longer than 365 calendar days.
 THETADATA_MAX_EOD_SPAN_DAYS = 364
@@ -80,8 +106,8 @@ THETADATA_UNSUPPORTED_DOWNLOAD_FILTERS: tuple[str, ...] = (
 
 @dataclass(frozen=True)
 class ThetaDataOptionSnapshot:
-    snapshot_date: pd.Timestamp
-    frame: pd.DataFrame
+    snapshot_date: datetime
+    frame: pl.DataFrame
 
 
 @dataclass(frozen=True, init=False)
@@ -99,7 +125,6 @@ class ThetaDataDownloadSpec:
     rate_value: float | None = None
     version: str | None = "latest"
     underlyer_use_nbbo: bool = False
-    dataframe_type: str = "pandas"
     backfill_window_days: int = THETADATA_BACKFILL_WINDOW_DAYS
     fallback_window_days: int = THETADATA_FALLBACK_WINDOW_DAYS
 
@@ -112,7 +137,6 @@ class ThetaDataDownloadSpec:
         rate_value: float | None = None,
         version: str | None = "latest",
         underlyer_use_nbbo: bool = False,
-        dataframe_type: str = "pandas",
         backfill_window_days: int = THETADATA_BACKFILL_WINDOW_DAYS,
         fallback_window_days: int = THETADATA_FALLBACK_WINDOW_DAYS,
         **download_filters: Any,
@@ -124,42 +148,41 @@ class ThetaDataDownloadSpec:
         object.__setattr__(self, "rate_value", rate_value)
         object.__setattr__(self, "version", version)
         object.__setattr__(self, "underlyer_use_nbbo", underlyer_use_nbbo)
-        object.__setattr__(self, "dataframe_type", dataframe_type)
         object.__setattr__(self, "backfill_window_days", backfill_window_days)
         object.__setattr__(self, "fallback_window_days", fallback_window_days)
 
 
 def _iter_eod_date_chunks(
-    start_date: date | str | pd.Timestamp,
-    end_date: date | str | pd.Timestamp,
+    start_date: date | str | datetime,
+    end_date: date | str | datetime,
     *,
     max_span_days: int = THETADATA_MAX_EOD_SPAN_DAYS,
 ) -> Iterator[tuple[date, date]]:
     """Yield [start, end] date pairs that respect ThetaData's max EOD span."""
 
-    start = pd.Timestamp(start_date).normalize()
-    end = pd.Timestamp(end_date).normalize()
+    start = _day(start_date)
+    end = _day(end_date)
     cursor = start
     while cursor <= end:
-        chunk_end = min(cursor + pd.Timedelta(days=max_span_days), end)
+        chunk_end = min(cursor + timedelta(days=max_span_days), end)
         yield cursor.date(), chunk_end.date()
-        cursor = chunk_end + pd.Timedelta(days=1)
+        cursor = chunk_end + timedelta(days=1)
 
 
 def fetch_option_history_eod(
     symbol: str,
-    start_date: date | str | pd.Timestamp,
-    end_date: date | str | pd.Timestamp,
+    start_date: date | str | datetime,
+    end_date: date | str | datetime,
     *,
     api_key: str | None = None,
     spec: ThetaDataDownloadSpec | None = None,
     **download_filters: Any,
-) -> pd.DataFrame:
+) -> Frame:
     """Download normalized EOD option chains for a symbol over a date range."""
 
     _reject_thetadata_download_filters(download_filters)
     download_spec = spec or ThetaDataDownloadSpec()
-    frames: list[pd.DataFrame] = []
+    frames: list[Frame] = []
     for chunk_start, chunk_end in _iter_eod_date_chunks(start_date, end_date):
         frame = _fetch_option_history_eod_openbb(
             symbol,
@@ -168,23 +191,22 @@ def fetch_option_history_eod(
             api_key=api_key,
             spec=download_spec,
         )
-        if not frame.empty:
+        if not frame.is_empty():
             frames.append(frame)
 
     if not frames:
-        return pd.DataFrame()
-    combined = pd.concat(frames, ignore_index=True)
-    return normalize_thetadata_option_chain(combined)
+        return pl.DataFrame()
+    return normalize_thetadata_option_chain(pl.concat(frames, how="diagonal_relaxed"))
 
 
 def _fetch_option_history_eod_openbb(
     symbol: str,
-    start_date: date | str | pd.Timestamp,
-    end_date: date | str | pd.Timestamp,
+    start_date: date | str | datetime,
+    end_date: date | str | datetime,
     *,
     api_key: str | None = None,
     spec: ThetaDataDownloadSpec,
-) -> pd.DataFrame:
+) -> Frame:
     result = fetch_openbb(
         "options_eod",
         symbol=str(symbol).upper(),
@@ -196,7 +218,6 @@ def _fetch_option_history_eod_openbb(
         right="both",
         max_dte=None,
         strike_range=None,
-        dataframe_type=spec.dataframe_type,
         require_bid_ask=False,
         min_ask=0.0,
         include_greeks=True,
@@ -206,40 +227,21 @@ def _fetch_option_history_eod_openbb(
         version=spec.version,
         underlyer_use_nbbo=bool(spec.underlyer_use_nbbo),
     )
-    return result.df.copy()
+    return result.df.clone()
 
 
-def split_snapshots_by_date(df: pd.DataFrame) -> dict[pd.Timestamp, pd.DataFrame]:
+def split_snapshots_by_date(df: Frame) -> dict[datetime, Frame]:
     """Split a multi-day ThetaData frame into one chain per snapshot date."""
 
-    if df is None or df.empty:
+    if df is None or df.is_empty():
         return {}
-    out = df.copy()
-    if "snapshot_date" not in out.columns:
-        source_col = next(
-            (
-                col
-                for col in (
-                    "eod_date",
-                    "created",
-                    "created_at",
-                    "quote_timestamp",
-                    "timestamp",
-                )
-                if col in out.columns
-            ),
-            None,
-        )
-        if source_col is None:
-            return {}
-        out["snapshot_date"] = _normalize_snapshot_dates(out[source_col])
-    else:
-        out["snapshot_date"] = _normalize_snapshot_dates(out["snapshot_date"])
-    snapshots: dict[pd.Timestamp, pd.DataFrame] = {}
-    for snapshot_date, group in out.groupby("snapshot_date", dropna=True):
-        ts = pd.Timestamp(snapshot_date).normalize()
-        snapshots[ts] = group.copy()
-    return dict(sorted(snapshots.items(), key=lambda item: item[0]))
+    out = df
+    source_col = "snapshot_date" if "snapshot_date" in out.columns else next(
+        (col for col in ("eod_date", "created", "created_at", "quote_timestamp", "timestamp") if col in out.columns), None)
+    if source_col is None:
+        return {}
+    out = out.with_columns(_datetime_expr(out, source_col).alias("snapshot_date"))
+    return {_partition_day(key): group for key, group in out.drop_nulls("snapshot_date").partition_by("snapshot_date", as_dict=True).items()}
 
 
 def option_chain_storage_symbol(symbol: str) -> str:
@@ -249,13 +251,13 @@ def option_chain_storage_symbol(symbol: str) -> str:
 def read_option_chain_arctic(
     symbol: str,
     *,
-    start_date: date | str | pd.Timestamp | None = None,
-    end_date: date | str | pd.Timestamp | None = None,
+    start_date: date | str | datetime | None = None,
+    end_date: date | str | datetime | None = None,
     columns: Sequence[str] | None = None,
     fallback_legacy: bool = False,
     backend: ArcticBackend | None = None,
     config: WarehouseConfig | None = None,
-) -> pd.DataFrame:
+) -> Frame:
     backend = backend or open_backend(config or WarehouseConfig.from_env())
     start, end = _option_chain_read_bounds(start_date, end_date)
     projected_columns = _option_chain_projected_columns(columns)
@@ -268,38 +270,41 @@ def read_option_chain_arctic(
         start_date=start,
         end_date=end,
         columns=projected_columns,
+        output_format="polars",
     )
-    if frame is None or frame.empty:
-        return pd.DataFrame()
-    out = frame.copy()
-    if "snapshot_date" in out.columns:
-        snapshot_dates = _normalize_snapshot_dates(out["snapshot_date"])
+    if frame is None or frame.is_empty():
+        return pl.DataFrame()
+    out = frame
+    if "snapshot_date" not in out.columns:
+        return pl.DataFrame()
+    snapshot = pl.col("snapshot_date")
+    if out.schema["snapshot_date"] == pl.String:
+        snapshot = snapshot.str.to_datetime(strict=False, time_zone="UTC")
     else:
-        snapshot_dates = _normalize_snapshot_dates(pd.Series(out.index, index=out.index))
-        out["snapshot_date"] = snapshot_dates
+        snapshot = snapshot.cast(pl.Datetime, strict=False)
+    out = out.with_columns(snapshot.dt.replace_time_zone(None).dt.truncate("1d").alias("snapshot_date"))
     if start_date is not None:
-        out = out.loc[snapshot_dates >= pd.Timestamp(start_date).normalize()]
+        out = out.filter(pl.col("snapshot_date") >= _day(start_date))
     if end_date is not None:
-        snapshot_dates = _normalize_snapshot_dates(out["snapshot_date"])
-        out = out.loc[snapshot_dates <= pd.Timestamp(end_date).normalize()]
-    out = _deduplicate_option_chain_rows(out)
+        out = out.filter(pl.col("snapshot_date") <= _day(end_date))
+    if {"snapshot_date", "contract_symbol"}.issubset(out.columns):
+        out = out.unique(subset=["snapshot_date", "contract_symbol"], keep="last", maintain_order=True)
     if columns is not None:
-        keep = [column for column in columns if column in out.columns]
-        out = out.loc[:, keep]
-    return out.sort_index()
+        out = out.select([column for column in columns if column in out.columns])
+    return out.sort("snapshot_date") if "snapshot_date" in out.columns else out
 
 
 def read_thetadata_eod_option_chain(
     symbol: str,
     *,
-    start_date: date | str | pd.Timestamp | None = None,
-    end_date: date | str | pd.Timestamp | None = None,
+    start_date: date | str | datetime | None = None,
+    end_date: date | str | datetime | None = None,
     columns: Sequence[str] | None = None,
     require_rich_columns: bool = False,
     fallback_legacy: bool = False,
     backend: ArcticBackend | None = None,
     config: WarehouseConfig | None = None,
-) -> pd.DataFrame:
+) -> Frame:
     """Read a normalized ThetaData EOD option chain from warehouse storage.
 
     This is the provider-specific contract consumed by options research code.
@@ -323,76 +328,32 @@ def read_thetadata_eod_option_chain(
     if requested_columns is not None:
         for column in requested_columns:
             if column not in out.columns:
-                out[column] = pd.NA
-        out = out.loc[:, list(requested_columns)]
+                out = out.with_columns(pl.lit(None).alias(column))
+        out = out.select(list(requested_columns))
     return out
 
 
 def validate_thetadata_eod_option_chain_contract(
-    frame: pd.DataFrame,
+    frame: Frame,
     *,
     require_rich_columns: bool = False,
-) -> pd.DataFrame:
+) -> Frame:
     """Validate and normalize the ThetaData EOD option-chain read contract."""
 
-    if frame is None or frame.empty:
-        return pd.DataFrame()
-    try:
-        out = normalize_thetadata_option_chain(frame)
-    except KeyError as exc:
-        raise ValueError(f"ThetaData EOD option chain is missing required column: {exc}") from exc
-    if out.empty:
-        return out
-    out = out.loc[:, ~out.columns.duplicated()].copy()
-    missing_required = [column for column in THETADATA_EOD_OPTION_REQUIRED_COLUMNS if column not in out.columns]
-    if missing_required:
-        missing = ", ".join(missing_required)
-        raise ValueError(f"ThetaData EOD option chain is missing required columns: {missing}")
-    for column in THETADATA_EOD_OPTION_CONTRACT_COLUMNS:
-        if column not in out.columns:
-            out[column] = pd.NA
-    out["snapshot_date"] = _normalize_snapshot_dates(out["snapshot_date"])
-    out["expiration"] = pd.to_datetime(out["expiration"], errors="coerce").dt.normalize()
-    out["underlying_symbol"] = out["underlying_symbol"].astype(str).str.upper()
-    out["contract_symbol"] = out["contract_symbol"].astype(str)
-    out["option_type"] = (
-        out["option_type"]
-        .astype(str)
-        .str.strip()
-        .str.lower()
-        .replace({"c": "call", "p": "put"})
-    )
-    out["strike"] = pd.to_numeric(out["strike"], errors="coerce")
-    for column in ("bid", "ask", "mid", *THETADATA_EOD_OPTION_OPTIONAL_COLUMNS):
-        out[column] = pd.to_numeric(out[column], errors="coerce")
-    out["data_interval"] = "eod"
-    out = out.dropna(subset=["snapshot_date", "contract_symbol", "expiration", "strike"])
-    out = _deduplicate_option_chain_rows(out)
-    duplicate_mask = out.duplicated(subset=["snapshot_date", "contract_symbol"], keep=False)
-    if bool(duplicate_mask.any()):
-        duplicates = out.loc[duplicate_mask, ["snapshot_date", "contract_symbol"]].head(5).to_dict("records")
-        raise ValueError(f"ThetaData EOD option chain has duplicate snapshot/contract rows after normalization: {duplicates}")
-    if require_rich_columns:
-        missing_rich = [
-            column
-            for column in THETADATA_RICH_OPTION_COLUMNS
-            if column not in out.columns or not bool(out[column].notna().any())
-        ]
-        if missing_rich:
-            missing = ", ".join(missing_rich)
-            raise ValueError(f"ThetaData EOD option chain is missing required rich endpoint columns: {missing}")
-    return out.sort_values(["snapshot_date", "contract_symbol"]).reset_index(drop=True)
+    if frame is None or frame.is_empty():
+        return pl.DataFrame()
+    return _validate_thetadata_eod_option_chain_polars(frame, require_rich_columns=require_rich_columns)
 
 
 def write_option_chain_arctic(
     symbol: str,
-    frame: pd.DataFrame,
+    frame: pl.DataFrame,
     *,
     backend: ArcticBackend | None = None,
     config: WarehouseConfig | None = None,
     merge: bool = True,
 ) -> str:
-    if frame is None or frame.empty:
+    if frame is None or frame.is_empty():
         return _arctic_ref(symbol)
     backend = backend or open_backend(config or WarehouseConfig.from_env())
     storage_symbol = option_chain_storage_symbol(symbol)
@@ -409,7 +370,7 @@ def write_option_chain_arctic(
         else None
     )
     merged = _merge_option_chain_upsert(existing, incoming)
-    if not merged.empty:
+    if not merged.is_empty():
         backend.write(library, storage_symbol, merged, prune_previous_versions=True)
     return _arctic_ref(symbol)
 
@@ -420,7 +381,7 @@ def option_chain_coverage(
     backend: ArcticBackend | None = None,
     config: WarehouseConfig | None = None,
     fallback_legacy: bool = False,
-) -> pd.DataFrame:
+) -> pl.DataFrame:
     """Return lightweight cached ThetaData option coverage by symbol."""
 
     backend = backend or open_backend(config or WarehouseConfig.from_env())
@@ -436,20 +397,20 @@ def option_chain_coverage(
             backend=backend,
             fallback_legacy=fallback_legacy,
         )
-        if frame.empty or "snapshot_date" not in frame.columns:
+        if frame.is_empty() or "snapshot_date" not in frame.columns:
             rows.append({"symbol": symbol, "row_count": 0, "snapshot_day_count": 0})
             continue
-        dates = _normalize_snapshot_dates(frame["snapshot_date"]).dropna()
+        dates = frame["snapshot_date"].drop_nulls()
         rows.append(
             {
                 "symbol": symbol,
                 "row_count": int(len(frame)),
-                "snapshot_day_count": int(dates.nunique()),
-                "min_snapshot_date": None if dates.empty else dates.min().date().isoformat(),
-                "max_snapshot_date": None if dates.empty else dates.max().date().isoformat(),
+                "snapshot_day_count": int(dates.n_unique()),
+                "min_snapshot_date": None if dates.is_empty() else dates.min().date().isoformat(),
+                "max_snapshot_date": None if dates.is_empty() else dates.max().date().isoformat(),
             }
         )
-    return pd.DataFrame(rows).sort_values(["row_count", "symbol"], ascending=[False, True]).reset_index(drop=True)
+    return pl.DataFrame(rows).sort(["row_count", "symbol"], descending=[True, False])
 
 
 def deduplicate_option_chain_arctic(
@@ -458,7 +419,7 @@ def deduplicate_option_chain_arctic(
     dry_run: bool = True,
     backend: ArcticBackend | None = None,
     config: WarehouseConfig | None = None,
-) -> pd.DataFrame:
+) -> pl.DataFrame:
     """Remove duplicate cached option-chain rows by (snapshot_date, contract_symbol).
 
     Dry-run mode reports what would be rewritten without mutating Arctic. Set
@@ -479,8 +440,8 @@ def deduplicate_option_chain_arctic(
             provider=OPTIONS_THETADATA_PROVIDER,
             symbol=storage_symbol,
         )
-        rows_before = 0 if frame is None or frame.empty else int(len(frame))
-        if frame is None or frame.empty:
+        rows_before = 0 if frame is None or frame.is_empty() else int(len(frame))
+        if frame is None or frame.is_empty():
             rows.append(
                 {
                     "symbol": storage_symbol,
@@ -506,17 +467,17 @@ def deduplicate_option_chain_arctic(
                 "rewritten": rewritten,
             }
         )
-    return pd.DataFrame(rows).sort_values(["duplicate_rows", "symbol"], ascending=[False, True]).reset_index(drop=True)
+    return pl.DataFrame(rows).sort(["duplicate_rows", "symbol"], descending=[True, False])
 
 
 def _option_chain_read_bounds(
-    start_date: date | str | pd.Timestamp | None,
-    end_date: date | str | pd.Timestamp | None,
-) -> tuple[pd.Timestamp | None, pd.Timestamp | None]:
-    start = None if start_date is None else pd.Timestamp(start_date).normalize()
+    start_date: date | str | datetime | None,
+    end_date: date | str | datetime | None,
+) -> tuple[datetime | None, datetime | None]:
+    start = None if start_date is None else _day(start_date)
     end = None
     if end_date is not None:
-        end = pd.Timestamp(end_date).normalize() + pd.Timedelta(days=1) - pd.Timedelta(nanoseconds=1)
+        end = _day(end_date) + timedelta(days=1) - timedelta(microseconds=1)
     return start, end
 
 
@@ -546,13 +507,13 @@ def _thetadata_eod_contract_read_columns(
 
 def option_chain_snapshots_cached(
     symbol: str,
-    snapshot_dates: Sequence[date | str | pd.Timestamp],
+    snapshot_dates: Sequence[date | str | datetime],
     *,
     required_columns: Sequence[str] | None = THETADATA_RICH_OPTION_COLUMNS,
     backend: ArcticBackend | None = None,
     config: WarehouseConfig | None = None,
-) -> dict[pd.Timestamp, pd.DataFrame]:
-    dates = [pd.Timestamp(value).normalize() for value in snapshot_dates]
+) -> dict[datetime, Frame]:
+    dates = [_day(value) for value in snapshot_dates]
     if not dates:
         return {}
     frame = read_option_chain_arctic(
@@ -562,35 +523,30 @@ def option_chain_snapshots_cached(
         backend=backend,
         config=config,
     )
-    if frame.empty:
+    if frame.is_empty():
         return {}
-    requested = set(dates)
-    snapshots: dict[pd.Timestamp, pd.DataFrame] = {}
-    snapshot_dates = _normalize_snapshot_dates(frame["snapshot_date"])
-    for ts, group in frame.groupby(snapshot_dates, sort=True):
-        normalized = pd.Timestamp(ts).normalize()
-        if normalized in requested:
-            if required_columns is not None:
-                required = [str(column) for column in required_columns]
-                if any(column not in group.columns for column in required):
-                    continue
-                if not all(group[column].notna().any() for column in required):
-                    continue
-            out = group.reset_index(drop=True)
-            snapshots[normalized] = normalize_thetadata_option_chain(out)
+    snapshots: dict[datetime, Frame] = {}
+    for key, group in frame.partition_by("snapshot_date", as_dict=True).items():
+        normalized = _partition_day(key)
+        if normalized not in set(dates):
+            continue
+        required = [str(column) for column in required_columns or ()]
+        if any(column not in group.columns for column in required) or not all(group.select(pl.col(column).is_not_null().any()).item() for column in required):
+            continue
+        snapshots[normalized] = _normalize_thetadata_option_chain_polars(group)
     return snapshots
 
 
 def option_chain_range_cached(
     symbol: str,
-    start_date: date | str | pd.Timestamp,
-    end_date: date | str | pd.Timestamp,
+    start_date: date | str | datetime,
+    end_date: date | str | datetime,
     *,
     required_columns: Sequence[str] | None = THETADATA_RICH_OPTION_COLUMNS,
     backend: ArcticBackend | None = None,
     config: WarehouseConfig | None = None,
 ) -> bool:
-    dates = [ts.normalize() for ts in pd.date_range(start_date, end_date, freq="B")]
+    dates = _business_days(_day(start_date), _day(end_date))
     if not dates:
         return False
     cached_dates, _row_count = option_chain_cached_date_summary(
@@ -606,13 +562,13 @@ def option_chain_range_cached(
 
 def option_chain_cached_date_summary(
     symbol: str,
-    start_date: date | str | pd.Timestamp,
-    end_date: date | str | pd.Timestamp,
+    start_date: date | str | datetime,
+    end_date: date | str | datetime,
     *,
     required_columns: Sequence[str] | None = None,
     backend: ArcticBackend | None = None,
     config: WarehouseConfig | None = None,
-) -> tuple[set[pd.Timestamp], int]:
+) -> tuple[set[datetime], int]:
     """Return cached snapshot dates and row count without loading full chains.
 
     When ``required_columns`` is provided, a snapshot is considered cached only
@@ -631,37 +587,36 @@ def option_chain_cached_date_summary(
         backend=backend,
         config=config,
     )
-    if frame.empty or "snapshot_date" not in frame.columns:
+    if frame.is_empty() or "snapshot_date" not in frame.columns:
         return set(), 0
-    dates = _normalize_snapshot_dates(frame["snapshot_date"]).dropna()
+    dates = frame["snapshot_date"].drop_nulls()
     if required_columns is None:
-        return {pd.Timestamp(ts).normalize() for ts in dates.unique()}, int(len(frame))
+        return {_day(ts) for ts in dates.unique().to_list()}, int(len(frame))
 
     required = [str(column) for column in required_columns]
     if any(column not in frame.columns for column in required):
         return set(), 0
 
-    work = frame.copy()
-    work["_snapshot_date"] = _normalize_snapshot_dates(work["snapshot_date"])
-    rich_dates: set[pd.Timestamp] = set()
+    work = frame.with_columns(pl.col("snapshot_date").alias("_snapshot_date"))
+    rich_dates: set[datetime] = set()
     rich_row_count = 0
-    for ts, group in work.dropna(subset=["_snapshot_date"]).groupby("_snapshot_date", sort=True):
-        if all(group[column].notna().any() for column in required):
-            rich_dates.add(pd.Timestamp(ts).normalize())
+    for key, group in work.drop_nulls("_snapshot_date").partition_by("_snapshot_date", as_dict=True).items():
+        if all(group.select(pl.col(column).is_not_null().any()).item() for column in required):
+            rich_dates.add(_partition_day(key))
             rich_row_count += int(len(group))
     return rich_dates, rich_row_count
 
 
 def option_chain_cached_date_summary_bulk(
     symbols: Sequence[str],
-    start_date: date | str | pd.Timestamp,
-    end_date: date | str | pd.Timestamp,
+    start_date: date | str | datetime,
+    end_date: date | str | datetime,
     *,
     required_columns: Sequence[str] | None = None,
     backend: Any | None = None,
     config: WarehouseConfig | None = None,
     batch_size: int = 100,
-) -> dict[str, tuple[set[pd.Timestamp], int]]:
+) -> dict[str, tuple[set[datetime], int]]:
     """Return cached date summaries for many symbols with one ArcticDB batch read.
 
     The result uses the same rich-date contract as
@@ -673,71 +628,31 @@ def option_chain_cached_date_summary_bulk(
     result = {symbol: (set(), 0) for symbol in normalized_symbols}
     if not normalized_symbols:
         return result
-    from arcticdb import ReadRequest
-
     backend = backend or open_backend(config or WarehouseConfig.from_env())
-    library_name = provider_library(OPTIONS_THETADATA_EOD_LIBRARY, OPTIONS_THETADATA_PROVIDER)
-    physical_backend = backend._backend_for_library(library_name)
-    library = physical_backend._library(library_name)
-    requested_columns = ["snapshot_date"]
-    if required_columns is not None:
-        requested_columns.extend(str(column) for column in required_columns)
-    start = pd.Timestamp(start_date).normalize()
-    end = pd.Timestamp(end_date).normalize()
-    chunk_size = max(1, int(batch_size))
-    for offset in range(0, len(normalized_symbols), chunk_size):
-        chunk_symbols = normalized_symbols[offset : offset + chunk_size]
-        requests = [
-            ReadRequest(
-                symbol,
-                date_range=(start, end),
-                columns=requested_columns,
-            )
-            for symbol in chunk_symbols
-        ]
-        items = library.read_batch(requests)
-        for symbol, item in zip(chunk_symbols, items, strict=True):
-            frame = getattr(item, "data", None)
-            if frame is None or frame.empty or "snapshot_date" not in frame.columns:
-                continue
-            dates = _normalize_snapshot_dates(frame["snapshot_date"]).dropna()
-            if required_columns is None:
-                result[symbol] = ({pd.Timestamp(ts).normalize() for ts in dates.unique()}, int(len(frame)))
-                continue
-            required = [str(column) for column in required_columns]
-            if any(column not in frame.columns for column in required):
-                continue
-            work = frame.copy()
-            work["_snapshot_date"] = dates
-            rich_dates: set[pd.Timestamp] = set()
-            rich_row_count = 0
-            for ts, group in work.dropna(subset=["_snapshot_date"]).groupby("_snapshot_date", sort=True):
-                if all(group[column].notna().any() for column in required):
-                    rich_dates.add(pd.Timestamp(ts).normalize())
-                    rich_row_count += int(len(group))
-            result[symbol] = (rich_dates, rich_row_count)
+    for symbol in normalized_symbols:
+        result[symbol] = option_chain_cached_date_summary(symbol, start_date, end_date,
+                                                           required_columns=required_columns, backend=backend, config=config)
     return result
 
 
 def load_thetadata_option_snapshots(
     symbol: str,
-    snapshot_dates: Sequence[date | str | pd.Timestamp],
+    snapshot_dates: Sequence[date | str | datetime],
     *,
     api_key: str | None = None,
-    dataframe_type: str = "pandas",
     use_cache: bool = True,
     download_spec: ThetaDataDownloadSpec | None = None,
     download_missing: bool = True,
     **download_filters: Any,
-) -> dict[pd.Timestamp, pd.DataFrame]:
+) -> dict[datetime, Frame]:
     """Load EOD option snapshots keyed by date, using ArcticDB as the cache/store."""
 
     _reject_thetadata_download_filters(download_filters)
-    spec = download_spec or ThetaDataDownloadSpec(dataframe_type=dataframe_type)
-    normalized_dates = [pd.Timestamp(value).normalize() for value in snapshot_dates]
+    spec = download_spec or ThetaDataDownloadSpec()
+    normalized_dates = [_day(value) for value in snapshot_dates]
     arctic_backend = open_backend(WarehouseConfig.from_env()) if use_cache else None
-    snapshots: dict[pd.Timestamp, pd.DataFrame] = {}
-    missing: list[pd.Timestamp] = []
+    snapshots: dict[datetime, Frame] = {}
+    missing: list[datetime] = []
 
     if arctic_backend is not None:
         snapshots.update(
@@ -763,7 +678,7 @@ def load_thetadata_option_snapshots(
         )
         for ts, frame in split_snapshots_by_date(fetched).items():
             snapshots[ts] = frame
-            if use_cache and not frame.empty and arctic_backend is not None:
+            if use_cache and not frame.is_empty() and arctic_backend is not None:
                 write_option_chain_arctic(symbol, frame, backend=arctic_backend)
 
     return {ts: snapshots[ts] for ts in normalized_dates if ts in snapshots}
@@ -771,8 +686,8 @@ def load_thetadata_option_snapshots(
 
 def download_option_snapshots_for_range(
     symbol: str,
-    start_date: date | str | pd.Timestamp,
-    end_date: date | str | pd.Timestamp,
+    start_date: date | str | datetime,
+    end_date: date | str | datetime,
     *,
     api_key: str | None = None,
     spec: ThetaDataDownloadSpec | None = None,
@@ -784,10 +699,10 @@ def download_option_snapshots_for_range(
     _reject_thetadata_download_filters(download_filters)
     download_spec = spec or ThetaDataDownloadSpec()
     arctic_backend = open_backend(WarehouseConfig.from_env())
-    start = pd.Timestamp(start_date).normalize()
-    end = pd.Timestamp(end_date).normalize()
+    start = _day(start_date)
+    end = _day(end_date)
 
-    requested_dates = [ts.normalize() for ts in pd.date_range(start, end, freq="B")]
+    requested_dates = _business_days(start, end)
     if overwrite or not requested_dates:
         existing_cached_dates, cached_dates, cached_row_count = set(), set(), 0
     else:
@@ -853,10 +768,10 @@ def download_option_snapshots_for_range(
 
 def _read_cached_snapshots(
     symbol: str,
-    requested_dates: Sequence[pd.Timestamp],
+    requested_dates: Sequence[datetime],
     *,
     backend: ArcticBackend | None = None,
-) -> dict[pd.Timestamp, pd.DataFrame]:
+) -> dict[datetime, pl.DataFrame]:
     if backend is not None:
         arctic = option_chain_snapshots_cached(
             symbol,
@@ -870,16 +785,17 @@ def _read_cached_snapshots(
 
 
 def _iter_contiguous_business_date_ranges(
-    requested_dates: Sequence[pd.Timestamp],
-) -> Iterator[tuple[pd.Timestamp, pd.Timestamp]]:
-    dates = sorted({pd.Timestamp(ts).normalize() for ts in requested_dates})
+    requested_dates: Sequence[datetime],
+) -> Iterator[tuple[datetime, datetime]]:
+    dates = sorted({_day(ts) for ts in requested_dates})
     if not dates:
         return
 
     range_start = dates[0]
     previous = dates[0]
     for current in dates[1:]:
-        next_business_day = pd.bdate_range(previous, periods=2)[-1].normalize()
+        next_business_day = previous + timedelta(days=1)
+        while next_business_day.weekday() >= 5: next_business_day += timedelta(days=1)
         if current != next_business_day:
             yield range_start, previous
             range_start = current
@@ -888,18 +804,19 @@ def _iter_contiguous_business_date_ranges(
 
 
 def _iter_bounded_business_date_ranges(
-    requested_dates: Sequence[pd.Timestamp],
+    requested_dates: Sequence[datetime],
     *,
     max_calendar_days: int = THETADATA_BACKFILL_WINDOW_DAYS,
-) -> Iterator[tuple[pd.Timestamp, pd.Timestamp]]:
-    dates = sorted({pd.Timestamp(ts).normalize() for ts in requested_dates})
+) -> Iterator[tuple[datetime, datetime]]:
+    dates = sorted({_day(ts) for ts in requested_dates})
     if not dates:
         return
 
     range_start = dates[0]
     previous = dates[0]
     for current in dates[1:]:
-        next_business_day = pd.bdate_range(previous, periods=2)[-1].normalize()
+        next_business_day = previous + timedelta(days=1)
+        while next_business_day.weekday() >= 5: next_business_day += timedelta(days=1)
         window_too_wide = (current - range_start).days >= int(max_calendar_days)
         if current != next_business_day or window_too_wide:
             yield range_start, previous
@@ -910,17 +827,17 @@ def _iter_bounded_business_date_ranges(
 
 def _download_and_cache_snapshots(
     symbol: str,
-    requested_dates: Sequence[pd.Timestamp],
+    requested_dates: Sequence[datetime],
     *,
     api_key: str | None,
     spec: ThetaDataDownloadSpec,
     backend: ArcticBackend | None,
     overwrite: bool,
-) -> tuple[set[pd.Timestamp], int, list[str]]:
-    downloaded_dates: set[pd.Timestamp] = set()
+) -> tuple[set[datetime], int, list[str]]:
+    downloaded_dates: set[datetime] = set()
     paths: list[str] = []
     fetched_rows = 0
-    requested = {pd.Timestamp(ts).normalize() for ts in requested_dates}
+    requested = {_day(ts) for ts in requested_dates}
 
     window_days = max(1, min(int(spec.backfill_window_days), THETADATA_MAX_EOD_SPAN_DAYS))
     fallback_days = max(1, min(int(spec.fallback_window_days), window_days))
@@ -932,32 +849,32 @@ def _download_and_cache_snapshots(
             spec=spec,
             fallback_window_days=fallback_days,
         )
-        if fetched.empty:
+        if fetched.is_empty():
             continue
-        chunk_frames: list[pd.DataFrame] = []
+        chunk_frames: list[pl.DataFrame] = []
         for ts, frame in split_snapshots_by_date(fetched).items():
-            if ts not in requested or frame.empty:
+            if ts not in requested or frame.is_empty():
                 continue
             downloaded_dates.add(ts)
             chunk_frames.append(frame)
         if backend is not None and chunk_frames:
-            combined = pd.concat(chunk_frames, ignore_index=True, sort=False)
+            combined = pl.concat(chunk_frames, how="diagonal_relaxed")
             fetched_rows += len(combined)
             paths.append(write_option_chain_arctic(symbol, combined, backend=backend, merge=True))
 
     missing_dates = [ts for ts in requested_dates if ts not in downloaded_dates]
     for ts in missing_dates:
         day_frame = fetch_option_history_eod(symbol, ts, ts, spec=spec)
-        if day_frame.empty:
+        if day_frame.is_empty():
             continue
-        day_frames: list[pd.DataFrame] = []
+        day_frames: list[pl.DataFrame] = []
         for day_ts, frame in split_snapshots_by_date(day_frame).items():
-            if day_ts not in requested or frame.empty:
+            if day_ts not in requested or frame.is_empty():
                 continue
             downloaded_dates.add(day_ts)
             day_frames.append(frame)
         if backend is not None and day_frames:
-            combined = pd.concat(day_frames, ignore_index=True, sort=False)
+            combined = pl.concat(day_frames, how="diagonal_relaxed")
             fetched_rows += len(combined)
             paths.append(write_option_chain_arctic(symbol, combined, backend=backend, merge=True))
 
@@ -966,21 +883,21 @@ def _download_and_cache_snapshots(
 
 def _fetch_option_history_with_window_fallback(
     symbol: str,
-    start: pd.Timestamp,
-    end: pd.Timestamp,
+    start: datetime,
+    end: datetime,
     *,
     spec: ThetaDataDownloadSpec,
     fallback_window_days: int,
-) -> pd.DataFrame:
+) -> pl.DataFrame:
     try:
         return fetch_option_history_eod(symbol, start, end, spec=spec)
-    except Exception as initial_exc:
-        if int(fallback_window_days) <= 1 or pd.Timestamp(start).normalize() >= pd.Timestamp(end).normalize():
+    except Exception:
+        if int(fallback_window_days) <= 1 or _day(start) >= _day(end):
             raise
 
-        frames: list[pd.DataFrame] = []
+        frames: list[pl.DataFrame] = []
         errors: list[Exception] = []
-        dates = [ts.normalize() for ts in pd.date_range(start, end, freq="B")]
+        dates = _business_days(start, end)
         for chunk_start, chunk_end in _iter_bounded_business_date_ranges(
             dates,
             max_calendar_days=int(fallback_window_days),
@@ -990,34 +907,34 @@ def _fetch_option_history_with_window_fallback(
             except Exception as exc:
                 errors.append(exc)
                 continue
-            if not frame.empty:
+            if not frame.is_empty():
                 frames.append(frame)
 
         if errors:
             raise RuntimeError(
-                f"ThetaData fallback failed for {symbol} {pd.Timestamp(start).date()} to {pd.Timestamp(end).date()}"
+                f"ThetaData fallback failed for {symbol} {_day(start).date()} to {_day(end).date()}"
             ) from errors[0]
         if not frames:
-            return pd.DataFrame()
-        return pd.concat(frames, ignore_index=True, sort=False)
+            return pl.DataFrame()
+        return pl.concat(frames, how="diagonal_relaxed")
 
 
 def load_cached_snapshots_for_trade_window(
     symbol: str,
-    entry_date: date | str | pd.Timestamp,
-    exit_date: date | str | pd.Timestamp,
+    entry_date: date | str | datetime,
+    exit_date: date | str | datetime,
     *,
     api_key: str | None = None,
     spec: ThetaDataDownloadSpec | None = None,
     download_missing: bool = True,
     **download_filters: Any,
-) -> dict[pd.Timestamp, pd.DataFrame]:
+) -> dict[datetime, pl.DataFrame]:
     """Load per-day chains for a trade window, optionally downloading missing days."""
 
     _reject_thetadata_download_filters(download_filters)
-    start = pd.Timestamp(entry_date).normalize()
-    end = pd.Timestamp(exit_date).normalize()
-    dates = list(pd.date_range(start, end, freq="B"))
+    start = _day(entry_date)
+    end = _day(exit_date)
+    dates = _business_days(start, end)
     if download_missing:
         download_option_snapshots_for_range(
             symbol,
@@ -1069,75 +986,55 @@ def _download_spec_manifest(spec: ThetaDataDownloadSpec) -> dict[str, Any]:
     }
 
 
-def _add_quote_columns(frame: pd.DataFrame) -> pd.DataFrame:
-    out = frame.copy()
+def _add_quote_columns(frame: pl.DataFrame) -> pl.DataFrame:
+    out = frame.clone()
     if "bid" in out.columns:
-        out["bid"] = pd.to_numeric(out["bid"], errors="coerce")
+        out = out.with_columns(pl.col("bid").cast(pl.Float64, strict=False))
     if "ask" in out.columns:
-        out["ask"] = pd.to_numeric(out["ask"], errors="coerce")
+        out = out.with_columns(pl.col("ask").cast(pl.Float64, strict=False))
     if "bid" in out.columns and "ask" in out.columns:
-        out["mid"] = (out["bid"] + out["ask"]) / 2.0
+        out = out.with_columns(((pl.col("bid") + pl.col("ask")) / 2.0).alias("mid"))
     return out
 
 
-def _prepare_option_chain_for_arctic(frame: pd.DataFrame) -> pd.DataFrame:
+def _prepare_option_chain_for_arctic(frame: pl.DataFrame) -> pl.DataFrame:
     normalized = normalize_thetadata_option_chain(frame)
-    if normalized.empty:
+    if normalized.is_empty():
         return normalized
-    out = normalized.loc[:, ~normalized.columns.duplicated()].copy()
-    out["snapshot_date"] = _normalize_snapshot_dates(out["snapshot_date"])
-    out = out.dropna(subset=["snapshot_date", "contract_symbol"])
+    out = normalized.unique(maintain_order=True)
+    out = out.drop_nulls(["snapshot_date", "contract_symbol"])
     out = _deduplicate_option_chain_rows(out)
-    offsets = out.groupby("snapshot_date").cumcount()
-    index = out["snapshot_date"] + pd.to_timedelta(offsets, unit="ns")
-    out.index = pd.DatetimeIndex(index)
-    out.index.name = "timestamp"
-    return _sanitize_option_chain_for_arctic(out.sort_index())
+    out = out.with_row_index("_row")
+    out = out.with_columns((pl.col("snapshot_date") + pl.duration(nanoseconds=pl.col("_row"))).alias("date")).drop("_row")
+    return _sanitize_option_chain_for_arctic(out.sort("date"))
 
 
 def _merge_option_chain_upsert(
-    existing: pd.DataFrame | None,
-    incoming: pd.DataFrame,
-) -> pd.DataFrame:
-    if incoming is None or incoming.empty:
-        if existing is None or existing.empty:
-            return pd.DataFrame()
-        return existing.copy()
-    if existing is None or existing.empty:
-        return incoming.sort_index()
-    combined = pd.concat([existing, incoming]).reset_index()
-    dedupe_cols = ["snapshot_date", "contract_symbol"]
-    combined = combined.drop_duplicates(subset=dedupe_cols, keep="last")
-    combined["snapshot_date"] = pd.to_datetime(combined["snapshot_date"], errors="coerce")
-    combined = combined.dropna(subset=["snapshot_date"]).drop(columns=["timestamp"], errors="ignore")
+    existing: pl.DataFrame | None,
+    incoming: pl.DataFrame,
+) -> pl.DataFrame:
+    if incoming is None or incoming.is_empty():
+        return pl.DataFrame() if existing is None else existing
+    if existing is None or existing.is_empty():
+        return incoming.sort("date") if "date" in incoming.columns else incoming
+    combined = pl.concat([existing, incoming], how="diagonal_relaxed")
+    combined = combined.unique(["snapshot_date", "contract_symbol"], keep="last", maintain_order=True)
+    combined = combined.drop_nulls(["snapshot_date"])
     return _prepare_option_chain_for_arctic(combined)
 
 
-def _deduplicate_option_chain_rows(frame: pd.DataFrame) -> pd.DataFrame:
-    if frame is None or frame.empty or "snapshot_date" not in frame.columns or "contract_symbol" not in frame.columns:
-        return pd.DataFrame() if frame is None else frame.copy()
-    out = frame.loc[:, ~frame.columns.duplicated()].copy()
-    out["snapshot_date"] = _normalize_snapshot_dates(out["snapshot_date"])
-    out = out.dropna(subset=["snapshot_date", "contract_symbol"])
-    if out.empty:
-        return out
-    out["_dedupe_order"] = range(len(out))
-    sort_cols = ["snapshot_date", "contract_symbol"]
+def _deduplicate_option_chain_rows(frame: pl.DataFrame) -> pl.DataFrame:
+    if frame is None or frame.is_empty() or not {"snapshot_date", "contract_symbol"}.issubset(frame.columns):
+        return pl.DataFrame() if frame is None else frame.clone()
+    out = frame.drop_nulls(["snapshot_date", "contract_symbol"])
     if "created_at" in out.columns:
-        out["_created_at_sort"] = pd.to_datetime(out["created_at"], errors="coerce", utc=True).dt.tz_localize(None)
-        sort_cols.append("_created_at_sort")
-    sort_cols.append("_dedupe_order")
-    out = (
-        out.sort_values(sort_cols, na_position="first")
-        .drop_duplicates(subset=["snapshot_date", "contract_symbol"], keep="last")
-        .drop(columns=["_dedupe_order", "_created_at_sort"], errors="ignore")
-    )
-    return out
+        out = out.with_columns(_datetime_expr(out, "created_at").alias("_created_at_sort")).sort(["snapshot_date", "contract_symbol", "_created_at_sort"])
+    return out.unique(["snapshot_date", "contract_symbol"], keep="last", maintain_order=True).drop("_created_at_sort", strict=False)
 
 
-def _sanitize_option_chain_for_arctic(frame: pd.DataFrame) -> pd.DataFrame:
-    out = frame.copy()
-    out = out.dropna(axis=1, how="all")
+def _sanitize_option_chain_for_arctic(frame: pl.DataFrame) -> pl.DataFrame:
+    out = frame.clone()
+    out = out.select([column for column in out.columns if not out.select(pl.col(column).is_not_null().any()).item() is False])
     date_columns = {
         "snapshot_date",
         "eod_date",
@@ -1154,9 +1051,9 @@ def _sanitize_option_chain_for_arctic(frame: pd.DataFrame) -> pd.DataFrame:
     }
     for column in list(out.columns):
         if column in date_columns:
-            out[column] = pd.to_datetime(out[column], errors="coerce", utc=True).dt.tz_localize(None)
-        elif is_object_dtype(out[column]) or is_string_dtype(out[column]):
-            out[column] = out[column].where(out[column].notna(), "").astype(str).astype(object)
+            out = out.with_columns(_datetime_expr(out, column).alias(column))
+        elif out.schema[column] == pl.String:
+            out = out.with_columns(pl.col(column).fill_null(""))
     return out
 
 
@@ -1165,102 +1062,86 @@ def _arctic_ref(symbol: str) -> str:
     return f"arctic://{library}/{option_chain_storage_symbol(symbol)}"
 
 
-def _normalize_snapshot_dates(values: pd.Series) -> pd.Series:
-    converted = pd.to_datetime(values, errors="coerce", utc=True)
-    if isinstance(converted, pd.Series):
-        return converted.dt.tz_localize(None).dt.normalize()
-    return pd.Series(converted).dt.tz_localize(None).dt.normalize()
+def _normalize_snapshot_dates(values: pl.Series) -> pl.Series:
+    frame = values.to_frame()
+    return frame.select(_datetime_expr(frame, values.name).alias(values.name)).to_series()
 
 
-def normalize_thetadata_option_chain(df: pd.DataFrame) -> pd.DataFrame:
+def normalize_thetadata_option_chain(df: Frame) -> Frame:
     """Normalize daily ThetaData EOD chains."""
 
-    if df is None or df.empty:
-        return pd.DataFrame()
-    out = df.copy()
-    out.columns = [str(col).strip().lower() for col in out.columns]
+    if df is None or df.is_empty():
+        return pl.DataFrame()
+    return _normalize_thetadata_option_chain_polars(df)
+
+
+def _normalize_thetadata_option_chain_polars(df: pl.DataFrame) -> pl.DataFrame:
+    """Polars-native equivalent of the ThetaData chain normalizer."""
+    if df.is_empty():
+        return pl.DataFrame()
     rename_map = {
-        "symbol": "underlying_symbol",
-        "right": "option_type",
-        "created": "created_at",
-        "timestamp": "quote_timestamp",
-        "last_trade": "last_trade_time",
-        "close": "last_trade_price",
-        "open": "open_price",
-        "high": "high_price",
-        "low": "low_price",
-        "implied_vol": "iv",
-        "implied_volatility": "iv",
+        "symbol": "underlying_symbol", "right": "option_type", "created": "created_at",
+        "timestamp": "quote_timestamp", "last_trade": "last_trade_time", "close": "last_trade_price",
+        "open": "open_price", "high": "high_price", "low": "low_price",
+        "implied_vol": "iv", "implied_volatility": "iv",
     }
-    rename_map = {
-        source: target
-        for source, target in rename_map.items()
-        if source in out.columns and (target not in out.columns or source == target)
-    }
-    out = out.rename(columns=rename_map)
-    out = out.loc[:, ~out.columns.duplicated()].copy()
+    out = df.rename({column: column.strip().lower() for column in df.columns})
+    out = out.rename({source: target for source, target in rename_map.items() if source in out.columns and target not in out.columns})
     if "snapshot_date" not in out.columns:
-        if "eod_date" in out.columns:
-            out["snapshot_date"] = out["eod_date"]
-        elif "created_at" in out.columns:
-            out["snapshot_date"] = _normalize_snapshot_dates(out["created_at"])
-        elif "quote_timestamp" in out.columns:
-            out["snapshot_date"] = _normalize_snapshot_dates(out["quote_timestamp"])
-    out["underlying_symbol"] = out["underlying_symbol"].astype(str).str.upper()
-    out["option_type"] = out["option_type"].astype(str).str.strip().str.lower()
-    out["expiration"] = pd.to_datetime(out["expiration"], errors="coerce").dt.normalize()
-    out["strike"] = pd.to_numeric(out["strike"], errors="coerce")
-    for column in (
-        "open_price",
-        "high_price",
-        "low_price",
-        "last_trade_price",
-        "volume",
-        "count",
-        "bid_size",
-        "ask_size",
-        "delta",
-        "theta",
-        "vega",
-        "rho",
-        "epsilon",
-        "lambda",
-        "gamma",
-        "vanna",
-        "charm",
-        "vomma",
-        "veta",
-        "vera",
-        "speed",
-        "zomma",
-        "color",
-        "ultima",
-        "d1",
-        "d2",
-        "dual_delta",
-        "dual_gamma",
-        "iv",
-        "iv_error",
-        "underlying_price",
-    ):
-        if column in out.columns:
-            out[column] = pd.to_numeric(out[column], errors="coerce")
+        source = next((column for column in ("eod_date", "created_at", "quote_timestamp") if column in out.columns), None)
+        if source is not None:
+            out = out.with_columns(_polars_datetime(out, source).alias("snapshot_date"))
+    if "underlying_symbol" not in out.columns or "option_type" not in out.columns or "expiration" not in out.columns or "strike" not in out.columns:
+        missing = [column for column in ("underlying_symbol", "option_type", "expiration", "strike") if column not in out.columns]
+        raise KeyError(", ".join(missing))
+    out = out.with_columns([
+        pl.col("underlying_symbol").cast(pl.String).str.to_uppercase(),
+        pl.col("option_type").cast(pl.String).str.strip_chars().str.to_lowercase().replace({"c": "call", "p": "put"}),
+        _polars_datetime(out, "expiration").alias("expiration"),
+        pl.col("strike").cast(pl.Float64, strict=False).alias("strike"),
+    ])
+    numeric = [column for column in ("open_price", "high_price", "low_price", "last_trade_price", "volume", "count", "bid_size", "ask_size", *THETADATA_RICH_OPTION_COLUMNS, "iv_error") if column in out.columns]
+    if numeric:
+        out = out.with_columns([pl.col(column).cast(pl.Float64, strict=False).alias(column) for column in numeric])
     if "snapshot_date" in out.columns:
-        out["snapshot_date"] = _normalize_snapshot_dates(out["snapshot_date"])
+        out = out.with_columns(_polars_datetime(out, "snapshot_date").alias("snapshot_date"))
     else:
-        out["snapshot_date"] = pd.NaT
+        out = out.with_columns(pl.lit(None, dtype=pl.Datetime).alias("snapshot_date"))
     if "contract_symbol" not in out.columns:
-        out["contract_symbol"] = (
-            out["underlying_symbol"].fillna("")
-            + "_"
-            + out["option_type"].fillna("")
-            + "_"
-            + out["expiration"].dt.strftime("%Y%m%d").fillna("")
-            + "_"
-            + out["strike"].fillna(0).map(lambda v: f"{float(v):g}")
+        out = out.with_columns(
+            (pl.col("underlying_symbol").fill_null("") + "_" + pl.col("option_type").fill_null("") + "_" + pl.col("expiration").dt.strftime("%Y%m%d").fill_null("") + "_" + pl.col("strike").map_elements(lambda value: f"{float(value):g}" if value is not None else "", return_dtype=pl.String)).alias("contract_symbol")
         )
-    out = _add_quote_columns(out)
-    if out.empty:
-        return out
-    out["data_interval"] = "eod"
-    return out.reset_index(drop=True)
+    if "bid" in out.columns and "ask" in out.columns:
+        out = out.with_columns([
+            pl.col("bid").cast(pl.Float64, strict=False).alias("bid"),
+            pl.col("ask").cast(pl.Float64, strict=False).alias("ask"),
+        ]).with_columns(((pl.col("bid") + pl.col("ask")) / 2.0).alias("mid"))
+    out = out.with_columns(pl.lit("eod").alias("data_interval")).drop_nulls(["snapshot_date", "contract_symbol", "expiration", "strike"])
+    if {"snapshot_date", "contract_symbol"}.issubset(out.columns):
+        out = out.unique(subset=["snapshot_date", "contract_symbol"], keep="last", maintain_order=True)
+    return out.sort(["snapshot_date", "contract_symbol"])
+
+
+def _validate_thetadata_eod_option_chain_polars(frame: pl.DataFrame, *, require_rich_columns: bool) -> pl.DataFrame:
+    out = _normalize_thetadata_option_chain_polars(frame)
+    missing_required = [column for column in THETADATA_EOD_OPTION_REQUIRED_COLUMNS if column not in out.columns]
+    if missing_required:
+        raise ValueError(f"ThetaData EOD option chain is missing required columns: {', '.join(missing_required)}")
+    for column in THETADATA_EOD_OPTION_CONTRACT_COLUMNS:
+        if column not in out.columns:
+            out = out.with_columns(pl.lit(None).alias(column))
+    out = out.with_columns([pl.col(column).cast(pl.Float64, strict=False).alias(column) for column in ("bid", "ask", "mid", *THETADATA_EOD_OPTION_OPTIONAL_COLUMNS)])
+    if require_rich_columns:
+        missing_rich = [column for column in THETADATA_RICH_OPTION_COLUMNS if column not in out.columns or not out.select(pl.col(column).is_not_null().any()).item()]
+        if missing_rich:
+            raise ValueError(f"ThetaData EOD option chain is missing required rich endpoint columns: {', '.join(missing_rich)}")
+    return out.unique(subset=["snapshot_date", "contract_symbol"], keep="last", maintain_order=True).sort(["snapshot_date", "contract_symbol"])
+
+
+def _polars_datetime(frame: pl.DataFrame, column: str) -> pl.Expr:
+    source = pl.col(column)
+    if frame.schema[column] == pl.String:
+        source = source.str.to_datetime(strict=False, time_zone="UTC")
+    else:
+        source = source.cast(pl.Datetime, strict=False)
+    return source.dt.replace_time_zone(None).dt.truncate("1d")

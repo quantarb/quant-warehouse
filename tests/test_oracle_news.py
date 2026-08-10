@@ -1,4 +1,4 @@
-import pandas as pd
+import polars as pl
 
 from quant_warehouse.ingest.oracle_news import (
     oracle_trade_boundaries,
@@ -7,7 +7,7 @@ from quant_warehouse.ingest.oracle_news import (
 
 
 def _trades():
-    return pd.DataFrame(
+    return pl.DataFrame(
         {
             "symbol": ["aapl", "AAPL", "MSFT"],
             "entry_date": ["2024-01-02", "2024-01-03", "2024-01-02"],
@@ -18,11 +18,9 @@ def _trades():
 
 def test_oracle_boundaries_dedupe_and_preserve_entry_exit_role():
     result = oracle_trade_boundaries(_trades())
-    row = result.loc[
-        result["symbol"].eq("AAPL") & result["observation_date"].eq(pd.Timestamp("2024-01-03"))
-    ].iloc[0]
-    assert row["boundary_kind"] == "entry,exit"
-    assert len(result) == 5
+    row = result.filter((pl.col("symbol") == "AAPL") & (pl.col("observation_date") == pl.datetime(2024, 1, 3)))[0]
+    assert row[0, "boundary_kind"] == "entry,exit"
+    assert result.height == 5
 
 
 def test_refresh_requests_only_exact_boundary_dates(tmp_path):
@@ -32,8 +30,8 @@ def test_refresh_requests_only_exact_boundary_dates(tmp_path):
         calls.append((section, kwargs))
         day = kwargs["start_date"]
         if kwargs["page"]:
-            return pd.DataFrame()
-        return pd.DataFrame(
+            return pl.DataFrame()
+        return pl.DataFrame(
             {
                 "symbols": [kwargs["symbol"].split(",")[0]],
                 "date": [f"{day}T12:00:00Z"],
@@ -53,13 +51,11 @@ def test_refresh_requests_only_exact_boundary_dates(tmp_path):
 
 def test_refresh_accepts_openbb_datetime_index(tmp_path):
     def fetcher(_section, **kwargs):
-        return pd.DataFrame(
-            {"symbols": [kwargs["symbol"].split(",")[0]], "title": ["indexed"]},
-            index=pd.DatetimeIndex([f"{kwargs['start_date']}T12:00:00"], name="date"),
-        )
+        return pl.DataFrame({"symbols": [kwargs["symbol"].split(",")[0]],
+                             "date": [f"{kwargs['start_date']}T12:00:00"], "title": ["indexed"]})
 
     result = refresh_fmp_news_for_oracle_trades(
-        _trades().iloc[:1], output_path=tmp_path / "indexed.parquet", fetcher=fetcher
+        _trades().head(1), output_path=tmp_path / "indexed.parquet", fetcher=fetcher
     )
     assert result.news_rows == 2
 
@@ -67,7 +63,7 @@ def test_refresh_accepts_openbb_datetime_index(tmp_path):
         raise AssertionError("completed dates should resume from checkpoints")
 
     resumed = refresh_fmp_news_for_oracle_trades(
-        _trades().iloc[:1], output_path=tmp_path / "indexed.parquet", fetcher=fail_if_called
+        _trades().head(1), output_path=tmp_path / "indexed.parquet", fetcher=fail_if_called
     )
     assert resumed.requests == 0
     assert resumed.news_rows == 2

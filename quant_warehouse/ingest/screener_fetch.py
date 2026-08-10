@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-import pandas as pd
+import polars as pl
 
 from quant_warehouse.ingest.credentials import configure_openbb_credentials
 
@@ -59,22 +59,19 @@ def exchange_matches_filters(raw_exchange: Any, allowed: tuple[str, ...]) -> boo
     return False
 
 
-def _records_to_frame(records: Any) -> pd.DataFrame:
+def _records_to_frame(records: Any) -> pl.DataFrame:
     if records is None:
-        return pd.DataFrame()
-    if isinstance(records, pd.DataFrame):
-        return records.copy()
+        return pl.DataFrame()
     if isinstance(records, list):
-        return pd.DataFrame(records)
+        return pl.DataFrame(records)
     if isinstance(records, dict):
-        return pd.DataFrame([records])
-    return pd.DataFrame()
+        return pl.DataFrame([records])
+    return pl.DataFrame()
 
 
-def _normalize_screener_frame(frame: pd.DataFrame) -> pd.DataFrame:
-    if frame.empty:
+def _normalize_screener_frame(frame: pl.DataFrame) -> pl.DataFrame:
+    if frame.is_empty():
         return frame
-    out = frame.copy()
     rename_map = {
         "companyName": "name",
         "marketCap": "market_cap",
@@ -83,26 +80,21 @@ def _normalize_screener_frame(frame: pd.DataFrame) -> pd.DataFrame:
         "isEtf": "is_etf",
         "isFund": "is_fund",
     }
-    for src, dst in rename_map.items():
-        if src in out.columns and dst not in out.columns:
-            out[dst] = out[src]
-    if "exchangeShortName" in out.columns:
-        short_name = out["exchangeShortName"].astype(str).str.strip()
-        if "exchange" in out.columns:
-            out["exchange"] = short_name.where(short_name.ne(""), out["exchange"])
-        else:
-            out["exchange"] = short_name
+    existing = {src: dst for src, dst in rename_map.items() if src in frame.columns and dst not in frame.columns}
+    out = frame.rename(existing)
+    if "exchangeShortName" in frame.columns:
+        short = pl.col("exchangeShortName").cast(pl.String, strict=False).str.strip_chars()
+        out = out.with_columns(pl.when(short != "").then(short).otherwise(pl.col("exchange")).alias("exchange") if "exchange" in out.columns else short.alias("exchange"))
     if "symbol" in out.columns:
-        out["symbol"] = out["symbol"].astype(str).str.strip().str.upper()
-        out = out.loc[out["symbol"].ne("")]
-    if "market_cap" in out.columns:
-        out["market_cap"] = pd.to_numeric(out["market_cap"], errors="coerce")
-    if "beta" in out.columns:
-        out["beta"] = pd.to_numeric(out["beta"], errors="coerce")
-    return out
+        out = out.with_columns(pl.col("symbol").cast(pl.String, strict=False).str.strip_chars().str.to_uppercase()).filter(pl.col("symbol") != "")
+    return out.with_columns(pl.col(column).cast(pl.Float64, strict=False) for column in ("market_cap", "beta") if column in out.columns)
 
 
-def _fetch_openbb_screener(query: ScreenerQuery) -> pd.DataFrame:
+def _fetch_openbb_screener(
+    query: ScreenerQuery,
+    *,
+    output_format: str = "polars",
+) -> pl.DataFrame:
     try:
         from openbb import obb
     except ImportError as exc:
@@ -134,18 +126,23 @@ def _fetch_openbb_screener(query: ScreenerQuery) -> pd.DataFrame:
         kwargs["exchange"] = query.exchanges[0].lower() if provider == "yfinance" else query.exchanges[0]
 
     result = obb.equity.screener(**kwargs)
-    frame = _normalize_screener_frame(result.to_df())
-    if frame.empty:
+    raw = result.to_polars()
+    frame = _normalize_screener_frame(raw)
+    if frame.is_empty():
         return frame
     if query.exchanges:
         exchange_col = "exchange" if "exchange" in frame.columns else None
         if exchange_col is not None:
-            mask = frame[exchange_col].map(lambda value: exchange_matches_filters(value, query.exchanges))
-            frame = frame.loc[mask.fillna(False)].copy()
+            allowed = [value for value in frame[exchange_col].to_list() if exchange_matches_filters(value, query.exchanges)]
+            frame = frame.filter(pl.col(exchange_col).is_in(allowed))
     return frame
 
 
-def fetch_equity_screener(query: ScreenerQuery) -> tuple[pd.DataFrame, str]:
+def fetch_equity_screener(
+    query: ScreenerQuery,
+    *,
+    output_format: str = "polars",
+) -> tuple[pl.DataFrame, str]:
     """
     Fetch a cross-sectional equity universe.
 
@@ -153,7 +150,7 @@ def fetch_equity_screener(query: ScreenerQuery) -> tuple[pd.DataFrame, str]:
     OpenBB fork instead of bypassing it here.
     """
     provider = str(query.provider or "fmp").strip().lower()
-    frame = _fetch_openbb_screener(query)
+    frame = _fetch_openbb_screener(query, output_format=output_format)
     return frame, f"openbb:{provider}"
 
 

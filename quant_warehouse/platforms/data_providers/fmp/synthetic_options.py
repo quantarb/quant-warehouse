@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import polars as pl
+
 from dataclasses import dataclass
 import math
+from datetime import date, datetime, timedelta
 from typing import Literal, Sequence
 
-import numpy as np
-import pandas as pd
 from scipy.stats import norm
 
 from quant_warehouse import Warehouse
@@ -61,13 +62,13 @@ class FmpSyntheticOptionSpec:
 def read_fmp_synthetic_option_chain(
     symbol: str,
     *,
-    start_date: str | pd.Timestamp | None = None,
-    end_date: str | pd.Timestamp | None = None,
+    start_date: str | date | datetime | None = None,
+    end_date: str | date | datetime | None = None,
     columns: Sequence[str] | None = None,
     spec: FmpSyntheticOptionSpec | None = None,
-    prices: pd.DataFrame | None = None,
+    prices: pl.DataFrame | None = None,
     warehouse: Warehouse | None = None,
-) -> pd.DataFrame:
+) -> pl.DataFrame:
     """Build an adjusted-price Black-Scholes option chain from FMP prices.
 
     The generated strikes and intrinsic settlement live on the same adjusted
@@ -96,25 +97,25 @@ def read_fmp_synthetic_option_chain(
         requested = [str(column) for column in columns]
         for column in requested:
             if column not in chain.columns:
-                chain[column] = pd.NA
-        chain = chain.loc[:, requested]
+                chain = chain.with_columns(pl.lit(None).alias(column))
+        chain = chain.select(requested)
     return chain
 
 
 def build_fmp_synthetic_option_chain(
-    prices: pd.DataFrame,
+    prices: pl.DataFrame,
     *,
     symbol: str,
-    start_date: str | pd.Timestamp | None = None,
-    end_date: str | pd.Timestamp | None = None,
+    start_date: str | date | datetime | None = None,
+    end_date: str | date | datetime | None = None,
     spec: FmpSyntheticOptionSpec | None = None,
-) -> pd.DataFrame:
+) -> pl.DataFrame:
     cfg = spec or FmpSyntheticOptionSpec()
     price_frame = _normalize_price_frame(prices)
-    if price_frame.empty:
-        return pd.DataFrame(columns=list(FMP_SYNTHETIC_OPTION_COLUMNS))
-    start = None if start_date is None else pd.Timestamp(start_date).normalize()
-    end = None if end_date is None else pd.Timestamp(end_date).normalize()
+    if price_frame.is_empty():
+        return pl.DataFrame(schema={column: pl.Null for column in FMP_SYNTHETIC_OPTION_COLUMNS})
+    start = None if start_date is None else _normalize_date(start_date)
+    end = None if end_date is None else _normalize_date(end_date)
     realized_vol = build_realized_vol_series(
         price_frame["close"],
         window=cfg.realized_vol_window,
@@ -123,8 +124,9 @@ def build_fmp_synthetic_option_chain(
         annualization=cfg.annualization,
     )
     rows: list[dict[str, object]] = []
-    for snapshot_date, spot in price_frame["close"].items():
-        snapshot = pd.Timestamp(snapshot_date).normalize()
+    for row_index, row in enumerate(price_frame.iter_rows(named=True)):
+        snapshot = row["date"]
+        spot = row["close"]
         if start is not None and snapshot < start:
             continue
         if end is not None and snapshot > end:
@@ -132,13 +134,13 @@ def build_fmp_synthetic_option_chain(
         spot_value = _finite_float(spot)
         if spot_value is None or spot_value <= 0.0:
             continue
-        volatility = _finite_float(realized_vol.get(snapshot_date))
+        volatility = _finite_float(realized_vol[row_index])
         if volatility is None or volatility <= 0.0:
             continue
         iv = max(volatility * float(cfg.iv_multiplier), 1e-8)
         for tenor in cfg.tenor_days:
             dte = max(int(tenor), 1)
-            expiration = snapshot + pd.Timedelta(days=dte)
+            expiration = snapshot + timedelta(days=dte)
             years = max(float(dte) / float(cfg.day_count), 1.0 / float(cfg.day_count))
             for multiplier in cfg.strike_multipliers:
                 strike = float(spot_value) * float(multiplier)
@@ -178,7 +180,7 @@ def build_fmp_synthetic_option_chain(
                                 expiration=expiration,
                                 strike=strike,
                             ),
-                            "expiration": expiration.normalize(),
+                            "expiration": expiration,
                             "strike": float(strike),
                             "option_type": option_type,
                             "bid": bid,
@@ -191,13 +193,13 @@ def build_fmp_synthetic_option_chain(
                             "vega": greeks["vega"],
                             "rho": greeks["rho"],
                             "iv": float(iv),
-                            "volume": np.nan,
-                            "open_interest": np.nan,
+                            "volume": math.nan,
+                            "open_interest": math.nan,
                             "dte": int(dte),
                             "moneyness": float(strike) / float(spot_value) - 1.0,
                             "abs_moneyness": abs(float(strike) / float(spot_value) - 1.0),
                             "spread": float(ask - bid),
-                            "spread_pct": float((ask - bid) / mid) if mid > 0 else np.nan,
+                            "spread_pct": float((ask - bid) / mid) if mid > 0 else math.nan,
                             "data_interval": "eod",
                             "pricing_model": "black_scholes",
                             "option_source": FMP_SYNTHETIC_OPTION_SOURCE,
@@ -206,9 +208,8 @@ def build_fmp_synthetic_option_chain(
                         }
                     )
     if not rows:
-        return pd.DataFrame(columns=list(FMP_SYNTHETIC_OPTION_COLUMNS))
-    out = pd.DataFrame(rows)
-    return out.sort_values(["snapshot_date", "contract_symbol"]).reset_index(drop=True)
+        return pl.DataFrame(schema={column: pl.Null for column in FMP_SYNTHETIC_OPTION_COLUMNS})
+    return pl.DataFrame(rows).sort(["snapshot_date", "contract_symbol"])
 
 
 def settle_fmp_synthetic_option_exit(
@@ -217,11 +218,11 @@ def settle_fmp_synthetic_option_exit(
     contract_symbol: str,
     option_type: str,
     strike: float,
-    expiration: pd.Timestamp | str,
-    equity_exit_date: pd.Timestamp | str,
-    entry_date: pd.Timestamp | str | None = None,
+    expiration: date | datetime | str,
+    equity_exit_date: date | datetime | str,
+    entry_date: date | datetime | str | None = None,
     spec: FmpSyntheticOptionSpec | None = None,
-    prices: pd.DataFrame | None = None,
+    prices: pl.DataFrame | None = None,
     warehouse: Warehouse | None = None,
     **_: object,
 ) -> OptionSettlement | None:
@@ -229,10 +230,8 @@ def settle_fmp_synthetic_option_exit(
 
     _ = contract_symbol, entry_date
     cfg = spec or FmpSyntheticOptionSpec()
-    expiration_ts = pd.Timestamp(expiration).normalize()
-    equity_exit_ts = pd.Timestamp(equity_exit_date).normalize()
-    if pd.isna(expiration_ts) or pd.isna(equity_exit_ts):
-        return None
+    expiration_ts = _normalize_date(expiration)
+    equity_exit_ts = _normalize_date(equity_exit_date)
     target_exit = min(expiration_ts, equity_exit_ts)
     quote = price_fmp_synthetic_contract(
         symbol=symbol,
@@ -259,17 +258,17 @@ def settle_fmp_synthetic_option_exit(
 def price_fmp_synthetic_contract(
     *,
     symbol: str,
-    snapshot_date: str | pd.Timestamp,
+    snapshot_date: str | date | datetime,
     option_type: str,
     strike: float,
-    expiration: str | pd.Timestamp,
+    expiration: str | date | datetime,
     spec: FmpSyntheticOptionSpec | None = None,
-    prices: pd.DataFrame | None = None,
+    prices: pl.DataFrame | None = None,
     warehouse: Warehouse | None = None,
 ) -> dict[str, float] | None:
     cfg = spec or FmpSyntheticOptionSpec()
-    snapshot = pd.Timestamp(snapshot_date).normalize()
-    expiration_ts = pd.Timestamp(expiration).normalize()
+    snapshot = _normalize_date(snapshot_date)
+    expiration_ts = _normalize_date(expiration)
     price_frame = _load_fmp_price_frame(
         symbol,
         start_date=snapshot,
@@ -279,9 +278,9 @@ def price_fmp_synthetic_contract(
         vol_window=cfg.realized_vol_window,
     )
     normalized = _normalize_price_frame(price_frame)
-    if snapshot not in normalized.index:
-        return None
-    spot = _finite_float(normalized.loc[snapshot, "close"])
+    matching = normalized.filter(pl.col("date") == snapshot)
+    if matching.is_empty(): return None
+    spot = _finite_float(matching["close"][0])
     strike_value = _finite_float(strike)
     if spot is None or strike_value is None or spot <= 0.0 or strike_value <= 0.0:
         return None
@@ -289,7 +288,7 @@ def price_fmp_synthetic_contract(
     intrinsic = option_intrinsic_value(option_type=option_type, strike=strike_value, underlying_price=spot)
     if dte <= 0:
         bid, ask = synthetic_bid_ask(float(intrinsic), spread_bps=0.0, min_spread=0.0)
-        return {"bid": bid, "ask": ask, "mid": float(intrinsic), "underlying_price": float(spot), "iv": np.nan}
+        return {"bid": bid, "ask": ask, "mid": float(intrinsic), "underlying_price": float(spot), "iv": math.nan}
     realized_vol = build_realized_vol_series(
         normalized["close"],
         window=cfg.realized_vol_window,
@@ -297,7 +296,7 @@ def price_fmp_synthetic_contract(
         vol_cap=cfg.vol_cap,
         annualization=cfg.annualization,
     )
-    vol = _finite_float(realized_vol.loc[snapshot])
+    vol = _finite_float(realized_vol[normalized["date"].to_list().index(snapshot)])
     if vol is None or vol <= 0.0:
         return None
     iv = max(vol * float(cfg.iv_multiplier), 1e-8)
@@ -317,23 +316,23 @@ def price_fmp_synthetic_contract(
 
 
 def build_realized_vol_series(
-    close: pd.Series,
+    close: pl.Series,
     *,
     window: int = 21,
     vol_floor: float | None = 0.15,
     vol_cap: float | None = 0.80,
     annualization: float = 252.0,
-) -> pd.Series:
-    values = pd.to_numeric(close, errors="coerce").astype(float)
+) -> pl.Series:
+    values = close.cast(pl.Float64, strict=False)
     rolling_window = max(int(window), 1)
     min_periods = 2 if rolling_window > 1 else 1
-    log_returns = np.log(values / values.shift(1)).replace([np.inf, -np.inf], np.nan)
-    realized_vol = log_returns.rolling(rolling_window, min_periods=min_periods).std()
+    log_returns = (values / values.shift(1)).log()
+    realized_vol = log_returns.rolling_std(window_size=rolling_window, min_samples=min_periods)
     realized_vol = realized_vol * math.sqrt(float(annualization))
     if vol_floor is not None:
-        realized_vol = realized_vol.clip(lower=float(vol_floor)).fillna(float(vol_floor))
+        realized_vol = realized_vol.fill_null(float(vol_floor)).clip(float(vol_floor), None)
     if vol_cap is not None:
-        realized_vol = realized_vol.clip(upper=float(vol_cap))
+        realized_vol = realized_vol.clip(None, float(vol_cap))
     return realized_vol
 
 
@@ -374,7 +373,7 @@ def black_scholes_greeks(
     dividend_yield: float = 0.0,
 ) -> dict[str, float]:
     if years <= 0.0 or volatility <= 0.0 or spot <= 0.0 or strike <= 0.0:
-        return {name: np.nan for name in ("delta", "gamma", "theta", "vega", "rho")}
+        return {name: math.nan for name in ("delta", "gamma", "theta", "vega", "rho")}
     sqrt_t = math.sqrt(float(years))
     d1 = (
         math.log(float(spot) / float(strike))
@@ -429,45 +428,57 @@ def fmp_synthetic_contract_symbol(
     *,
     symbol: str,
     option_type: str,
-    expiration: pd.Timestamp,
+    expiration: date | datetime,
     strike: float,
 ) -> str:
     side = "C" if _option_side(option_type) == "call" else "P"
     strike_token = int(round(float(strike) * 10_000))
-    return f"FMPBS_{str(symbol).upper()}_{side}_{pd.Timestamp(expiration).strftime('%Y%m%d')}_{strike_token}"
+    return f"FMPBS_{str(symbol).upper()}_{side}_{_normalize_date(expiration).strftime('%Y%m%d')}_{strike_token}"
 
 
 def _load_fmp_price_frame(
     symbol: str,
     *,
-    start_date: str | pd.Timestamp | None,
-    end_date: str | pd.Timestamp | None,
-    prices: pd.DataFrame | None,
+    start_date: str | date | datetime | None,
+    end_date: str | date | datetime | None,
+    prices: pl.DataFrame | None,
     warehouse: Warehouse | None,
     vol_window: int,
-) -> pd.DataFrame:
+) -> pl.DataFrame:
     if prices is not None:
-        return prices.copy()
-    end = None if end_date is None else pd.Timestamp(end_date).normalize()
-    start = None if start_date is None else pd.Timestamp(start_date).normalize()
+        return prices.clone()
+    end = None if end_date is None else _normalize_date(end_date)
+    start = None if start_date is None else _normalize_date(start_date)
     fetch_start = start
     if start is not None:
-        fetch_start = start - pd.Timedelta(days=max(int(vol_window) * 3, 10))
+        fetch_start = start - timedelta(days=max(int(vol_window) * 3, 10))
     store = warehouse or Warehouse()
     return store.read_prices(str(symbol).upper(), provider="fmp", start=fetch_start, end=end)
 
 
-def _normalize_price_frame(prices: pd.DataFrame) -> pd.DataFrame:
-    if prices is None or prices.empty:
-        return pd.DataFrame(columns=["close"])
-    out = prices.copy()
-    out.columns = [str(column).strip().lower() for column in out.columns]
+def _normalize_price_frame(prices: pl.DataFrame) -> pl.DataFrame:
+    if prices is None or prices.is_empty():
+        return pl.DataFrame(schema={"date": pl.Datetime, "close": pl.Float64})
+    out = prices.clone().rename({column: str(column).strip().lower() for column in prices.columns})
     if "close" not in out.columns:
         raise ValueError("FMP synthetic options require an adjusted close column named 'close'")
-    out.index = pd.DatetimeIndex(pd.to_datetime(out.index, errors="coerce")).normalize()
-    out = out.loc[out.index.notna()].sort_index()
-    out["close"] = pd.to_numeric(out["close"], errors="coerce")
-    return out.dropna(subset=["close"])
+    if "date" not in out.columns:
+        raise ValueError("FMP synthetic options require a date column")
+    date_expr = pl.col("date")
+    if out.schema["date"] == pl.String:
+        date_expr = date_expr.str.to_datetime(strict=False)
+    else:
+        date_expr = date_expr.cast(pl.Datetime, strict=False)
+    return out.with_columns([
+        date_expr.dt.truncate("1d").alias("date"),
+        pl.col("close").cast(pl.Float64, strict=False),
+    ]).drop_nulls(["date", "close"]).sort("date")
+
+
+def _normalize_date(value: str | date | datetime) -> datetime:
+    if isinstance(value, datetime): return value.replace(hour=0, minute=0, second=0, microsecond=0)
+    if isinstance(value, date): return datetime.combine(value, datetime.min.time())
+    return datetime.fromisoformat(str(value)[:10])
 
 
 def _finite_float(value: object) -> float | None:
@@ -475,7 +486,7 @@ def _finite_float(value: object) -> float | None:
         out = float(value)
     except (TypeError, ValueError):
         return None
-    if not np.isfinite(out):
+    if not math.isfinite(out):
         return None
     return out
 

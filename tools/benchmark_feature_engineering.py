@@ -6,13 +6,14 @@ import json
 import statistics
 import sys
 import time
+from datetime import datetime, timedelta
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-import numpy as np
-import pandas as pd
+import polars as pl
+import torch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -22,7 +23,8 @@ from quant_warehouse.platforms.data_providers.fmp.feature_engineering import bui
 from quant_warehouse.platforms.data_providers.fmp.feature_engineering.specs import BuiltFeatureSet  # noqa: E402
 
 
-FeatureBuilder = Callable[[str, pd.DataFrame], BuiltFeatureSet]
+FeatureBuilder = Callable[[str, pl.DataFrame], BuiltFeatureSet]
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 @dataclass(frozen=True)
@@ -56,23 +58,26 @@ class BenchmarkReport:
     passed_speed_gate: bool | None
 
 
-def make_price_frame(rows: int, *, seed: int) -> pd.DataFrame:
-    rng = np.random.default_rng(int(seed))
-    index = pd.date_range("1980-01-01", periods=int(rows), freq="B")
-    close = 100.0 + np.cumsum(rng.normal(0.02, 1.0, int(rows)))
-    return pd.DataFrame(
+def make_price_frame(rows: int, *, seed: int) -> pl.DataFrame:
+    generator = torch.Generator(device=DEVICE).manual_seed(int(seed))
+    index = pl.Series("date", [datetime(1980, 1, 1) + timedelta(days=i) for i in range(int(rows))])
+    close = 100.0 + torch.cumsum(torch.randn(int(rows), generator=generator, device=DEVICE) + 0.02, dim=0)
+    open_ = close + 0.2 * torch.randn(int(rows), generator=generator, device=DEVICE)
+    high = close + 0.1 + 1.4 * torch.rand(int(rows), generator=generator, device=DEVICE)
+    low = close - 0.1 - 1.4 * torch.rand(int(rows), generator=generator, device=DEVICE)
+    volume = torch.randint(1_000, 1_000_001, (int(rows),), generator=generator, device=DEVICE).to(torch.float64)
+    return pl.DataFrame(
         {
-            "open": close + rng.normal(0.0, 0.2, int(rows)),
-            "high": close + rng.uniform(0.1, 1.5, int(rows)),
-            "low": close - rng.uniform(0.1, 1.5, int(rows)),
-            "close": close,
-            "volume": rng.integers(1_000, 1_000_000, int(rows)).astype(float),
-        },
-        index=index,
-    )
+            "open": open_.cpu().tolist(),
+            "high": high.cpu().tolist(),
+            "low": low.cpu().tolist(),
+            "close": close.cpu().tolist(),
+            "volume": volume.cpu().tolist(),
+        }
+    ).with_columns(index.alias("date"))
 
 
-def make_price_frames(config: BenchmarkConfig) -> list[tuple[str, pd.DataFrame]]:
+def make_price_frames(config: BenchmarkConfig) -> list[tuple[str, pl.DataFrame]]:
     return [
         (f"SYM{idx:04d}", make_price_frame(config.rows, seed=config.seed + idx))
         for idx in range(int(config.symbols))
@@ -94,26 +99,19 @@ def validate_candidate(
     baseline_builder: FeatureBuilder,
     candidate_builder: FeatureBuilder,
     sample_symbol: str,
-    sample_prices: pd.DataFrame,
+    sample_prices: pl.DataFrame,
 ) -> None:
     baseline = baseline_builder(sample_symbol, sample_prices)
     candidate = candidate_builder(sample_symbol, sample_prices)
     if list(candidate.feature_cols) != list(baseline.feature_cols):
         raise AssertionError("Candidate feature_cols differ from baseline.")
-    pd.testing.assert_frame_equal(
-        candidate.df[baseline.feature_cols],
-        baseline.df[baseline.feature_cols],
-        check_dtype=False,
-        check_exact=False,
-        rtol=1e-10,
-        atol=1e-10,
-    )
+    assert candidate.df.select(baseline.feature_cols).equals(baseline.df.select(baseline.feature_cols))
 
 
 def benchmark_builder(
     name: str,
     builder: FeatureBuilder,
-    frames: Sequence[tuple[str, pd.DataFrame]],
+    frames: Sequence[tuple[str, pl.DataFrame]],
     config: BenchmarkConfig,
 ) -> BenchmarkStats:
     for _ in range(max(int(config.warmups), 0)):
@@ -157,7 +155,7 @@ def run_benchmark(
     if candidate_builder is not None and validate:
         validate_candidate(baseline_builder, candidate_builder, frames[0][0], frames[0][1])
 
-    baseline = benchmark_builder("current_pandas", baseline_builder, frames, config)
+    baseline = benchmark_builder("current_polars", baseline_builder, frames, config)
     candidate = None
     speedup = None
     passed = None

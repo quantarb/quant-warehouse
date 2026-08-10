@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-import os
 import re
 from dataclasses import dataclass
 from typing import Callable, List, Optional
 
-import numpy as np
-import pandas as pd
+import polars as pl
 
 from quant_warehouse.platforms.data_providers.fmp.feature_engineering.specs import BuiltFeatureSet
 
@@ -22,399 +20,180 @@ def historical_price_eod_family(asset_class: str) -> str:
     return f"{normalized}-historical-price-eod"
 
 
-def normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
-    """Normalize common feature frames to a sorted datetime index."""
-    if df is None or len(df) == 0:
-        return df.copy()
-    if isinstance(df.index, pd.DatetimeIndex):
-        if df.index.is_monotonic_increasing and df.index.tz is None:
-            return df
-    out = df.copy()
-    if "date" in out.columns:
-        out["date"] = pd.to_datetime(out["date"], errors="coerce").dt.tz_localize(None)
-        out = out.dropna(subset=["date"])
-        return out.set_index("date").sort_index()
-    if not isinstance(out.index, pd.DatetimeIndex):
-        out.index = pd.to_datetime(out.index, errors="coerce")
-    out = out[~out.index.isna()]
-    if getattr(out.index, "tz", None) is not None:
-        out.index = out.index.tz_localize(None)
-    return out.sort_index()
+def normalize_cols(df: pl.DataFrame) -> pl.DataFrame:
+    """Normalize a Polars price frame to a sorted date column."""
+    if df is None or df.is_empty(): return pl.DataFrame()
+    if "date" not in df.columns: raise ValueError("Price frames must contain a date column")
+    expr = pl.col("date")
+    if df.schema["date"] == pl.String: expr = expr.str.to_datetime(strict=False)
+    else: expr = expr.cast(pl.Datetime, strict=False)
+    return df.with_columns(expr.dt.replace_time_zone(None).dt.truncate("1d").alias("date")).drop_nulls("date").sort("date")
 
 
 @dataclass(frozen=True)
 class FeaturesResult:
     """Daily feature matrix and its usable feature columns."""
 
-    df_daily: pd.DataFrame
+    df_daily: pl.DataFrame
     feature_cols: List[str]
 
 
-def _ensure_dt_index(df: pd.DataFrame) -> pd.DataFrame:
-    out = df.copy()
-    if "date" in out.columns and not isinstance(out.index, pd.DatetimeIndex):
-        out["date"] = pd.to_datetime(out["date"], errors="coerce")
-        out = out.set_index("date")
-    if not isinstance(out.index, pd.DatetimeIndex):
-        out.index = pd.to_datetime(out.index, errors="coerce")
-    out = out[~out.index.isna()]
-    out = out.sort_index()
-    if out.index.has_duplicates:
-        out = out[~out.index.duplicated(keep="last")]
-    return out
+def _ensure_dt_index(df: pl.DataFrame) -> pl.DataFrame:
+    return normalize_cols(df).unique("date", keep="last")
 
 
-def _pick_feature_cols(df_daily: pd.DataFrame) -> List[str]:
+def _pick_feature_cols(df_daily: pl.DataFrame) -> List[str]:
     cols = []
     for column in df_daily.columns:
         if column in BASE_PRICE_COLS or column == "symbol":
             continue
-        if pd.api.types.is_numeric_dtype(df_daily[column]):
+        if df_daily.schema[column].is_numeric():
             cols.append(column)
     return sorted(cols)
 
 
 def _sanitize_features(
-    df_daily: pd.DataFrame,
+    df_daily: pl.DataFrame,
     feature_cols: List[str],
     *,
     fill_method: str = "ffill_bfill_zero",
-) -> pd.DataFrame:
-    out = df_daily.copy()
+) -> pl.DataFrame:
+    out = df_daily.clone()
     if not feature_cols:
         return out
 
-    matrix = out[feature_cols].replace([np.inf, -np.inf], np.nan)
+    matrix = out.select(feature_cols).with_columns([pl.when(pl.col(c).is_finite()).then(pl.col(c)).otherwise(None).alias(c) for c in feature_cols])
     if fill_method == "drop_rows":
-        mask = matrix.notna().all(axis=1)
-        return out.loc[mask].copy()
+        return out.filter(pl.all_horizontal([pl.col(c).is_not_null() for c in feature_cols]))
     if fill_method == "zero":
-        matrix = matrix.fillna(0.0)
+        matrix = matrix.fill_null(0.0)
     else:
-        matrix = matrix.ffill().bfill().fillna(0.0)
-    out[feature_cols] = matrix
-    return out
+        matrix = matrix.fill_null(strategy="forward").fill_null(strategy="backward").fill_null(0.0)
+    return out.drop(feature_cols).hstack(matrix)
 
 
-def compute_features_worldclass(df: pd.DataFrame) -> pd.DataFrame:
-    """Compute a dense, no-lookahead OHLCV feature set."""
-    cuda_result = _compute_features_worldclass_cuda(df)
-    if cuda_result is not None:
-        return cuda_result
+def compute_features_worldclass(df: pl.DataFrame) -> pl.DataFrame:
+    """Compute the dense OHLCV feature set with Polars."""
+    return _compute_features_worldclass_polars(df)
 
-    out = df.copy()
+
+def _compute_features_worldclass_polars(df: pl.DataFrame) -> pl.DataFrame:
+    """Polars-native implementation of the dense OHLCV feature recipe."""
+    missing = [column for column in BASE_PRICE_COLS if column not in df.columns]
+    if missing:
+        raise ValueError(f"Missing required price columns: {missing}")
     eps = 1e-12
+    out = df.with_columns([pl.col(column).cast(pl.Float64, strict=False).alias(column) for column in BASE_PRICE_COLS])
+    close, high, low, open_, vol = (pl.col(column) for column in ("close", "high", "low", "open", "volume"))
 
-    def _safe_div(a, b):
-        if hasattr(b, "replace"):
-            b = b.replace(0, np.nan)
-        return a / (b + eps)
+    def safe_div(numerator: pl.Expr, denominator: pl.Expr) -> pl.Expr:
+        return pl.when(denominator.abs() > eps).then(numerator / (denominator + eps)).otherwise(None)
 
-    for column in BASE_PRICE_COLS:
-        out[column] = pd.to_numeric(out[column], errors="coerce")
-
-    open_ = out["open"]
-    high = out["high"]
-    low = out["low"]
-    close = out["close"]
-    vol = out["volume"]
-
-    feats: dict[str, pd.Series] = {}
-    ret_1d = close.pct_change()
-    feats["Ret1d"] = ret_1d
+    exprs: list[pl.Expr] = [close.pct_change().alias("Ret1d")]
     for window in [2, 3, 5, 10, 20, 21, 63, 126, 189, 252]:
-        feats[f"Ret{window}d"] = close.pct_change(window)
-
+        exprs.append(close.pct_change(window).alias(f"Ret{window}d"))
     for window in [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 60, 70, 80, 90, 100, 120, 140, 150, 160, 180, 200]:
-        sma = close.rolling(window).mean()
-        feats[f"SMA{window}"] = sma
-        feats[f"DistSMA{window}"] = _safe_div(close - sma, sma)
-        feats[f"SMASlope{window}"] = sma.diff()
-
+        sma = close.rolling_mean(window_size=window)
+        exprs.extend([sma.alias(f"SMA{window}"), safe_div(close - sma, sma).alias(f"DistSMA{window}"), sma.diff().alias(f"SMASlope{window}")])
     for window in [12, 26, 50]:
-        ema = close.ewm(span=window, adjust=False).mean()
-        feats[f"DistEMA{window}"] = _safe_div(close - ema, ema)
+        ema = close.ewm_mean(span=window, adjust=False)
+        exprs.append(safe_div(close - ema, ema).alias(f"DistEMA{window}"))
 
-    ema12 = close.ewm(span=12, adjust=False).mean()
-    ema26 = close.ewm(span=26, adjust=False).mean()
+    ema12 = close.ewm_mean(span=12, adjust=False)
+    ema26 = close.ewm_mean(span=26, adjust=False)
     macd = ema12 - ema26
-    signal = macd.ewm(span=9, adjust=False).mean()
-    feats["MACD"] = macd
-    feats["MACDSignal"] = signal
-    feats["MACDHist"] = macd - signal
-
+    signal = macd.ewm_mean(span=9, adjust=False)
+    exprs.extend([macd.alias("MACD"), signal.alias("MACDSignal"), (macd - signal).alias("MACDHist")])
     for window in [10, 20, 63]:
-        mean = close.rolling(window).mean()
-        std = close.rolling(window).std()
-        feats[f"ZClose{window}"] = _safe_div(close - mean, std + eps)
-        upper = mean + 2 * std
-        lower = mean - 2 * std
-        feats[f"BBPos{window}"] = _safe_div(close - lower, (upper - lower) + eps)
-
-    feats["HlRange"] = _safe_div(high - low, close)
-    feats["OcChange"] = _safe_div(close - open_, open_)
-    feats["Gap"] = _safe_div(open_ - close.shift(1), close.shift(1))
-
+        mean = close.rolling_mean(window_size=window)
+        std = close.rolling_std(window_size=window)
+        upper, lower = mean + 2 * std, mean - 2 * std
+        exprs.extend([safe_div(close - mean, std).alias(f"ZClose{window}"), safe_div(close - lower, upper - lower).alias(f"BBPos{window}")])
     prev_close = close.shift(1)
-    tr = pd.concat(
-        [
-            (high - low).abs(),
-            (high - prev_close).abs(),
-            (low - prev_close).abs(),
-        ],
-        axis=1,
-    ).max(axis=1)
-    feats["TrueRange"] = tr
-
+    exprs.extend([
+        safe_div(high - low, close).alias("HlRange"),
+        safe_div(close - open_, open_).alias("OcChange"),
+        safe_div(open_ - prev_close, prev_close).alias("Gap"),
+        pl.max_horizontal([(high - low).abs(), (high - prev_close).abs(), (low - prev_close).abs()]).alias("TrueRange"),
+    ])
+    out = out.with_columns(exprs)
+    tr = pl.col("TrueRange")
     for window in [14, 20]:
-        atr = tr.rolling(window).mean()
-        feats[f"ATRPct{window}"] = _safe_div(atr, close)
-
+        atr = tr.rolling_mean(window_size=window)
+        out = out.with_columns(safe_div(atr, close).alias(f"ATRPct{window}"))
+    ret = pl.col("Ret1d")
     for window in [5, 10, 20, 63]:
-        vol_n = ret_1d.rolling(window).std()
-        feats[f"Vol{window}"] = vol_n
-        base_mean = vol_n.rolling(252).mean()
-        base_std = vol_n.rolling(252).std()
-        feats[f"VolRegimeZ{window}"] = _safe_div(vol_n - base_mean, base_std + eps)
-
+        vol_n = ret.rolling_std(window_size=window)
+        base_mean = vol_n.rolling_mean(window_size=252)
+        base_std = vol_n.rolling_std(window_size=252)
+        out = out.with_columns([vol_n.alias(f"Vol{window}"), safe_div(vol_n - base_mean, base_std).alias(f"VolRegimeZ{window}")])
     for window in [10, 20, 55]:
-        hh = high.rolling(window).max()
-        ll = low.rolling(window).min()
-        feats[f"BreakoutUp{window}"] = (close > hh.shift(1)).astype(float)
-        feats[f"BreakoutDn{window}"] = (close < ll.shift(1)).astype(float)
-        feats[f"PosInChannel{window}"] = _safe_div(close - ll, (hh - ll) + eps)
-        feats[f"DistHh{window}"] = _safe_div(close - hh, hh)
-        feats[f"DistLl{window}"] = _safe_div(close - ll, ll)
-
+        hh = high.rolling_max(window_size=window)
+        ll = low.rolling_min(window_size=window)
+        out = out.with_columns([
+            (close > hh.shift(1)).cast(pl.Float64).alias(f"BreakoutUp{window}"),
+            (close < ll.shift(1)).cast(pl.Float64).alias(f"BreakoutDn{window}"),
+            safe_div(close - ll, hh - ll).alias(f"PosInChannel{window}"),
+            safe_div(close - hh, hh).alias(f"DistHh{window}"),
+            safe_div(close - ll, ll).alias(f"DistLl{window}"),
+        ])
     for window in [5, 20, 63]:
-        vmean = vol.rolling(window).mean()
-        vstd = vol.rolling(window).std()
-        feats[f"VolZ{window}"] = _safe_div(vol - vmean, vstd + eps)
-
-    direction = np.sign(close.diff()).fillna(0.0)
-    feats["OBV"] = (direction * vol.fillna(0.0)).cumsum()
-    dollar_vol = close * vol
-    feats["DollarVol"] = dollar_vol
-    feats["DollarVolZ20"] = _safe_div(
-        dollar_vol - dollar_vol.rolling(20).mean(),
-        dollar_vol.rolling(20).std() + eps,
-    )
-    feats["CLV"] = _safe_div((close - low) - (high - close), (high - low) + eps)
-
-    feats_df = pd.DataFrame(feats, index=out.index)
-    out = pd.concat([out, feats_df], axis=1)
-    return out.replace([np.inf, -np.inf], np.nan)
-
-
-def _use_cuda_for_frame(df: pd.DataFrame) -> bool:
-    raw = os.getenv("QW_FEATURE_ENGINEERING_CUDA", "auto").strip().lower()
-    if raw in {"0", "false", "no", "off", "never"}:
-        return False
-    if raw in {"1", "true", "yes", "on", "always"}:
-        return True
-    threshold = int(os.getenv("QW_FEATURE_ENGINEERING_CUDA_MIN_ROWS", "50000"))
-    return len(df) >= threshold
-
-
-def _compute_features_worldclass_cuda(df: pd.DataFrame) -> pd.DataFrame | None:
-    """Run the dense price feature recipe with cudf when available.
-
-    GPU dataframe startup and host/device transfer overhead is material for small
-    per-symbol frames, so the default auto mode only tries cudf on larger inputs.
-    Any cudf incompatibility falls back to the pandas implementation.
-    """
-    if not _use_cuda_for_frame(df):
-        return None
-    try:
-        import cudf  # type: ignore[import-not-found]
-    except Exception:
-        return None
-
-    try:
-        gdf = cudf.from_pandas(df.copy())
-        eps = 1e-12
-        for column in BASE_PRICE_COLS:
-            gdf[column] = cudf.to_numeric(gdf[column], errors="coerce")
-
-        open_ = gdf["open"]
-        high = gdf["high"]
-        low = gdf["low"]
-        close = gdf["close"]
-        vol = gdf["volume"]
-
-        def _safe_div(a, b):
-            return a / (b.replace(0, np.nan) + eps)
-
-        feats = {}
-        ret_1d = close.pct_change()
-        feats["Ret1d"] = ret_1d
-        for window in [2, 3, 5, 10, 20, 21, 63, 126, 189, 252]:
-            feats[f"Ret{window}d"] = close.pct_change(window)
-        for window in [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 60, 70, 80, 90, 100, 120, 140, 150, 160, 180, 200]:
-            sma = close.rolling(window).mean()
-            feats[f"SMA{window}"] = sma
-            feats[f"DistSMA{window}"] = _safe_div(close - sma, sma)
-            feats[f"SMASlope{window}"] = sma.diff()
-        for window in [12, 26, 50]:
-            ema = close.ewm(span=window, adjust=False).mean()
-            feats[f"DistEMA{window}"] = _safe_div(close - ema, ema)
-
-        ema12 = close.ewm(span=12, adjust=False).mean()
-        ema26 = close.ewm(span=26, adjust=False).mean()
-        macd = ema12 - ema26
-        signal = macd.ewm(span=9, adjust=False).mean()
-        feats["MACD"] = macd
-        feats["MACDSignal"] = signal
-        feats["MACDHist"] = macd - signal
-
-        for window in [10, 20, 63]:
-            mean = close.rolling(window).mean()
-            std = close.rolling(window).std()
-            feats[f"ZClose{window}"] = _safe_div(close - mean, std + eps)
-            upper = mean + 2 * std
-            lower = mean - 2 * std
-            feats[f"BBPos{window}"] = _safe_div(close - lower, (upper - lower) + eps)
-
-        feats["HlRange"] = _safe_div(high - low, close)
-        feats["OcChange"] = _safe_div(close - open_, open_)
-        feats["Gap"] = _safe_div(open_ - close.shift(1), close.shift(1))
-
-        prev_close = close.shift(1)
-        tr = cudf.concat(
-            [
-                (high - low).abs(),
-                (high - prev_close).abs(),
-                (low - prev_close).abs(),
-            ],
-            axis=1,
-        ).max(axis=1)
-        feats["TrueRange"] = tr
-        for window in [14, 20]:
-            atr = tr.rolling(window).mean()
-            feats[f"ATRPct{window}"] = _safe_div(atr, close)
-        for window in [5, 10, 20, 63]:
-            vol_n = ret_1d.rolling(window).std()
-            feats[f"Vol{window}"] = vol_n
-            base_mean = vol_n.rolling(252).mean()
-            base_std = vol_n.rolling(252).std()
-            feats[f"VolRegimeZ{window}"] = _safe_div(vol_n - base_mean, base_std + eps)
-        for window in [10, 20, 55]:
-            hh = high.rolling(window).max()
-            ll = low.rolling(window).min()
-            feats[f"BreakoutUp{window}"] = (close > hh.shift(1)).astype("float64")
-            feats[f"BreakoutDn{window}"] = (close < ll.shift(1)).astype("float64")
-            feats[f"PosInChannel{window}"] = _safe_div(close - ll, (hh - ll) + eps)
-            feats[f"DistHh{window}"] = _safe_div(close - hh, hh)
-            feats[f"DistLl{window}"] = _safe_div(close - ll, ll)
-        for window in [5, 20, 63]:
-            vmean = vol.rolling(window).mean()
-            vstd = vol.rolling(window).std()
-            feats[f"VolZ{window}"] = _safe_div(vol - vmean, vstd + eps)
-
-        close_diff = close.diff()
-        direction = (close_diff > 0).astype("float64") - (close_diff < 0).astype("float64")
-        direction = direction.fillna(0.0)
-        feats["OBV"] = (direction * vol.fillna(0.0)).cumsum()
-        dollar_vol = close * vol
-        feats["DollarVol"] = dollar_vol
-        feats["DollarVolZ20"] = _safe_div(
-            dollar_vol - dollar_vol.rolling(20).mean(),
-            dollar_vol.rolling(20).std() + eps,
-        )
-        feats["CLV"] = _safe_div((close - low) - (high - close), (high - low) + eps)
-
-        out = cudf.concat([gdf, cudf.DataFrame(feats, index=gdf.index)], axis=1).to_pandas()
-        return out.replace([np.inf, -np.inf], np.nan)
-    except Exception:
-        return None
+        vmean = vol.rolling_mean(window_size=window)
+        vstd = vol.rolling_std(window_size=window)
+        out = out.with_columns(safe_div(vol - vmean, vstd).alias(f"VolZ{window}"))
+    direction = close.diff().sign().fill_null(0.0)
+    out = out.with_columns([
+        (direction * vol.fill_null(0.0)).cum_sum().alias("OBV"),
+        (close * vol).alias("DollarVol"),
+    ])
+    dollar = pl.col("DollarVol")
+    out = out.with_columns([
+        safe_div(dollar - dollar.rolling_mean(window_size=20), dollar.rolling_std(window_size=20)).alias("DollarVolZ20"),
+        safe_div((close - low) - (high - close), high - low).alias("CLV"),
+    ])
+    return out.with_columns([
+        pl.when(pl.col(column).is_finite()).then(pl.col(column)).otherwise(None).alias(column)
+        for column in out.columns
+        if out.schema[column] in (pl.Float32, pl.Float64)
+    ])
 
 
 def load_or_compute_features_daily(
     symbol: str,
     *,
-    df_prices: pd.DataFrame,
-    compute_fn: Optional[Callable[[pd.DataFrame], pd.DataFrame]] = None,
-    compute_features_fn: Optional[Callable[[pd.DataFrame], pd.DataFrame]] = None,
+    df_prices: pl.DataFrame,
+    compute_fn: Optional[Callable[[pl.DataFrame], pl.DataFrame]] = None,
+    compute_features_fn: Optional[Callable[[pl.DataFrame], pl.DataFrame]] = None,
 ) -> FeaturesResult:
-    """Always recompute technical features from the provided prices."""
-
+    """Always recompute technical features from the provided Polars prices."""
     if compute_fn is not None and compute_features_fn is not None:
         raise ValueError("Pass only one of compute_fn or compute_features_fn.")
-    if compute_fn is None:
-        compute_fn = compute_features_fn
-    if compute_fn is None:
-        compute_fn = compute_features_worldclass
-
-    df_prices_n = normalize_cols(df_prices)
-    df_prices_n = _ensure_dt_index(df_prices_n)
-    missing = [column for column in BASE_PRICE_COLS if column not in df_prices_n.columns]
-    if missing:
-        raise ValueError(f"df_prices missing required columns: {missing}")
-
-    df_daily = compute_fn(df_prices_n.copy())
-    df_daily = normalize_cols(df_daily)
-    df_daily = _ensure_dt_index(df_daily)
-
-    for column in BASE_PRICE_COLS:
-        if column not in df_daily.columns:
-            df_daily[column] = df_prices_n[column]
-
-    feature_cols = _pick_feature_cols(df_daily)
-    df_daily = _sanitize_features(df_daily, feature_cols, fill_method="drop_rows")
-    feature_cols = _pick_feature_cols(df_daily)
-    return FeaturesResult(df_daily=df_daily, feature_cols=feature_cols)
+    selected_compute = compute_fn or compute_features_fn or compute_features_worldclass
+    normalized = normalize_cols(df_prices)
+    missing = [column for column in BASE_PRICE_COLS if column not in normalized.columns]
+    if missing: raise ValueError(f"df_prices missing required columns: {missing}")
+    daily = selected_compute(normalized)
+    if not isinstance(daily, pl.DataFrame): raise TypeError("Technical feature computation must return Polars")
+    features = [column for column, dtype in daily.schema.items() if column not in (*BASE_PRICE_COLS, "symbol", "date") and dtype.is_numeric()]
+    if features: daily = daily.with_columns([pl.col(c).cast(pl.Float64, strict=False).fill_nan(None).alias(c) for c in features])
+    return FeaturesResult(df_daily=daily, feature_cols=features)
 
 
-def build_historical_price_eod_features(
-    symbol: str,
-    df_prices: pd.DataFrame,
-    *,
-    asset_class: str = "equity",
-) -> BuiltFeatureSet:
-    """Build the sparse endpoint payload for FMP ``historical-price-eod``.
-
-    This family intentionally contains endpoint-native price fields only.  It
-    does not calculate moving averages, returns, indicators, or other TA
-    features; those belong to learned feature engineering in the model layer.
-    Adjusted OHLC is preferred when the endpoint supplies it, with raw OHLC as
-    a fallback for providers or historical rows that do not include adjusted
-    values.
-    """
-
-    if df_prices.empty:
-        return BuiltFeatureSet(df=pd.DataFrame(), feature_cols=[])
-    df_daily = _ensure_dt_index(normalize_cols(df_prices))
-    source_columns = {
-        "eod__adjusted_open": ("adj_open", "open"),
-        "eod__adjusted_high": ("adj_high", "high"),
-        "eod__adjusted_low": ("adj_low", "low"),
-        "eod__adjusted_close": ("adj_close", "close"),
-        "eod__volume": ("volume",),
-    }
-    optional_columns = {
-        "eod__vwap": ("vwap",),
-        "eod__change": ("change",),
-        "eod__change_percent": ("change_percent", "change_pct"),
-    }
-    selected: dict[str, pd.Series] = {}
+def build_historical_price_eod_features(symbol: str, df_prices: pl.DataFrame, *, asset_class: str = "equity") -> BuiltFeatureSet:
+    """Build the sparse endpoint-native historical-price family."""
+    daily = normalize_cols(df_prices)
+    if daily.is_empty(): return BuiltFeatureSet(df=pl.DataFrame(), feature_cols=[])
+    source_columns = {"eod__adjusted_open": ("adj_open", "open"), "eod__adjusted_high": ("adj_high", "high"), "eod__adjusted_low": ("adj_low", "low"), "eod__adjusted_close": ("adj_close", "close"), "eod__volume": ("volume",)}
+    optional_columns = {"eod__vwap": ("vwap",), "eod__change": ("change",), "eod__change_percent": ("change_percent", "change_pct")}
+    selected: list[pl.Expr] = []
+    feature_cols: list[str] = []
     for output, candidates in {**source_columns, **optional_columns}.items():
-        for candidate in candidates:
-            if candidate in df_daily.columns:
-                selected[output] = pd.to_numeric(df_daily[candidate], errors="coerce")
-                break
-    feature_cols = list(selected)
-    if not feature_cols:
-        return BuiltFeatureSet(df=pd.DataFrame(), feature_cols=[])
-    out = pd.DataFrame(selected, index=df_daily.index)
-    out["symbol"] = str(symbol).strip().upper()
-    out = out.reset_index().rename(columns={out.index.name or "index": "date"}).set_index(["date", "symbol"]).sort_index()
-    return BuiltFeatureSet(
-        df=out,
-        feature_cols=feature_cols,
-        family_name=historical_price_eod_family(asset_class),
-        endpoint_name="historical-price-eod",
-        source_asset_class="equity",
-    )
+        candidate = next((value for value in candidates if value in daily.columns), None)
+        if candidate is not None:
+            selected.append(pl.col(candidate).cast(pl.Float64, strict=False).alias(output)); feature_cols.append(output)
+    if not selected: return BuiltFeatureSet(df=pl.DataFrame(), feature_cols=[])
+    out = daily.select([pl.col("date"), pl.lit(str(symbol).strip().upper()).alias("symbol"), *selected]).sort(["date", "symbol"])
+    return BuiltFeatureSet(df=out, feature_cols=feature_cols, family_name=historical_price_eod_family(asset_class), endpoint_name="historical-price-eod", source_asset_class="equity")
 
 
 def _to_snake(value: str) -> str:

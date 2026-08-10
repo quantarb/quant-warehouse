@@ -1,7 +1,7 @@
 from pathlib import Path
 from unittest.mock import patch
 
-import pandas as pd
+import polars as pl
 
 from quant_warehouse.catalog.store import CatalogStore
 from quant_warehouse.ingest.screener_fetch import (
@@ -52,7 +52,7 @@ def test_screener_record_to_profile_payload_normalizes_fields():
 
 @patch("quant_warehouse.ingest.screener_fetch._fetch_openbb_screener")
 def test_fetch_equity_screener_uses_openbb_only(mock_openbb):
-    mock_openbb.return_value = pd.DataFrame(
+    mock_openbb.return_value = pl.DataFrame(
         [{"symbol": "MSFT", "name": "Microsoft", "market_cap": 2_000_000_000_000, "exchange": "NASDAQ"}]
     )
     frame, source = fetch_equity_screener(ScreenerQuery(provider="fmp", mktcap_min=10_000_000_000, limit=5))
@@ -64,7 +64,7 @@ def test_screen_universe_to_catalog_upserts_profiles(tmp_path: Path):
     warehouse = Warehouse()
     warehouse.catalog = CatalogStore(tmp_path / "catalog.sqlite")
 
-    frame = pd.DataFrame(
+    frame = pl.DataFrame(
         [
             {
                 "symbol": "DONE",

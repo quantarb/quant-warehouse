@@ -3,7 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
-import pandas as pd
+import polars as pl
+
+Frame = pl.DataFrame
 
 
 @dataclass(frozen=True)
@@ -15,20 +17,20 @@ class BuiltFeatureSet:
     family merges so a combined panel can still expose endpoint-level masks.
     """
 
-    df: pd.DataFrame
+    df: Frame
     feature_cols: list[str]
     family_name: str | None = None
     endpoint_name: str | None = None
     source_asset_class: str | None = None
-    presence: pd.Series | None = None
+    presence: pl.Series | None = None
     family_columns: dict[str, list[str]] = field(default_factory=dict)
-    family_presence: pd.DataFrame | None = None
+    family_presence: Frame | None = None
 
     def __post_init__(self) -> None:
-        if self.presence is None and not self.df.empty:
+        if self.presence is None and not self.df.is_empty():
             columns = [column for column in self.feature_cols if column in self.df.columns]
-            observed = self.df.loc[:, columns].notna().any(axis=1) if columns else pd.Series(False, index=self.df.index)
-            object.__setattr__(self, "presence", observed.astype(bool))
+            observed = self.df.select(pl.any_horizontal([pl.col(column).is_not_null() for column in columns]) if columns else pl.lit(False)).to_series()
+            object.__setattr__(self, "presence", observed.cast(pl.Boolean))
         if self.family_name and not self.family_columns:
             object.__setattr__(self, "family_columns", {self.family_name: list(self.feature_cols)})
 

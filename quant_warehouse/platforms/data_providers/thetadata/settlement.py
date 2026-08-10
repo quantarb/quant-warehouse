@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import polars as pl
+
+from datetime import datetime, timedelta
 from typing import Callable
 
-import numpy as np
-import pandas as pd
-from pandas.tseries.offsets import BDay
+import math
 
 from quant_warehouse.platforms.data_providers.options import (
     OptionExitPriceSource,
@@ -14,10 +15,10 @@ from quant_warehouse.platforms.data_providers.options import (
 
 
 QuoteLoader = Callable[
-    [str, pd.Timestamp, str],
+    [str, datetime, str],
     OptionQuote | tuple[float, float, float] | None,
 ]
-UnderlyingCloseLoader = Callable[[str, pd.Timestamp], float | None]
+UnderlyingCloseLoader = Callable[[str, datetime], float | None]
 
 
 def settle_option_exit(
@@ -26,11 +27,11 @@ def settle_option_exit(
     contract_symbol: str,
     option_type: str,
     strike: float,
-    expiration: pd.Timestamp | str,
-    equity_exit_date: pd.Timestamp | str,
+    expiration: datetime | str,
+    equity_exit_date: datetime | str,
     quote_loader: QuoteLoader,
     underlying_close_loader: UnderlyingCloseLoader,
-    entry_date: pd.Timestamp | str | None = None,
+    entry_date: datetime | str | None = None,
     exit_lookback_days: int = 7,
     intrinsic_scale_min_ratio: float = 0.2,
     intrinsic_scale_max_ratio: float = 5.0,
@@ -43,12 +44,12 @@ def settle_option_exit(
     plausible shared scale.
     """
 
-    expiration_ts = pd.Timestamp(expiration).normalize()
-    equity_exit_ts = pd.Timestamp(equity_exit_date).normalize()
-    if pd.isna(expiration_ts) or pd.isna(equity_exit_ts):
+    expiration_ts = _as_datetime(expiration)
+    equity_exit_ts = _as_datetime(equity_exit_date)
+    if expiration_ts is None or equity_exit_ts is None:
         return None
     target_exit = min(equity_exit_ts, expiration_ts)
-    entry_ts = None if entry_date is None else pd.Timestamp(entry_date).normalize()
+    entry_ts = None if entry_date is None else _as_datetime(entry_date)
     symbol = str(symbol).upper()
     contract_symbol = str(contract_symbol)
 
@@ -92,17 +93,19 @@ def settle_option_exit(
 
 
 def iter_option_exit_lookup_dates(
-    target_exit: pd.Timestamp | str,
+    target_exit: datetime | str,
     exit_lookback_days: int,
-) -> tuple[pd.Timestamp, ...]:
-    target = pd.Timestamp(target_exit).normalize()
-    if pd.isna(target):
+) -> tuple[datetime, ...]:
+    target = _as_datetime(target_exit)
+    if target is None:
         return tuple()
     lookback = max(0, int(exit_lookback_days))
-    dates: list[pd.Timestamp] = [target]
+    dates: list[datetime] = [target]
     current = target
     for _ in range(lookback):
-        current = pd.Timestamp(current - BDay(1)).normalize()
+        current -= timedelta(days=1)
+        while current.weekday() >= 5:
+            current -= timedelta(days=1)
         if current not in dates:
             dates.append(current)
     return tuple(dates)
@@ -150,13 +153,13 @@ def strike_spot_scale_matches(
     return float(min_ratio) <= ratio <= float(max_ratio)
 
 
-def lookup_contract_quote(chain: pd.DataFrame, contract_symbol: str) -> tuple[float, float, float] | None:
-    if chain is None or chain.empty or "contract_symbol" not in chain.columns:
+def lookup_contract_quote(chain: pl.DataFrame, contract_symbol: str) -> tuple[float, float, float] | None:
+    if chain is None or chain.is_empty() or "contract_symbol" not in chain.columns:
         return None
-    work = chain.loc[chain["contract_symbol"].astype(str).eq(str(contract_symbol))].copy()
-    if work.empty:
+    work = chain.filter(pl.col("contract_symbol").cast(pl.String) == str(contract_symbol))
+    if work.is_empty():
         return None
-    row = work.iloc[-1]
+    row = work.tail(1).to_dicts()[0]
     bid = _finite_float(row.get("bid"))
     ask = _finite_float(row.get("ask"))
     mid = _finite_float(row.get("mid"))
@@ -173,7 +176,7 @@ def lookup_contract_quote(chain: pd.DataFrame, contract_symbol: str) -> tuple[fl
 
 def _coerce_quote(
     quote: OptionQuote | tuple[float, float, float] | None,
-    snapshot_date: pd.Timestamp,
+    snapshot_date: datetime,
 ) -> OptionQuote | None:
     if quote is None:
         return None
@@ -181,14 +184,14 @@ def _coerce_quote(
         bid = _finite_float(quote.bid)
         ask = _finite_float(quote.ask)
         mid = _finite_float(quote.mid)
-        quote_date = pd.Timestamp(quote.snapshot_date).normalize()
+        quote_date = _as_datetime(quote.snapshot_date)
     else:
         if len(quote) != 3:
             return None
         bid = _finite_float(quote[0])
         ask = _finite_float(quote[1])
         mid = _finite_float(quote[2])
-        quote_date = pd.Timestamp(snapshot_date).normalize()
+        quote_date = snapshot_date
     if mid is None and bid is not None and ask is not None:
         mid = (bid + ask) / 2.0
     if bid is None:
@@ -200,11 +203,20 @@ def _coerce_quote(
     return OptionQuote(snapshot_date=quote_date, bid=float(bid), ask=float(ask), mid=float(mid))
 
 
+def _as_datetime(value: datetime | str) -> datetime | None:
+    if isinstance(value, datetime):
+        return value.replace(hour=0, minute=0, second=0, microsecond=0)
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).replace(hour=0, minute=0, second=0, microsecond=0)
+    except ValueError:
+        return None
+
+
 def _finite_float(value: object) -> float | None:
     try:
         out = float(value)
     except (TypeError, ValueError):
         return None
-    if not np.isfinite(out):
+    if not math.isfinite(out):
         return None
     return out
