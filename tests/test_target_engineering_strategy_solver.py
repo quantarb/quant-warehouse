@@ -7,7 +7,11 @@ from quant_warehouse.platforms.data_providers.fmp.target_engineering import (
     solve_optimal_trades_generic,
     solve_trades_by_frequency,
 )
-from quant_warehouse.platforms.data_providers.fmp.target_engineering.strategy_solver import solve_side_trades_by_frequency_batched_multi_k
+from quant_warehouse.platforms.data_providers.fmp.target_engineering.strategy_solver import (
+    _solve_one_side_all_k_torch,
+    _solve_one_side_all_k_torch_batch,
+    solve_side_trades_by_frequency_batched_multi_k,
+)
 
 
 def _frame(values: list[tuple[float, float]]) -> pl.DataFrame:
@@ -72,3 +76,15 @@ def test_solve_side_trades_by_frequency_batched_multi_k_solves_sides_independent
     assert all(row["period_label"] == "M:2024-01-01" for rows in cpu[2].values() for row in rows)
     assert sum(len(rows) for rows in cpu[2].values()) >= sum(len(rows) for rows in cpu[1].values())
     assert {row["side"] for rows in cpu[2].values() for row in rows} == {"long", "short"}
+
+
+def test_batched_torch_solver_matches_individual_sequences() -> None:
+    sequences = [
+        ([10.0, 8.0, 12.0, 7.0, 15.0], [11.0, 9.0, 13.0, 8.0, 16.0]),
+        ([20.0, 18.0, 24.0, 16.0], [21.0, 19.0, 25.0, 17.0]),
+    ]
+
+    batched = _solve_one_side_all_k_torch_batch(sequences, max_k=3, min_profit_pct=0.05)
+    for index, (entry_prices, exit_prices) in enumerate(sequences):
+        individual = _solve_one_side_all_k_torch(entry_prices, exit_prices, max_k=3, min_profit_pct=0.05)
+        assert batched[index] == individual

@@ -88,14 +88,163 @@ def _solve_one_side_torch(entry_prices: Sequence[float], exit_prices: Sequence[f
 
 
 def _solve_one_side_all_k_torch(entry_prices: Sequence[float], exit_prices: Sequence[float], max_k: int, min_profit_pct: float):
-    results = torch.full((max_k + 1, max_k, 2), -1, dtype=torch.int64, device=DEVICE)
-    counts = torch.zeros(max_k + 1, dtype=torch.int64, device=DEVICE)
+    """Solve every transaction count with one shared dynamic-program pass.
+
+    The previous implementation reran the complete ``n x k`` DP once for
+    every requested k.  The state for k is independent but shares the same
+    per-date observations, so one pass through the largest k produces all
+    requested reconstructions without changing the recurrence or tie-breaks.
+    """
+
+    max_k = int(max_k)
+    if max_k <= 0 or not entry_prices or not exit_prices:
+        return [[[] for _ in range(max(0, max_k))] for _ in range(max(0, max_k) + 1)], [0] * (max(0, max_k) + 1)
+
+    ep = torch.as_tensor(entry_prices, dtype=torch.float64, device=DEVICE)
+    xp = torch.as_tensor(exit_prices, dtype=torch.float64, device=DEVICE)
+    n = int(ep.numel())
+    cash_val = torch.zeros(max_k + 1, dtype=torch.float64, device=DEVICE)
+    hold_val = torch.full((max_k + 1,), -torch.inf, dtype=torch.float64, device=DEVICE)
+    hold_entry_day = torch.full((max_k + 1,), -1, dtype=torch.int64, device=DEVICE)
+    hold_entry_px = torch.zeros(max_k + 1, dtype=torch.float64, device=DEVICE)
+    cash_action = torch.zeros((n, max_k + 1), dtype=torch.int64, device=DEVICE)
+    cash_entry_day = torch.zeros((n, max_k + 1), dtype=torch.int64, device=DEVICE)
+
+    for i in range(n):
+        held = hold_val[1:]
+        denom = torch.abs(hold_entry_px[1:])
+        pct = torch.where(denom > 0.0, (xp[i] - hold_entry_px[1:]) / denom, torch.zeros_like(denom))
+        candidate_cash = held + xp[i]
+        update_cash = (
+            torch.isfinite(held)
+            & (pct >= min_profit_pct)
+            & (candidate_cash > cash_val[1:] + 1e-12)
+        )
+        cash_val[1:] = torch.where(update_cash, candidate_cash, cash_val[1:])
+        cash_action[i, 1:] = update_cash.to(torch.int64)
+        cash_entry_day[i, 1:] = torch.where(update_cash, hold_entry_day[1:], cash_entry_day[i, 1:])
+
+        candidate_hold = cash_val[:-1] - ep[i]
+        update_hold = candidate_hold > hold_val[1:]
+        hold_val[1:] = torch.where(update_hold, candidate_hold, hold_val[1:])
+        hold_entry_day[1:] = torch.where(update_hold, torch.full_like(hold_entry_day[1:], i), hold_entry_day[1:])
+        hold_entry_px[1:] = torch.where(update_hold, torch.ones_like(hold_entry_px[1:]) * ep[i], hold_entry_px[1:])
+
+    def reconstruct(target_k: int) -> list[list[int]]:
+        t = int(target_k)
+        i = n - 1
+        trades: list[tuple[int, int]] = []
+        while t > 0 and i >= 0 and len(trades) < target_k:
+            if int(cash_action[i, t]) == 0:
+                i -= 1
+                continue
+            entry_i = int(cash_entry_day[i, t])
+            if entry_i < i:
+                trades.append((entry_i, i))
+                t -= 1
+                i = entry_i - 1
+            else:
+                i -= 1
+        trades.reverse()
+        return [[int(entry), int(exit)] for entry, exit in trades]
+
+    results: list[list[list[int]]] = [[] for _ in range(max_k + 1)]
+    counts: list[int] = [0] * (max_k + 1)
     for k in range(1, max_k + 1):
-        trades, count = _solve_one_side_torch(entry_prices, exit_prices, k, min_profit_pct)
-        if count:
-            results[k, :count] = torch.as_tensor(trades, dtype=torch.int64, device=DEVICE)
-        counts[k] = count
-    return results.tolist(), counts.tolist()
+        trades = reconstruct(k)
+        results[k] = trades
+        counts[k] = len(trades)
+    return results, counts
+
+
+def _solve_one_side_all_k_torch_batch(
+    price_sequences: Sequence[tuple[Sequence[float], Sequence[float]]],
+    max_k: int,
+    min_profit_pct: float,
+) -> list[tuple[list[list[list[int]]], list[int]]]:
+    """Run the shared DP for a bounded batch of variable-length sequences."""
+
+    if not price_sequences:
+        return []
+    max_k = int(max_k)
+    lengths = [min(len(entry), len(exit_)) for entry, exit_ in price_sequences]
+    batch_size = len(lengths)
+    max_n = max(lengths, default=0)
+    if max_k <= 0 or max_n == 0:
+        return [([], [0] * (max(0, max_k) + 1)) for _ in lengths]
+
+    padded_entry = [
+        [float(value) for value in entry[:length]] + [0.0] * (max_n - length)
+        for (entry, _), length in zip(price_sequences, lengths)
+    ]
+    padded_exit = [
+        [float(value) for value in exit_[:length]] + [0.0] * (max_n - length)
+        for (_, exit_), length in zip(price_sequences, lengths)
+    ]
+    ep = torch.tensor(padded_entry, dtype=torch.float64, device=DEVICE)
+    xp = torch.tensor(padded_exit, dtype=torch.float64, device=DEVICE)
+    lengths_t = torch.tensor(lengths, dtype=torch.int64, device=DEVICE)
+    cash_val = torch.zeros((batch_size, max_k + 1), dtype=torch.float64, device=DEVICE)
+    hold_val = torch.full((batch_size, max_k + 1), -torch.inf, dtype=torch.float64, device=DEVICE)
+    hold_entry_day = torch.full((batch_size, max_k + 1), -1, dtype=torch.int64, device=DEVICE)
+    hold_entry_px = torch.zeros((batch_size, max_k + 1), dtype=torch.float64, device=DEVICE)
+    cash_action = torch.zeros((batch_size, max_n, max_k + 1), dtype=torch.int64, device=DEVICE)
+    cash_entry_day = torch.zeros((batch_size, max_n, max_k + 1), dtype=torch.int64, device=DEVICE)
+
+    for i in range(max_n):
+        active = lengths_t > i
+        held = hold_val[:, 1:]
+        denom = torch.abs(hold_entry_px[:, 1:])
+        pct = torch.where(denom > 0.0, (xp[:, i, None] - hold_entry_px[:, 1:]) / denom, torch.zeros_like(denom))
+        candidate_cash = held + xp[:, i, None]
+        update_cash = (
+            active[:, None]
+            & torch.isfinite(held)
+            & (pct >= min_profit_pct)
+            & (candidate_cash > cash_val[:, 1:] + 1e-12)
+        )
+        cash_val[:, 1:] = torch.where(update_cash, candidate_cash, cash_val[:, 1:])
+        cash_action[:, i, 1:] = update_cash.to(torch.int64)
+        cash_entry_day[:, i, 1:] = torch.where(update_cash, hold_entry_day[:, 1:], cash_entry_day[:, i, 1:])
+
+        candidate_hold = cash_val[:, :-1] - ep[:, i, None]
+        update_hold = active[:, None] & (candidate_hold > hold_val[:, 1:])
+        hold_val[:, 1:] = torch.where(update_hold, candidate_hold, hold_val[:, 1:])
+        hold_entry_day[:, 1:] = torch.where(
+            update_hold,
+            torch.full_like(hold_entry_day[:, 1:], i),
+            hold_entry_day[:, 1:],
+        )
+        hold_entry_px[:, 1:] = torch.where(
+            update_hold,
+            torch.ones_like(hold_entry_px[:, 1:]) * ep[:, i, None],
+            hold_entry_px[:, 1:],
+        )
+
+    results: list[tuple[list[list[list[int]]], list[int]]] = []
+    for batch_index, length in enumerate(lengths):
+        per_k: list[list[list[int]]] = [[] for _ in range(max_k + 1)]
+        counts = [0] * (max_k + 1)
+        for k in range(1, max_k + 1):
+            t = k
+            i = length - 1
+            trades: list[tuple[int, int]] = []
+            while t > 0 and i >= 0 and len(trades) < k:
+                if int(cash_action[batch_index, i, t]) == 0:
+                    i -= 1
+                    continue
+                entry_i = int(cash_entry_day[batch_index, i, t])
+                if entry_i < i:
+                    trades.append((entry_i, i))
+                    t -= 1
+                    i = entry_i - 1
+                else:
+                    i -= 1
+            trades.reverse()
+            per_k[k] = [[int(entry), int(exit_)] for entry, exit_ in trades]
+            counts[k] = len(trades)
+        results.append((per_k, counts))
+    return results
 
 
 def solve_optimal_trades_generic(
@@ -424,31 +573,49 @@ def solve_side_trades_by_frequency_batched_multi_k(
     if not task_frames:
         return results
 
-    for task_idx, symbol in enumerate(task_symbols):
-        group = task_frames[task_idx]
-        side = task_sides[task_idx]
-        entry_col, exit_col = task_columns[task_idx]
-        trades_by_k = solve_optimal_trades_all_k_generic(
-            group,
-            ks=normalized_ks,
-            side=side,
-            min_profit_pct=min_profit_pct,
-            entry_price_col=entry_col,
-            exit_price_col=exit_col,
-        )
-        for k, trades in trades_by_k.items():
-            result_for_k = results.setdefault(int(k), {symbol: [] for symbol in symbols})
-            for trade in trades:
-                result_for_k.setdefault(symbol, []).append(
-                    {
-                        "side": trade.side,
-                        "entry_row": trade.entry_row,
-                        "exit_row": trade.exit_row,
-                        "entry_price": trade.entry_price,
-                        "exit_price": trade.exit_price,
-                        "profit": trade.profit,
-                        "period_label": task_labels[task_idx],
-                    }
-                )
+    batch_size = 256
+    for side in normalized_sides:
+        side_indices = [index for index, task_side in enumerate(task_sides) if task_side == side]
+        for batch_start in range(0, len(side_indices), batch_size):
+            batch_indices = side_indices[batch_start : batch_start + batch_size]
+            sequences: list[tuple[list[float], list[float]]] = []
+            for task_idx in batch_indices:
+                group = task_frames[task_idx]
+                entry_col, exit_col = task_columns[task_idx]
+                entry_prices = group[entry_col].cast(pl.Float64, strict=False).to_list()
+                exit_prices = group[exit_col].cast(pl.Float64, strict=False).to_list()
+                if side == "short":
+                    entry_prices = [-value for value in entry_prices]
+                    exit_prices = [-value for value in exit_prices]
+                sequences.append((entry_prices, exit_prices))
+
+            batch_results = _solve_one_side_all_k_torch_batch(
+                sequences,
+                max_k=max(normalized_ks),
+                min_profit_pct=float(min_profit_pct),
+            )
+            for task_idx, (trades_by_k, counts) in zip(batch_indices, batch_results):
+                symbol = task_symbols[task_idx]
+                group = task_frames[task_idx]
+                entry_col, exit_col = task_columns[task_idx]
+                raw_entry_prices = group[entry_col].cast(pl.Float64, strict=False).to_list()
+                raw_exit_prices = group[exit_col].cast(pl.Float64, strict=False).to_list()
+                for k in normalized_ks:
+                    result_for_k = results.setdefault(int(k), {symbol: [] for symbol in symbols})
+                    for entry_i, exit_i in trades_by_k[k][: int(counts[k])]:
+                        raw_entry = float(raw_entry_prices[entry_i])
+                        raw_exit = float(raw_exit_prices[exit_i])
+                        profit = raw_exit - raw_entry if side == "long" else raw_entry - raw_exit
+                        result_for_k.setdefault(symbol, []).append(
+                            {
+                                "side": side,
+                                "entry_row": group.row(entry_i, named=True),
+                                "exit_row": group.row(exit_i, named=True),
+                                "entry_price": raw_entry,
+                                "exit_price": raw_exit,
+                                "profit": profit,
+                                "period_label": task_labels[task_idx],
+                            }
+                        )
 
     return results
