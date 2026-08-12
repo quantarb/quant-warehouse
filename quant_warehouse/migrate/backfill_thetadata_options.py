@@ -5,7 +5,6 @@ import polars as pl
 import json
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date as date_type, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Literal, Mapping, MutableSet, Sequence
@@ -374,76 +373,162 @@ def backfill_thetadata_options(
     )
     started_at = datetime.now(timezone.utc).isoformat()
     results: list[dict[str, object]] = []
-    total = len(target_symbols)
+    total_symbols = len(target_symbols)
+    today = datetime.now(timezone.utc).date()
+    requested_dates = [value for value in _business_days(start, end) if value.date() < today]
+    requested_keys = [(symbol, snapshot_date) for snapshot_date in requested_dates for symbol in target_symbols]
 
-    def _run_symbol(index: int, symbol: str) -> dict[str, object]:
-        row: dict[str, object] = {"symbol": symbol}
+    # Use the same resumable cache preflight as the historical range backfill,
+    # but build the date set from the full requested universe rather than from
+    # oracle trade windows.
+    cached_by_symbol: dict[str, set[datetime]] = {}
+    if requested_keys and skip_existing and not overwrite:
+        bulk = option_chain_cached_date_summary_bulk(
+            target_symbols,
+            requested_dates[0],
+            requested_dates[-1],
+            required_columns=THETADATA_RICH_OPTION_COLUMNS,
+        )
+        for symbol in target_symbols:
+            cached_by_symbol[symbol] = {
+                value.replace(hour=0, minute=0, second=0, microsecond=0)
+                if isinstance(value, datetime)
+                else datetime.fromisoformat(str(value)[:10])
+                for value in bulk.get(symbol, (set(), 0))[0]
+            }
+
+    missing = [
+        key for key in requested_keys
+        if overwrite or key[1] not in cached_by_symbol.get(key[0], set())
+    ]
+    missing.sort(key=lambda item: (item[1], item[0]), reverse=True)
+
+    # Probe only symbols with no cached option dates. This preserves the
+    # historical DB-first behavior: a symbol with any stored option history
+    # goes directly to its missing-date requests; only completely uncached
+    # symbols need a ThetaData availability probe.
+    unavailable_symbols: set[str] = set()
+    probed_keys: set[tuple[str, datetime]] = set()
+    if skip_existing and not overwrite:
+        probe_symbols = [symbol for symbol in target_symbols if not cached_by_symbol.get(symbol)]
+    else:
+        probe_symbols = list(target_symbols)
+    probe_dates = {symbol: requested_dates[-1] for symbol in probe_symbols} if requested_dates else {}
+    for probe_index, symbol in enumerate(probe_symbols, start=1):
+        probe_date = probe_dates.get(symbol)
+        if probe_date is None:
+            continue
+        if callable(progress_logger):
+            progress_logger(
+                f"[thetadata-options] probe {probe_index}/{len(probe_symbols)} "
+                f"{symbol} {probe_date.date()}"
+            )
         try:
-            if skip_existing and not overwrite and _options_range_cached(symbol, start, end):
-                row.update({"skipped": True, "reason": "cached_range"})
-                return row
-
             manifest = download_option_snapshots_for_range(
                 symbol,
-                start,
-                end,
+                probe_date,
+                probe_date,
                 spec=download_spec,
                 overwrite=overwrite,
             )
-            row.update({"skipped": False, **manifest})
-        except Exception as exc:
-            row.update({"skipped": False, "error": str(exc)})
-        finally:
-            row["index"] = index
-            row["total"] = total
-        return row
-
-    def _record(row: dict[str, object]) -> None:
-        symbol = str(row["symbol"])
-        results.append(row)
-        if not row.get("error") and not row.get("skipped"):
-            _upsert_options_catalog_state(
-                warehouse,
-                symbol=symbol,
-                start_date=str(row["start_date"]),
-                end_date=str(row["end_date"]),
-                snapshot_days=int(row.get("snapshot_days") or 0),
-                contracts_total=int(row.get("contracts_total") or 0),
+            probed_keys.add((symbol, probe_date))
+            is_empty = (
+                int(manifest.get("snapshot_days") or 0) <= 0
+                and int(manifest.get("contracts_total") or 0) <= 0
+                and int(manifest.get("fetched_rows") or 0) <= 0
             )
-        if callable(progress_logger):
-            index = int(row.get("index") or len(results))
-            if row.get("error"):
-                progress_logger(f"[thetadata-options] {index}/{total} error {symbol}: {row.get('error')}")
-            elif row.get("skipped"):
-                progress_logger(f"[thetadata-options] {index}/{total} skipped cached {symbol}")
-            else:
-                progress_logger(
-                    f"[thetadata-options] {index}/{total} {symbol} "
-                    f"days={row.get('snapshot_days')} contracts={row.get('contracts_total')}"
+            if is_empty:
+                unavailable_symbols.add(symbol)
+            elif not manifest.get("cached_only"):
+                _upsert_options_catalog_state(
+                    warehouse,
+                    symbol=symbol,
+                    start_date=str(manifest["start_date"]),
+                    end_date=str(manifest["end_date"]),
+                    snapshot_days=int(manifest.get("snapshot_days") or 0),
+                    contracts_total=int(manifest.get("contracts_total") or 0),
                 )
+            if callable(progress_logger):
+                status = "empty probe" if is_empty else "probe"
+                progress_logger(
+                    f"[thetadata-options] {status} {probe_index}/{len(probe_symbols)} "
+                    f"{symbol} {probe_date.date()} contracts={manifest.get('contracts_total')}"
+                )
+        except Exception as exc:
+            if callable(progress_logger):
+                progress_logger(f"[thetadata-options] probe error {symbol} {probe_date.date()}: {exc}")
 
-    workers = max(1, int(max_workers))
-    if workers == 1:
-        for index, symbol in enumerate(target_symbols, start=1):
-            row = _run_symbol(index, symbol)
-            _record(row)
-            if request_sleep > 0 and index < total:
-                time.sleep(float(request_sleep))
-    else:
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = {
-                executor.submit(_run_symbol, index, symbol): (index, symbol)
-                for index, symbol in enumerate(target_symbols, start=1)
-            }
-            completed_count = 0
-            for future in as_completed(futures):
-                completed_count += 1
-                row = future.result()
-                _record(row)
-                if request_sleep > 0 and completed_count < total:
-                    time.sleep(float(request_sleep))
+    if callable(progress_logger):
+        progress_logger(
+            f"[thetadata-options] planned symbols={total_symbols:,} dates={len(requested_dates):,} "
+            f"cached={len(requested_keys) - len(missing):,} missing={len(missing):,} order=newest_first"
+        )
 
-    completed = [row for row in results if not row.get("error")]
+    download_keys = [key for key in missing if key not in probed_keys and key[0] not in unavailable_symbols]
+    total_downloads = len(download_keys)
+    for download_index, (symbol, snapshot_date) in enumerate(download_keys, start=1):
+        try:
+            if callable(progress_logger):
+                progress_logger(
+                    f"[thetadata-options] downloading {download_index}/{total_downloads} "
+                    f"{symbol} {snapshot_date.date()}"
+                )
+            manifest = download_option_snapshots_for_range(
+                symbol,
+                snapshot_date,
+                snapshot_date,
+                spec=download_spec,
+                overwrite=overwrite,
+            )
+            is_empty = (
+                int(manifest.get("snapshot_days") or 0) <= 0
+                and int(manifest.get("contracts_total") or 0) <= 0
+                and int(manifest.get("fetched_rows") or 0) <= 0
+            )
+            results.append({
+                "symbol": symbol,
+                "snapshot_date": snapshot_date.date().isoformat(),
+                "downloaded": not is_empty,
+                "skipped": is_empty,
+                "manifest": manifest,
+            })
+            if not is_empty:
+                _upsert_options_catalog_state(
+                    warehouse,
+                    symbol=symbol,
+                    start_date=str(manifest["start_date"]),
+                    end_date=str(manifest["end_date"]),
+                    snapshot_days=int(manifest.get("snapshot_days") or 0),
+                    contracts_total=int(manifest.get("contracts_total") or 0),
+                )
+            if callable(progress_logger):
+                progress_logger(
+                    f"[thetadata-options] {download_index}/{total_downloads} {symbol} "
+                    f"{snapshot_date.date()} contracts={manifest.get('contracts_total')}"
+                )
+        except Exception as exc:
+            results.append({
+                "symbol": symbol,
+                "snapshot_date": snapshot_date.date().isoformat(),
+                "skipped": False,
+                "error": str(exc),
+            })
+            if callable(progress_logger):
+                progress_logger(f"[thetadata-options] error {symbol} {snapshot_date.date()}: {exc}")
+        if request_sleep > 0 and download_index < total_downloads:
+            time.sleep(float(request_sleep))
+
+    skipped_cached = len(requested_keys) - len(missing)
+    skipped_unavailable = sum(1 for symbol, snapshot_date in missing if symbol in unavailable_symbols and (symbol, snapshot_date) not in probed_keys)
+
+    requested_workers = max(1, int(max_workers))
+    workers = 1
+    if requested_workers != workers and callable(progress_logger):
+        progress_logger(
+            f"[thetadata-options] max_workers={requested_workers} requested; "
+            "ThetaData supports one worker, using max_workers=1"
+        )
+    completed = [row for row in results if row.get("downloaded") and not row.get("error")]
     skipped = [row for row in results if row.get("skipped")]
     failed = [row for row in results if row.get("error")]
     return {
@@ -455,10 +540,16 @@ def backfill_thetadata_options(
         "min_market_cap": min_market_cap,
         "max_market_cap": max_market_cap,
         "require_prices": require_prices,
-        "symbols_requested": total,
-        "symbols_completed": len(completed),
-        "symbols_skipped": len(skipped),
-        "symbols_failed": len(failed),
+        "symbols_requested": total_symbols,
+        "symbols_completed": len({str(row["symbol"]) for row in completed}),
+        "symbols_skipped": len({str(row["symbol"]) for row in skipped}) + len(unavailable_symbols),
+        "symbols_failed": len({str(row["symbol"]) for row in failed}),
+        "dates_requested": len(requested_keys),
+        "dates_cached": skipped_cached,
+        "dates_missing": len(missing),
+        "dates_downloaded": len(completed),
+        "dates_skipped_unavailable": skipped_unavailable,
+        "sort_order": "snapshot_date_desc",
         "us_only": us_only,
         "download_spec": {
             "endpoint": THETADATA_OPTION_HISTORY_ENDPOINT,
