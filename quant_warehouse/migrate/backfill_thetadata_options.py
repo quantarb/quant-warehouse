@@ -466,12 +466,25 @@ def backfill_thetadata_options(
 
     download_keys = [key for key in missing if key not in probed_keys and key[0] not in unavailable_symbols]
     total_downloads = len(download_keys)
+    symbol_cached_days = {
+        symbol: sum(1 for value in cached_by_symbol.get(symbol, set()) if start <= value <= end)
+        for symbol in target_symbols
+    }
+    symbol_missing_days = {
+        symbol: sum(1 for key_symbol, _snapshot_date in download_keys if key_symbol == symbol)
+        for symbol in target_symbols
+    }
+    symbol_downloaded_days = dict(symbol_cached_days)
     for download_index, (symbol, snapshot_date) in enumerate(download_keys, start=1):
         try:
             if callable(progress_logger):
+                year = snapshot_date.year
                 progress_logger(
-                    f"[thetadata-options] downloading {download_index}/{total_downloads} "
-                    f"{symbol} {snapshot_date.date()}"
+                    f"[thetadata-options] {symbol} {year}: "
+                    f"{symbol_downloaded_days.get(symbol, 0)} trading days downloaded, "
+                    f"{symbol_missing_days.get(symbol, 0)} days left; "
+                    f"downloading {symbol} {snapshot_date.date()} "
+                    f"({download_index}/{total_downloads})"
                 )
             manifest = download_option_snapshots_for_range(
                 symbol,
@@ -493,6 +506,7 @@ def backfill_thetadata_options(
                 "manifest": manifest,
             })
             if not is_empty:
+                symbol_downloaded_days[symbol] = symbol_downloaded_days.get(symbol, 0) + 1
                 _upsert_options_catalog_state(
                     warehouse,
                     symbol=symbol,
@@ -503,9 +517,13 @@ def backfill_thetadata_options(
                 )
             if callable(progress_logger):
                 progress_logger(
-                    f"[thetadata-options] {download_index}/{total_downloads} {symbol} "
-                    f"{snapshot_date.date()} contracts={manifest.get('contracts_total')}"
+                    f"[thetadata-options] {symbol} {snapshot_date.year}: "
+                    f"{symbol_downloaded_days.get(symbol, 0)} trading days downloaded, "
+                    f"{max(0, symbol_missing_days.get(symbol, 0) - 1)} days left; "
+                    f"finished {symbol} {snapshot_date.date()} "
+                    f"contracts={manifest.get('contracts_total')}"
                 )
+            symbol_missing_days[symbol] = max(0, symbol_missing_days.get(symbol, 0) - 1)
         except Exception as exc:
             results.append({
                 "symbol": symbol,
@@ -514,7 +532,13 @@ def backfill_thetadata_options(
                 "error": str(exc),
             })
             if callable(progress_logger):
-                progress_logger(f"[thetadata-options] error {symbol} {snapshot_date.date()}: {exc}")
+                progress_logger(
+                    f"[thetadata-options] {symbol} {snapshot_date.year}: "
+                    f"{symbol_downloaded_days.get(symbol, 0)} trading days downloaded, "
+                    f"{max(0, symbol_missing_days.get(symbol, 0) - 1)} days left; "
+                    f"error {symbol} {snapshot_date.date()}: {exc}"
+                )
+            symbol_missing_days[symbol] = max(0, symbol_missing_days.get(symbol, 0) - 1)
         if request_sleep > 0 and download_index < total_downloads:
             time.sleep(float(request_sleep))
 
