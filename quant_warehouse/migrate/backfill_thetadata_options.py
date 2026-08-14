@@ -41,12 +41,6 @@ def _day(value: object) -> datetime:
     return datetime.fromisoformat(str(value)[:10])
 
 
-def _is_current_day_expiration_error(exc: BaseException) -> bool:
-    """Identify ThetaData's current-day full-chain restriction."""
-
-    return "cannot fetch current-day data without specifying an expiration" in str(exc).lower()
-
-
 def fmp_trading_days_for_year(
     year: int,
     *,
@@ -415,7 +409,6 @@ def backfill_thetadata_options(
     # symbols need a ThetaData availability probe.
     unavailable_symbols: set[str] = set()
     probed_keys: set[tuple[str, datetime]] = set()
-    deferred_current_day_dates: set[datetime] = set()
     if skip_existing and not overwrite:
         probe_symbols = [symbol for symbol in target_symbols if not cached_by_symbol.get(symbol)]
     else:
@@ -424,13 +417,6 @@ def backfill_thetadata_options(
     for probe_index, symbol in enumerate(probe_symbols, start=1):
         probe_date = probe_dates.get(symbol)
         if probe_date is None:
-            continue
-        if probe_date in deferred_current_day_dates:
-            if callable(progress_logger):
-                progress_logger(
-                    f"[thetadata-options] defer probe {symbol} {probe_date.date()}: "
-                    "ThetaData current-day restriction already detected"
-                )
             continue
         if callable(progress_logger):
             progress_logger(
@@ -469,14 +455,6 @@ def backfill_thetadata_options(
                     f"{symbol} {probe_date.date()} contracts={manifest.get('contracts_total')}"
                 )
         except Exception as exc:
-            if _is_current_day_expiration_error(exc):
-                deferred_current_day_dates.add(probe_date)
-                if callable(progress_logger):
-                    progress_logger(
-                        f"[thetadata-options] defer {symbol} {probe_date.date()}: "
-                        "ThetaData currently treats this as current-day; full chain requires a completed EOD date"
-                    )
-                continue
             if callable(progress_logger):
                 progress_logger(f"[thetadata-options] probe error {symbol} {probe_date.date()}: {exc}")
 
@@ -486,12 +464,7 @@ def backfill_thetadata_options(
             f"cached={len(requested_keys) - len(missing):,} missing={len(missing):,} order=newest_first"
         )
 
-    download_keys = [
-        key for key in missing
-        if key not in probed_keys
-        and key[0] not in unavailable_symbols
-        and key[1] not in deferred_current_day_dates
-    ]
+    download_keys = [key for key in missing if key not in probed_keys and key[0] not in unavailable_symbols]
     total_downloads = len(download_keys)
     symbol_cached_days = {
         symbol: sum(1 for value in cached_by_symbol.get(symbol, set()) if start <= value <= end)
@@ -503,9 +476,6 @@ def backfill_thetadata_options(
     }
     symbol_downloaded_days = dict(symbol_cached_days)
     for download_index, (symbol, snapshot_date) in enumerate(download_keys, start=1):
-        if snapshot_date in deferred_current_day_dates:
-            symbol_missing_days[symbol] = max(0, symbol_missing_days.get(symbol, 0) - 1)
-            continue
         try:
             if callable(progress_logger):
                 year = snapshot_date.year
@@ -555,21 +525,6 @@ def backfill_thetadata_options(
                 )
             symbol_missing_days[symbol] = max(0, symbol_missing_days.get(symbol, 0) - 1)
         except Exception as exc:
-            if _is_current_day_expiration_error(exc):
-                deferred_current_day_dates.add(snapshot_date)
-                results.append({
-                    "symbol": symbol,
-                    "snapshot_date": snapshot_date.date().isoformat(),
-                    "deferred": True,
-                    "reason": "thetadata_current_day_requires_expiration",
-                })
-                symbol_missing_days[symbol] = max(0, symbol_missing_days.get(symbol, 0) - 1)
-                if callable(progress_logger):
-                    progress_logger(
-                        f"[thetadata-options] defer {symbol} {snapshot_date.date()}: "
-                        "ThetaData currently treats this as current-day; will retry after EOD"
-                    )
-                continue
             results.append({
                 "symbol": symbol,
                 "snapshot_date": snapshot_date.date().isoformat(),
@@ -618,7 +573,6 @@ def backfill_thetadata_options(
         "dates_missing": len(missing),
         "dates_downloaded": len(completed),
         "dates_skipped_unavailable": skipped_unavailable,
-        "dates_deferred_current_day": len(deferred_current_day_dates),
         "sort_order": "snapshot_date_desc",
         "us_only": us_only,
         "download_spec": {
