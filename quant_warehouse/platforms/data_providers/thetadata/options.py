@@ -38,8 +38,10 @@ def _datetime_expr(frame: pl.DataFrame, column: str) -> pl.Expr:
     return ((pl.col(column).str.to_datetime(strict=False, time_zone="UTC") if frame.schema[column] == pl.String
              else pl.col(column).cast(pl.Datetime, strict=False)).dt.replace_time_zone(None).dt.truncate("1d"))
 
-# ThetaData EOD history rejects spans longer than 365 calendar days.
-THETADATA_MAX_EOD_SPAN_DAYS = 364
+# Full-chain requests are deliberately one trading date at a time. This keeps
+# the request boundary unambiguous and avoids ThetaData treating a range as a
+# current-day chain request.
+THETADATA_MAX_EOD_SPAN_DAYS = 0
 THETADATA_BACKFILL_WINDOW_DAYS = 7
 THETADATA_FALLBACK_WINDOW_DAYS = 1
 OPTIONS_THETADATA_EOD_LIBRARY = "options_thetadata_eod"
@@ -158,7 +160,7 @@ def _iter_eod_date_chunks(
     *,
     max_span_days: int = THETADATA_MAX_EOD_SPAN_DAYS,
 ) -> Iterator[tuple[date, date]]:
-    """Yield [start, end] date pairs that respect ThetaData's max EOD span."""
+    """Yield exactly one ``[date, date]`` request at a time."""
 
     start = _day(start_date)
     end = _day(end_date)

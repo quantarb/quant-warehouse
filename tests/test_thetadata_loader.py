@@ -326,10 +326,11 @@ def test_cached_date_summary_requires_rich_greeks_columns() -> None:
     assert rich_rows == 1
 
 
-def test_iter_eod_date_chunks_splits_long_ranges() -> None:
+def test_iter_eod_date_chunks_yields_one_day_requests() -> None:
     chunks = list(_iter_eod_date_chunks("2024-01-01", "2026-06-20"))
-    assert len(chunks) >= 2
-    assert chunks[0] == (date(2024, 1, 1), date(2024, 12, 30))
+    assert len(chunks) > 500
+    assert all(start == end for start, end in chunks)
+    assert chunks[0] == (date(2024, 1, 1), date(2024, 1, 1))
     assert chunks[-1][1] == date(2026, 6, 20)
 
 
@@ -379,7 +380,7 @@ def test_fetch_option_history_eod_chunks_requests(monkeypatch) -> None:
     assert not frame.is_empty()
     assert len(calls) >= 2
     for start, end in calls:
-        assert (end - start).days <= 364
+        assert start == end
 
 
 def test_thetadata_download_apis_reject_contract_filters() -> None:
@@ -588,11 +589,15 @@ def test_download_option_snapshots_for_range_uses_large_backfill_window(monkeypa
         spec=ThetaDataDownloadSpec(backfill_window_days=180),
     )
 
-    assert calls == [(datetime(2025, 1, 2), datetime(2025, 2, 28))]
+    assert all(start == end for start, end in calls)
+    assert [start for start, _end in calls] == [
+        datetime.combine(day, datetime.min.time())
+        for day in _business_days("2025-01-02", "2025-02-28")
+    ]
     assert manifest["fetched_rows"] == len(_business_days("2025-01-02", "2025-02-28"))
 
 
-def test_download_option_snapshots_for_range_falls_back_after_large_request_error(monkeypatch) -> None:
+def test_download_option_snapshots_for_range_never_requests_multiple_days(monkeypatch) -> None:
     backend = _MemoryBackend()
     calls: list[tuple[datetime, datetime]] = []
 
@@ -600,8 +605,6 @@ def test_download_option_snapshots_for_range_falls_back_after_large_request_erro
         start = _ts(start_date)
         end = _ts(end_date)
         calls.append((start, end))
-        if (end - start).days > 10:
-            raise RuntimeError("range too large")
         rows = []
         for ts in _business_days(start, end):
             rows.append(
@@ -635,8 +638,9 @@ def test_download_option_snapshots_for_range_falls_back_after_large_request_erro
         spec=ThetaDataDownloadSpec(backfill_window_days=180, fallback_window_days=7),
     )
 
-    assert calls[0] == (datetime(2025, 1, 2), datetime(2025, 1, 24))
-    assert len(calls) > 1
+    assert calls
+    assert all(start == end for start, end in calls)
+    assert len(calls) == len(_business_days("2025-01-02", "2025-01-24"))
     assert manifest["fetched_rows"] > 0
 
 
