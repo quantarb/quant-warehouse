@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from functools import lru_cache
 from typing import Any, Iterator, Literal, Mapping, Sequence
 
 import polars as pl
@@ -201,6 +202,61 @@ def fetch_option_history_eod(
     return normalize_thetadata_option_chain(pl.concat(frames, how="diagonal_relaxed"))
 
 
+def fetch_option_history_eod_by_expiration_ranges(
+    symbol: str,
+    start_date: date | str | datetime,
+    end_date: date | str | datetime,
+    *,
+    api_key: str | None = None,
+    spec: ThetaDataDownloadSpec | None = None,
+) -> Frame:
+    """Download a full chain using one date-range request per expiration.
+
+    ThetaData permits ranges when ``expiration`` is explicit. This is the
+    efficient path for historical backfills; wildcard full-chain requests
+    remain day-by-day because ThetaData rejects wildcard current-day calls.
+    """
+    download_spec = spec or ThetaDataDownloadSpec()
+    if _day(start_date) > _day(end_date):
+        return pl.DataFrame()
+    from quant_warehouse.ingest.credentials import resolve_thetadata_api_key
+
+    resolved_api_key = str(api_key or resolve_thetadata_api_key(required=True)).strip()
+    client = _thetadata_client(resolved_api_key)
+    range_start = _day(start_date).date()
+    expirations = [
+        expiration
+        for expiration in _extract_expiration_dates(client.option_list_expirations(str(symbol).upper()))
+        if expiration >= range_start
+    ]
+    frames: list[Frame] = []
+    for expiration in expirations:
+        try:
+            raw = client.option_history_greeks_eod(
+                symbol=str(symbol).upper(),
+                expiration=expiration,
+                start_date=_day(start_date).date(),
+                end_date=_day(end_date).date(),
+                strike="*",
+                right="both",
+                annual_dividend=download_spec.annual_dividend,
+                rate_type=download_spec.rate_type,
+                rate_value=download_spec.rate_value,
+                version=download_spec.version,
+                underlyer_use_nbbo=bool(download_spec.underlyer_use_nbbo),
+            )
+        except Exception as exc:
+            if _is_thetadata_no_data_error(exc):
+                continue
+            raise
+        frame = _as_polars_frame(raw)
+        if not frame.is_empty():
+            frames.append(frame)
+    if not frames:
+        return pl.DataFrame()
+    return normalize_thetadata_option_chain(pl.concat(frames, how="diagonal_relaxed"))
+
+
 def _fetch_option_history_eod_openbb(
     symbol: str,
     start_date: date | str | datetime,
@@ -209,27 +265,141 @@ def _fetch_option_history_eod_openbb(
     api_key: str | None = None,
     spec: ThetaDataDownloadSpec,
 ) -> Frame:
-    result = fetch_openbb(
-        "options_eod",
-        symbol=str(symbol).upper(),
-        provider="thetadata",
-        start_date=start_date,
-        end_date=end_date,
-        expiration="*",
-        strike="*",
-        right="both",
-        max_dte=None,
-        strike_range=None,
-        require_bid_ask=False,
-        min_ask=0.0,
-        include_greeks=True,
-        annual_dividend=spec.annual_dividend,
-        rate_type=spec.rate_type,
-        rate_value=spec.rate_value,
-        version=spec.version,
-        underlyer_use_nbbo=bool(spec.underlyer_use_nbbo),
-    )
-    return result.df.clone()
+    try:
+        result = fetch_openbb(
+            "options_eod",
+            symbol=str(symbol).upper(),
+            provider="thetadata",
+            start_date=start_date,
+            end_date=end_date,
+            expiration="*",
+            strike="*",
+            right="both",
+            max_dte=None,
+            strike_range=None,
+            require_bid_ask=False,
+            min_ask=0.0,
+            include_greeks=True,
+            annual_dividend=spec.annual_dividend,
+            rate_type=spec.rate_type,
+            rate_value=spec.rate_value,
+            version=spec.version,
+            underlyer_use_nbbo=bool(spec.underlyer_use_nbbo),
+        )
+        return result.df.clone()
+    except Exception as exc:
+        if not _is_thetadata_current_day_wildcard_error(exc):
+            raise
+        return _fetch_current_day_by_expiration(
+            symbol,
+            start_date,
+            end_date,
+            api_key=api_key,
+            spec=spec,
+        )
+
+
+def _is_thetadata_current_day_wildcard_error(exc: BaseException) -> bool:
+    return "cannot fetch current-day data without specifying an expiration" in str(exc).lower()
+
+
+def _is_thetadata_no_data_error(exc: BaseException) -> bool:
+    message = str(exc).lower()
+    return "no data found for" in message or "no data found for your request" in message
+
+
+@lru_cache(maxsize=4)
+def _thetadata_client(api_key: str):
+    """Create a reusable low-level client for endpoints OpenBB does not expose."""
+    from thetadata import ThetaClient
+
+    return ThetaClient(api_key=api_key, dataframe_type="polars")
+
+
+def _fetch_current_day_by_expiration(
+    symbol: str,
+    start_date: date | str | datetime,
+    end_date: date | str | datetime,
+    *,
+    api_key: str | None,
+    spec: ThetaDataDownloadSpec,
+) -> Frame:
+    """Fetch a current-day full chain using explicit expirations.
+
+    ThetaData rejects expiration="*" for current-day data, but accepts an
+    explicit expiration. The caller already limits requests to one day.
+    """
+    if _day(start_date) != _day(end_date):
+        raise ValueError("Current-day explicit-expiration fallback requires a one-day request")
+
+    from quant_warehouse.ingest.credentials import resolve_thetadata_api_key
+
+    resolved_api_key = str(api_key or resolve_thetadata_api_key(required=True)).strip()
+    client = _thetadata_client(resolved_api_key)
+    expiration_rows = client.option_list_expirations(str(symbol).upper())
+    expirations = _extract_expiration_dates(expiration_rows)
+    if not expirations:
+        return pl.DataFrame()
+
+    frames: list[Frame] = []
+    for expiration in expirations:
+        try:
+            raw = client.option_history_greeks_eod(
+                symbol=str(symbol).upper(),
+                expiration=expiration,
+                start_date=_day(start_date).date(),
+                end_date=_day(end_date).date(),
+                strike="*",
+                right="both",
+                annual_dividend=spec.annual_dividend,
+                rate_type=spec.rate_type,
+                rate_value=spec.rate_value,
+                version=spec.version,
+                underlyer_use_nbbo=bool(spec.underlyer_use_nbbo),
+            )
+        except Exception as exc:
+            if _is_thetadata_no_data_error(exc):
+                continue
+            raise
+        frame = _as_polars_frame(raw)
+        if not frame.is_empty():
+            frames.append(frame)
+
+    if not frames:
+        return pl.DataFrame()
+    return pl.concat(frames, how="diagonal_relaxed")
+
+
+def _as_polars_frame(value: Any) -> Frame:
+    if value is None:
+        return pl.DataFrame()
+    if isinstance(value, pl.DataFrame):
+        return value.clone()
+    if hasattr(value, "to_polars"):
+        value = value.to_polars()
+        return value.clone() if isinstance(value, pl.DataFrame) else pl.DataFrame(value)
+    if isinstance(value, pl.Series):
+        return value.to_frame()
+    if isinstance(value, (list, tuple)):
+        return pl.DataFrame(value)
+    return pl.DataFrame(value)
+
+
+def _extract_expiration_dates(value: Any) -> list[date]:
+    frame = _as_polars_frame(value)
+    if frame.is_empty():
+        return []
+    columns = {str(column).strip().lower(): column for column in frame.columns}
+    column = columns.get("expiration") or columns.get("date")
+    if column is None:
+        column = frame.columns[-1]
+    dates: set[date] = set()
+    for raw in frame[column].to_list():
+        try:
+            dates.add(_day(raw).date())
+        except (TypeError, ValueError, OverflowError):
+            continue
+    return sorted(dates)
 
 
 def split_snapshots_by_date(df: Frame) -> dict[datetime, Frame]:
