@@ -9,6 +9,7 @@ from quant_warehouse.catalog.store import CatalogStore
 from quant_warehouse.migrate.backfill_thetadata_options import (
     _options_range_cached,
     backfill_thetadata_options_for_oracle_trades,
+    fmp_trading_days_for_range,
     list_arctic_fmp_underlyings,
     list_catalog_price_symbols,
     list_market_cap_symbols,
@@ -131,6 +132,22 @@ def test_resolve_backfill_symbols_filters_non_us_by_default() -> None:
     wh = Warehouse()
     resolved = resolve_backfill_symbols(wh, symbols=["AAPL", "600031.SS"], us_only=True)
     assert resolved == ["AAPL"]
+
+
+def test_fmp_trading_days_for_range_excludes_weekday_market_holidays(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "quant_warehouse.migrate.backfill_thetadata_options.fmp_trading_days_for_year",
+        lambda year, **kwargs: (
+            datetime(2026, 7, 2),
+            datetime(2026, 7, 6),
+        ) if year == 2026 else (),
+    )
+
+    assert fmp_trading_days_for_range(
+        datetime(2026, 7, 1),
+        datetime(2026, 7, 7),
+        warehouse=Warehouse(),
+    ) == (datetime(2026, 7, 2), datetime(2026, 7, 6), datetime(2026, 7, 7))
 
 
 def test_options_range_cached_delegates_to_arctic_range_cache(monkeypatch) -> None:

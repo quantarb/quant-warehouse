@@ -666,3 +666,47 @@ def test_download_option_snapshots_for_range_does_not_swallow_provider_errors(mo
             "2025-01-06",
             spec=ThetaDataDownloadSpec(backfill_window_days=180, fallback_window_days=7),
         )
+
+
+def test_current_day_wildcard_falls_back_to_actual_expirations(monkeypatch) -> None:
+    from quant_warehouse.platforms.data_providers.thetadata import options as options_module
+
+    class _Client:
+        def __init__(self) -> None:
+            self.expiration_calls = []
+
+        def option_list_expirations(self, symbol):
+            assert symbol == "AAPL"
+            return pl.DataFrame({"symbol": ["AAPL", "AAPL"], "expiration": ["2026-08-21", "2026-09-18"]})
+
+        def option_history_greeks_eod(self, **kwargs):
+            self.expiration_calls.append(kwargs)
+            return pl.DataFrame(
+                [{
+                    "symbol": "AAPL",
+                    "expiration": kwargs["expiration"].isoformat(),
+                    "strike": 230.0,
+                    "right": "PUT",
+                    "created": "2026-08-13 17:21:40-05:00",
+                    "bid": 0.66,
+                    "ask": 0.81,
+                }]
+            )
+
+    client = _Client()
+
+    def _raise_current_day(*args, **kwargs):
+        raise RuntimeError("Cannot fetch current-day data without specifying an expiration")
+
+    monkeypatch.setattr(options_module, "fetch_openbb", _raise_current_day)
+    monkeypatch.setattr(options_module, "_thetadata_client", lambda api_key: client)
+    monkeypatch.setenv("THETADATA_API_KEY", "test-key")
+
+    frame = fetch_option_history_eod("AAPL", "2026-08-13", "2026-08-13")
+
+    assert frame.height == 2
+    assert [call["expiration"].isoformat() for call in client.expiration_calls] == [
+        "2026-08-21",
+        "2026-09-18",
+    ]
+    assert all(call["start_date"] == call["end_date"] for call in client.expiration_calls)
