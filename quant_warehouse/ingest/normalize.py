@@ -96,7 +96,8 @@ def _normalize_columns(frame: pl.DataFrame, *, provider: str, prefix: str | None
     out = source.rename(rename)
     keep = [index_col, *rename.values()]
     out = out.select([column for column in keep if column in out.columns])
-    numeric = [column for column in out.columns if column != index_col and column not in PANEL_DIMENSION_COLUMNS]
+    numeric = [column for column in out.columns if column != index_col and column not in PANEL_DIMENSION_COLUMNS
+               and not out.schema[column].is_temporal()]
     out = _finite_numeric(out, numeric)
     return out.unique([index_col], keep="last", maintain_order=True).sort(index_col), index_col
 
