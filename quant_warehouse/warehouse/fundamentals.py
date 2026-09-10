@@ -8,6 +8,7 @@ import polars as pl
 from quant_warehouse.catalog.store import CatalogStore
 from quant_warehouse.config import WarehouseConfig
 from quant_warehouse.ingest.normalize import (
+    INDEX_CANDIDATES,
     normalize_dated_snapshot_frame,
     normalize_panel_frame,
     normalize_snapshot_frame,
@@ -34,6 +35,19 @@ from quant_warehouse.warehouse.sections import (
     fundamental_period_for_section,
     normalize_fundamental_period,
 )
+
+
+def _merge_observations(existing: pl.DataFrame | None, incoming: pl.DataFrame) -> pl.DataFrame:
+    """Merge on the incoming source date, including stored date-column variants."""
+    if incoming.is_empty():
+        return existing.clone() if existing is not None else incoming
+    date_column = next(c for c in INDEX_CANDIDATES if c in incoming.columns)
+    if existing is not None and not existing.is_empty() and date_column not in existing.columns:
+        previous_date = next((c for c in INDEX_CANDIDATES if c in existing.columns), None)
+        if previous_date is None:
+            raise ValueError('Stored fundamental history has no observation date')
+        existing = existing.rename({previous_date: date_column})
+    return merge_upsert(existing, incoming, date_column=date_column)
 
 
 class FundamentalsStore:
@@ -94,6 +108,10 @@ class FundamentalsStore:
                     if effective_period is not None:
                         kwargs.setdefault("period", provider_period(provider, effective_period))
 
+                    # FMP statements default to five rows in OpenBB. Request
+                    # enough annual/quarterly records to cover the 1900 floor.
+                    if provider == "fmp" and section in {"income", "balance", "cash"}:
+                        kwargs.setdefault("limit", 1000)
                     raw = fetch_dataframe(section, symbol=symbol, provider=provider, **kwargs)
                     if section in DATED_SNAPSHOT_SECTIONS:
                         frame = normalize_dated_snapshot_frame(raw, section=section)
@@ -126,8 +144,8 @@ class FundamentalsStore:
 
                     if section in PANEL_FUNDAMENTAL_SECTIONS or section in DATED_SNAPSHOT_SECTIONS:
                         merged = merge_panel_upsert(existing, frame)
-                    elif "date" in frame.columns:
-                        merged = merge_upsert(existing, frame)
+                    elif any(c in frame.columns for c in INDEX_CANDIDATES):
+                        merged = _merge_observations(existing, frame)
                     else:
                         merged = frame
 
@@ -136,9 +154,10 @@ class FundamentalsStore:
 
                     min_date = None
                     max_date = None
-                    if not merged.is_empty() and "date" in merged.columns:
-                        min_date = merged["date"].min().strftime("%Y-%m-%d")
-                        max_date = merged["date"].max().strftime("%Y-%m-%d")
+                    date_column = next((c for c in INDEX_CANDIDATES if c in merged.columns), None)
+                    if not merged.is_empty() and date_column:
+                        min_date = merged[date_column].min().strftime("%Y-%m-%d")
+                        max_date = merged[date_column].max().strftime("%Y-%m-%d")
 
                     self.catalog.upsert(
                         symbol=symbol,
@@ -212,9 +231,10 @@ class FundamentalsStore:
         if df is None or df.is_empty():
             return pl.DataFrame()
         if section in SNAPSHOT_FUNDAMENTAL_SECTIONS:
-            out = df.copy()
+            out = df.clone()
         else:
-            out = _slice_dates(df, start=start, end=end)
+            key = next((c for c in INDEX_CANDIDATES if c in df.columns), None)
+            out = _slice_dates(df, start=start, end=end, date_column=key) if key else df
         return out
 
     def ingest_frame(
@@ -234,7 +254,7 @@ class FundamentalsStore:
         if section in DATED_SNAPSHOT_SECTIONS:
             normalized = normalize_dated_snapshot_frame(frame, section=section)
         elif "date" in frame.columns:
-            normalized = frame.copy()
+            normalized = frame.clone()
         elif section in SNAPSHOT_FUNDAMENTAL_SECTIONS:
             normalized = normalize_snapshot_frame(frame)
         elif section in PANEL_FUNDAMENTAL_SECTIONS:
@@ -260,8 +280,8 @@ class FundamentalsStore:
             )
             if section in PANEL_FUNDAMENTAL_SECTIONS or section in DATED_SNAPSHOT_SECTIONS:
                 merged = merge_panel_upsert(existing, normalized)
-            elif "date" in normalized.columns:
-                merged = merge_upsert(existing, normalized)
+            elif any(c in normalized.columns for c in INDEX_CANDIDATES):
+                merged = _merge_observations(existing, normalized)
 
         rows_written = 0
         if not merged.is_empty():
@@ -270,9 +290,10 @@ class FundamentalsStore:
 
         min_date = None
         max_date = None
-        if not merged.is_empty() and "date" in merged.columns:
-            min_date = merged["date"].min().strftime("%Y-%m-%d")
-            max_date = merged["date"].max().strftime("%Y-%m-%d")
+        date_column = next((c for c in INDEX_CANDIDATES if c in merged.columns), None)
+        if not merged.is_empty() and date_column:
+            min_date = merged[date_column].min().strftime("%Y-%m-%d")
+            max_date = merged[date_column].max().strftime("%Y-%m-%d")
 
         self.catalog.upsert(
             symbol=symbol,

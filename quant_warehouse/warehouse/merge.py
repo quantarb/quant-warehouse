@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import polars as pl
 
-def merge_upsert(existing: pl.DataFrame | None, incoming: pl.DataFrame) -> pl.DataFrame:
+def merge_upsert(existing: pl.DataFrame | None, incoming: pl.DataFrame, *, date_column: str | None = None) -> pl.DataFrame:
     """Merge incoming rows onto existing data, keeping the latest value per index."""
     if incoming.is_empty():
         return existing.clone() if existing is not None else pl.DataFrame()
     if existing is None or existing.is_empty():
         return incoming.sort("date") if "date" in incoming.columns else incoming
-    key = "date" if "date" in incoming.columns else incoming.columns[0]
+    key = date_column or ("date" if "date" in incoming.columns else incoming.columns[0])
     return pl.concat([existing, incoming], how="diagonal_relaxed").unique(
         key, keep="last", maintain_order=True
     ).sort(key)

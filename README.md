@@ -164,3 +164,12 @@ Arrow, so it avoids loading unrelated history and fields into the dataframe laye
 ## License
 
 MIT
+
+Financial-statement reads apply requested bounds to the recorded source date
+(including `period_ending`). Refresh and ingestion merge revisions on that date
+and preserve earlier history when source date-column names differ. FMP income,
+balance, and cash refreshes request 1,000 records by default instead of inheriting
+the five-record endpoint default. This covers the 1900 warehouse floor at annual
+and quarterly frequencies, subject to provider availability. Corpus builders
+must still audit coverage rather than interpret a successful refresh as complete
+history. See `tests/test_fundamentals.py` for refresh/read lifecycle regressions.
