@@ -139,3 +139,20 @@ def test_ingest_revision_uses_source_dates_and_updates_catalog(tmp_path):
     assert stats['min_date'] == '2023-03-31'
     assert stats['max_date'] == '2024-03-31'
     assert store.read('A', section='income', period='quarter', start='2024-03-31', end='2024-03-31')['revenue'].to_list() == [3.]
+
+
+def test_normalization_preserves_secondary_cashflow_dates():
+    from datetime import date
+    raw = pl.DataFrame({'ex_dividend_date': [date(2024, 3, 1)], 'payment_date': [date(2024, 3, 15)], 'amount': [0.5]})
+    normalized = normalize_vendor_frame(raw, provider='fmp')
+    assert normalized.schema['payment_date'] == pl.Date
+    assert normalized['payment_date'][0] == date(2024, 3, 15)
+
+
+def test_merge_rejects_numeric_date_corruption_before_storage():
+    import pytest
+    from quant_warehouse.warehouse.fundamentals import _merge_observations
+    old = pl.DataFrame({'ex_dividend_date': [1.7e15], 'amount': [.5]})
+    new = pl.DataFrame({'ex_dividend_date': [datetime(2024, 3, 1)], 'amount': [.5]})
+    with pytest.raises(ValueError, match='not temporal'):
+        _merge_observations(old, new)

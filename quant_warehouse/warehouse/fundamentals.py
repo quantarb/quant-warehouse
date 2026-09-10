@@ -47,6 +47,9 @@ def _merge_observations(existing: pl.DataFrame | None, incoming: pl.DataFrame) -
         if previous_date is None:
             raise ValueError('Stored fundamental history has no observation date')
         existing = existing.rename({previous_date: date_column})
+    if existing is not None and not existing.is_empty():
+        if not existing.schema[date_column].is_temporal():
+            raise ValueError(f'Stored observation date {date_column} is not temporal; restore full source history before merging')
     return merge_upsert(existing, incoming, date_column=date_column)
 
 
