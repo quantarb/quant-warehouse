@@ -347,12 +347,13 @@ def _slice_dates(
     *,
     start: str | None,
     end: str | None,
+    date_column: str = "date",
 ) -> pl.DataFrame:
-    if "date" not in df.columns:
+    if date_column not in df.columns:
         return df
     predicate = pl.lit(True)
     if start is not None:
-        predicate = predicate & (pl.col("date") >= pl.lit(datetime.fromisoformat(start)))
+        predicate = predicate & (pl.col(date_column) >= pl.lit(datetime.fromisoformat(start)))
     if end is not None:
-        predicate = predicate & (pl.col("date") <= pl.lit(datetime.fromisoformat(end)))
+        predicate = predicate & (pl.col(date_column) <= pl.lit(datetime.fromisoformat(end)))
     return df.filter(predicate)
