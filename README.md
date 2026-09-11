@@ -173,3 +173,7 @@ the five-record endpoint default. This covers the 1900 warehouse floor at annual
 and quarterly frequencies, subject to provider availability. Corpus builders
 must still audit coverage rather than interpret a successful refresh as complete
 history. See `tests/test_fundamentals.py` for refresh/read lifecycle regressions.
+
+Stored macro readers return Polars frames through the warehouse facade. Historical
+fundamental date slicing supports timezone-aware source timestamps without
+changing the stored timezone or inventing reporting lags.

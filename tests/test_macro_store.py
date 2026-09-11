@@ -95,3 +95,16 @@ def test_read_risk_premium_and_calendar(tmp_path):
 
     assert len(store.read_risk_premium(provider="fmp")) == 1
     assert len(store.read_calendar(provider="fmp")) == 1
+
+
+def test_warehouse_macro_facade_matches_polars_store_signature():
+    from quant_warehouse import Warehouse
+    class Store:
+        def read_panel(self,codes,*,provider,start,end):
+            return pl.DataFrame({'date':[date(2024,1,1)],codes[0]:[1.]})
+        def read_calendar(self,*,provider,start,end):
+            return pl.DataFrame({'date':[date(2024,1,1)]})
+    warehouse=object.__new__(Warehouse)
+    warehouse.macro=Store()
+    assert warehouse.read_macro_panel(['GDP']).height==1
+    assert warehouse.read_macro_calendar().height==1
