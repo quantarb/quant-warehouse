@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date, datetime, timezone
 from typing import Any
 
 import polars as pl
@@ -139,18 +140,8 @@ def fetch_openbb(
                 records=(),
             )
         raise
-    df = result.to_polars()
-    if df is None:
-        df = pl.DataFrame()
-    else:
-        df = _copy_frame(df)
-
-    records: list[dict[str, Any]] = []
-    for item in list(getattr(result, "results", None) or []):
-        if hasattr(item, "model_dump"):
-            records.append(item.model_dump())
-        elif isinstance(item, dict):
-            records.append(dict(item))
+    records = _result_records(result)
+    df = _records_frame(records)
 
     provider_used = str(getattr(result, "provider", None) or provider).strip().lower()
     return OpenBBFetchResult(
@@ -181,12 +172,28 @@ def fetch_route_dataframe(
 ) -> pl.DataFrame:
     """Fetch a route that does not require a symbol (calendars, search, etc.)."""
     result = _call_route(route, symbol=None, provider=provider, **kwargs)
-    df = result.to_polars()
-    if df is None:
-        return pl.DataFrame()
-    return _copy_frame(df)
+    return _records_frame(_result_records(result))
 
 
-def _copy_frame(frame: Any) -> Any:
-    """Clone a Polars frame returned by OpenBB."""
-    return frame.clone()
+def _result_records(result):
+    records=[]
+    for item in list(getattr(result, "results", None) or []):
+        if hasattr(item, "model_dump"):
+            records.append(item.model_dump())
+        elif isinstance(item, dict):
+            records.append(dict(item))
+        else:
+            raise TypeError("OpenBB results must contain structured row records")
+    return records
+
+
+def _records_frame(records):
+    """Build Polars directly; SDK to_polars currently round-trips through pandas."""
+    def value(item):
+        if isinstance(item,datetime):
+            return item.astimezone(timezone.utc).replace(tzinfo=None) if item.tzinfo else item
+        if isinstance(item,date):return datetime.combine(item,datetime.min.time())
+        if isinstance(item,dict):return {k:value(v) for k,v in item.items()}
+        if isinstance(item,(list,tuple)):return [value(v) for v in item]
+        return item
+    return pl.from_dicts([value(row) for row in records],infer_schema_length=None,strict=False) if records else pl.DataFrame()

@@ -113,8 +113,10 @@ class FundamentalsStore:
 
                     # FMP statements default to five rows in OpenBB. Request
                     # enough annual/quarterly records to cover the 1900 floor.
-                    if provider == "fmp" and section in {"income", "balance", "cash"}:
+                    if provider == "fmp" and section in {"income", "balance", "cash", "ratios", "metrics", "income_growth", "balance_growth", "cash_growth"}:
                         kwargs.setdefault("limit", 1000)
+                    if provider == "fmp" and section in {"ratios", "metrics"}:
+                        kwargs.setdefault("ttm", "exclude")
                     raw = fetch_dataframe(section, symbol=symbol, provider=provider, **kwargs)
                     if section in DATED_SNAPSHOT_SECTIONS:
                         frame = normalize_dated_snapshot_frame(raw, section=section)
