@@ -351,9 +351,26 @@ def _slice_dates(
 ) -> pl.DataFrame:
     if date_column not in df.columns:
         return df
+    dtype = df.schema[date_column]
+
+    def boundary(value: str):
+        parsed = datetime.fromisoformat(value)
+        literal = pl.lit(parsed)
+        if isinstance(dtype, pl.Datetime):
+            if dtype.time_zone and parsed.tzinfo is None:
+                literal = literal.dt.replace_time_zone(dtype.time_zone)
+            elif dtype.time_zone and parsed.tzinfo is not None:
+                literal = literal.dt.convert_time_zone(dtype.time_zone)
+            elif parsed.tzinfo is not None:
+                raise ValueError("Timezone-aware boundary requires a timezone-aware date column")
+            return literal.cast(dtype)
+        if dtype == pl.Date:
+            return pl.lit(parsed.date())
+        return literal
+
     predicate = pl.lit(True)
     if start is not None:
-        predicate = predicate & (pl.col(date_column) >= pl.lit(datetime.fromisoformat(start)))
+        predicate = predicate & (pl.col(date_column) >= boundary(start))
     if end is not None:
-        predicate = predicate & (pl.col(date_column) <= pl.lit(datetime.fromisoformat(end)))
+        predicate = predicate & (pl.col(date_column) <= boundary(end))
     return df.filter(predicate)

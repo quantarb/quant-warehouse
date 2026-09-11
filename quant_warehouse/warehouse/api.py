@@ -305,7 +305,6 @@ class Warehouse:
             provider=provider,
             start=start,
             end=end,
-            output_format=output_format,
         )
 
     def read_macro_calendar(
@@ -318,7 +317,7 @@ class Warehouse:
     ) -> pl.DataFrame:
         """Read stored macro economic-calendar releases."""
         return self.macro.read_calendar(
-            provider=provider, start=start, end=end, output_format=output_format
+            provider=provider, start=start, end=end
         )
 
     def status(self, symbol: str) -> list:
