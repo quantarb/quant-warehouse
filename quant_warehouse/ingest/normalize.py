@@ -117,14 +117,17 @@ def normalize_panel_frame(
     df: pl.DataFrame, *, provider: str, vendor_only_prefix: str | None = None,
     min_date: str | None = None,
 ) -> pl.DataFrame:
-    normalized = _normalize_columns(df, provider=provider, prefix=vendor_only_prefix)
-    if normalized is None:
-        return pl.DataFrame()
-    out, index_col = normalized
-    keys = [index_col, *(column for column in PANEL_DIMENSION_COLUMNS if column in out.columns)]
-    return clip_to_min_historical_date(
-        out.unique(keys, keep="last", maintain_order=True), min_date=min_date or MIN_HISTORICAL_DATE
-    )
+    if df.is_empty():return df
+    index_col=_pick_index_column(df)
+    if index_col is None:return pl.DataFrame()
+    rename={c:(f"{vendor_only_prefix}__{_to_snake(c)}" if vendor_only_prefix and c!=index_col else _to_snake(c)) for c in df.columns}
+    out=df.rename(rename)
+    index_col=rename[index_col]
+    out=coerce_object_dates(out)
+    out=out.with_columns(_date_expr(out,index_col).alias(index_col)).drop_nulls(index_col)
+    # Event identities/text are not numeric features; retain them for downstream adapters.
+    out=_finite_numeric(out,[c for c,t in out.schema.items() if t.is_numeric() and c not in PANEL_DIMENSION_COLUMNS])
+    return clip_to_min_historical_date(out.unique(maintain_order=True),min_date=min_date or MIN_HISTORICAL_DATE)
 
 
 def coerce_object_dates(frame: pl.DataFrame) -> pl.DataFrame:

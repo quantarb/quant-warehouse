@@ -156,3 +156,18 @@ def test_merge_rejects_numeric_date_corruption_before_storage():
     new = pl.DataFrame({'ex_dividend_date': [datetime(2024, 3, 1)], 'amount': [.5]})
     with pytest.raises(ValueError, match='not temporal'):
         _merge_observations(old, new)
+
+
+def test_historical_ratio_refresh_excludes_ttm_and_requests_full_history(tmp_path,monkeypatch):
+    config=WarehouseConfig(home=tmp_path/'home',arctic_uri=f"lmdb://{tmp_path/'arctic'}",catalog_path=tmp_path/'catalog.sqlite')
+    store=FundamentalsStore(config,backend=ArcticBackend(config.arctic_uri),catalog=CatalogStore(config.catalog_path))
+    calls=[]
+    def fetch(section,*,symbol,provider,**kwargs):
+        calls.append((section,kwargs))
+        assert kwargs['limit']==1000
+        if section in ['ratios','metrics']:assert kwargs['ttm']=='exclude'
+        return pl.DataFrame({'period_ending':[datetime(2000,12,31)],'fiscal_period':['FY'],'ratio':[1.]})
+    monkeypatch.setattr('quant_warehouse.warehouse.fundamentals.fetch_dataframe',fetch)
+    store.refresh('A',sections=['ratios','metrics','income_growth','balance_growth','cash_growth'],providers=['fmp'],period='annual')
+    assert len(calls)==5
+    assert store.read('A',section='ratios',period='annual')['fiscal_period'].to_list()==['FY']

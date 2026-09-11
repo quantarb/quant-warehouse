@@ -24,10 +24,10 @@ def test_fetch_openbb_returns_empty_frame_on_provider_empty(monkeypatch):
 def test_fetch_openbb_polars_path_does_not_convert_to_legacy_frame(monkeypatch):
     class Result:
         provider = "fmp"
-        results = []
+        results = [{"symbol": "AAA", "value": 1.0}]
 
         def to_polars(self):
-            return pl.DataFrame({"symbol": ["AAA"], "value": [1.0]})
+            raise AssertionError("Do not use SDK pandas-backed conversion")
 
         def to_df(self):
             raise AssertionError("Polars fetch must not call to_df")
@@ -44,3 +44,14 @@ def test_fetch_openbb_polars_path_does_not_convert_to_legacy_frame(monkeypatch):
     )
     assert isinstance(result.df, pl.DataFrame)
     assert result.df.height == 1
+
+
+def test_record_conversion_handles_mixed_dates_without_pandas(monkeypatch):
+    from datetime import date,datetime,timezone
+    class Result:
+        results=[{'published_date':date(2020,1,1),'value':1.},
+                 {'published_date':datetime(2020,1,2,tzinfo=timezone.utc),'value':2.}]
+        def to_polars(self):raise AssertionError('pandas-backed SDK conversion')
+    monkeypatch.setattr('quant_warehouse.ingest.openbb_fetch._call_route',lambda *a,**k:Result())
+    frame=fetch_openbb('estimates_price_target',symbol='A',provider='fmp').df
+    assert frame['published_date'].to_list()==[datetime(2020,1,1),datetime(2020,1,2)]

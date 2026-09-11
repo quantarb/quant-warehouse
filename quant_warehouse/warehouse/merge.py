@@ -25,7 +25,9 @@ def merge_panel_upsert(existing: pl.DataFrame | None, incoming: pl.DataFrame) ->
         index_name,
         *(
             column
-            for column in ("symbol", "contract_symbol", "fund_symbol", "country")
+            for column in ("symbol", "contract_symbol", "fund_symbol", "country", "source_event_id", "source_id",
+                           "owner_cik", "owner_name", "security_type", "transaction_type", "securities_transacted", "transaction_price",
+                           "representative", "owner", "amount", "analyst_name", "analyst_firm", "news_url", "url", "title")
             if column in incoming.columns and column in existing.columns
         ),
     ]
