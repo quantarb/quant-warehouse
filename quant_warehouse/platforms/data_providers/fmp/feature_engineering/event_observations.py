@@ -20,25 +20,25 @@ def issuer_event_observations(warehouse,symbol,*,start='1900-01-01',end='2026-09
         frame=warehouse.read_fundamentals(symbol,section=section,start=start,end=end)
         if frame.is_empty():continue
         if section=='ownership_government_trades':
-            kind=pl.col('transaction_type').str.to_lowercase()
-            amounts=pl.col('amount').str.replace_all(r'[$,]','').str.extract_all(r'\d+').list.eval(pl.element().cast(pl.Float64))
+            kind=pl.col('transaction_type').cast(pl.String).str.to_lowercase()
+            amounts=pl.col('amount').cast(pl.String).str.replace_all(r'[$,]','').str.extract_all(r'\d+').list.eval(pl.element().cast(pl.Float64))
             values=[kind.str.contains('purchase').cast(pl.Float32),kind.str.contains('sale').cast(pl.Float32),amounts.list.first(),amounts.list.last()]
             # OpenBB FMP maps disclosureDate/dateReceived to date; older snapshots retain disclosure_date.
             disclosure='disclosure_date' if 'disclosure_date' in frame.columns else 'date'
             out=event_frame(frame,symbol,'equity.ownership.government_trades',disclosure,values,event_column='transaction_date')
         elif section=='ownership_insider_trading':
-            kind=pl.col('transaction_type').str.to_uppercase()
+            kind=pl.col('transaction_type').cast(pl.String).str.to_uppercase()
             values=[kind.str.starts_with('P').cast(pl.Float32),kind.str.starts_with('S').cast(pl.Float32),
                     pl.col('securities_owned'),pl.col('securities_transacted'),pl.col('transaction_price'),
-                    (pl.col('acquisition_or_disposition')=='A').cast(pl.Float32),
-                    (pl.col('acquisition_or_disposition')=='D').cast(pl.Float32)]
+                    (pl.col('acquisition_or_disposition').cast(pl.String)=='A').cast(pl.Float32),
+                    (pl.col('acquisition_or_disposition').cast(pl.String)=='D').cast(pl.Float32)]
             out=event_frame(frame,symbol,'equity.ownership.insider_trading','filing_date',values,event_column='transaction_date')
         elif section=='estimates_price_target':
             out=event_frame(frame,symbol,'equity.estimates.price_target','published_date',
                             [pl.col(c) for c in ['price_target','adj_price_target','price_when_posted']])
         elif section=='dividends':
             # Ex-date observations are known by EOD even where announcement history is missing.
-            out=event_frame(frame,symbol,'equity.calendar.dividend','ex_dividend_date',[pl.col('amount'),pl.col('adjusted_amount')])
+            out=event_frame(frame,symbol,'equity.calendar.dividend','ex_dividend_date',[pl.col('amount').cast(pl.String),pl.col('adjusted_amount')])
         else:
             out=event_frame(frame,symbol,'equity.calendar.splits','date',[pl.col('numerator'),pl.col('denominator')])
         yield section,out.filter(pl.col('date').is_between(datetime.fromisoformat(start),datetime.fromisoformat(end)))

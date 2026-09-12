@@ -44,3 +44,23 @@ def test_event_normalization_and_merge_preserve_same_day_analysts():
     assert normalized['analyst_name'].to_list()==['Alice','Bob']
     merged=merge_panel_upsert(normalized,normalized)
     assert merged.height==2
+
+
+def test_unknown_insider_direction_remains_missing_with_numeric_null_columns():
+    class Warehouse:
+        def read_fundamentals(self, symbol, *, section, **kwargs):
+            if section != 'ownership_insider_trading':
+                return pl.DataFrame()
+            return pl.DataFrame({
+                'filing_date': [datetime(2023, 1, 5)],
+                'transaction_date': [datetime(2023, 1, 3)],
+                'transaction_type': pl.Series([None], dtype=pl.Float64),
+                'acquisition_or_disposition': pl.Series([None], dtype=pl.Float64),
+                'securities_owned': [100.], 'securities_transacted': [10.],
+                'transaction_price': [20.],
+            })
+    _, frame = next(issuer_event_observations(Warehouse(), 'X'))
+    assert frame['date'][0] == datetime(2023, 1, 5)
+    assert frame['event_date'][0] == datetime(2023, 1, 3)
+    for column in ['signal_value', 'text_0', 'text_4', 'text_5']:
+        assert frame[column][0] is None
