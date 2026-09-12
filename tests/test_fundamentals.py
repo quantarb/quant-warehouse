@@ -171,3 +171,20 @@ def test_historical_ratio_refresh_excludes_ttm_and_requests_full_history(tmp_pat
     store.refresh('A',sections=['ratios','metrics','income_growth','balance_growth','cash_growth'],providers=['fmp'],period='annual')
     assert len(calls)==5
     assert store.read('A',section='ratios',period='annual')['fiscal_period'].to_list()==['FY']
+
+
+def test_insider_read_bounds_use_filing_date_and_preserve_stored_trades(tmp_path):
+    config = WarehouseConfig(
+        home=tmp_path / 'home', arctic_uri=f"lmdb://{tmp_path / 'arctic'}",
+        catalog_path=tmp_path / 'catalog.sqlite',
+    )
+    store = FundamentalsStore(config)
+    frame = pl.DataFrame({
+        'transaction_date': [datetime(2026, 9, 1), datetime(2026, 9, 8), datetime(2026, 9, 8)],
+        'filing_date': [datetime(2026, 9, 8), datetime(2026, 9, 9), datetime(2026, 9, 10)],
+        'securities_transacted': [1., 2., 3.],
+    })
+    store.ingest_frame('ADI', section='ownership_insider_trading', provider='fmp', frame=frame, merge=False)
+    bounded = store.read('ADI', section='ownership_insider_trading', start='2026-09-08', end='2026-09-09')
+    assert bounded['securities_transacted'].to_list() == [1., 2.]
+    assert store.read('ADI', section='ownership_insider_trading').height == 3

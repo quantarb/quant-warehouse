@@ -102,6 +102,8 @@ income = wh.read_fundamentals("AAPL", section="income", provider="fmp")
 institutional = wh.read_fundamentals("AAPL", section="ownership_institutional", provider="fmp")
 ```
 
+Insider-trading reads apply `start` and `end` to `filing_date`, preserving the original transaction dates and all stored records.
+
 Provider-owned feature and target code should be imported from the provider package:
 
 ```python

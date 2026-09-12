@@ -235,6 +235,15 @@ class FundamentalsStore:
         )
         if df is None or df.is_empty():
             return pl.DataFrame()
+        if section == "ownership_insider_trading" and "filing_date" in df.columns:
+            # Bound observations by their actual disclosure date, preserving
+            # transaction dates and the complete stored source history.
+            predicate = pl.lit(True)
+            if start is not None:
+                predicate &= pl.col("filing_date") >= datetime.fromisoformat(start)
+            if end is not None:
+                predicate &= pl.col("filing_date") <= datetime.fromisoformat(end)
+            return df.filter(predicate)
         if section in SNAPSHOT_FUNDAMENTAL_SECTIONS:
             out = df.clone()
         else:
