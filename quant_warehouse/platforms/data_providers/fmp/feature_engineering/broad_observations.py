@@ -84,6 +84,8 @@ def build_issuer_families(warehouse,symbol,*,start='1900-01-01',end='2026-09-09'
         grouped={}
         for section in ('ratios','metrics'):
             raw=read(section,period)
+            if raw.is_empty():
+                continue
             if 'fiscal_period' not in raw.columns:raise ValueError(f'{symbol}/{section}/{period}: missing fiscal period')
             # TTM snapshot rows from older refreshes do not belong to these families.
             expected=['FY'] if period=='annual' else ['Q1','Q2','Q3','Q4']

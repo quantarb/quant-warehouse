@@ -64,3 +64,19 @@ def test_unknown_insider_direction_remains_missing_with_numeric_null_columns():
     assert frame['event_date'][0] == datetime(2023, 1, 3)
     for column in ['signal_value', 'text_0', 'text_4', 'text_5']:
         assert frame[column][0] is None
+
+
+def test_absent_optional_ratio_history_does_not_drop_issuer_features():
+    from quant_warehouse.platforms.data_providers.fmp.feature_engineering.broad_observations import build_issuer_families
+    class Warehouse:
+        def read_fundamentals(self, symbol, *, section, **kwargs):
+            if section == 'historical_market_cap':
+                return pl.DataFrame({'date': [datetime(2023, 1, 1)], 'market_cap': [100.]})
+            if section == 'income':
+                return pl.DataFrame({'period_ending': [datetime(2023, 1, 1)], 'revenue': [20.]})
+            return pl.DataFrame()
+        def read_news(self, *args, **kwargs):
+            return pl.DataFrame()
+    families = dict((name, frame) for name, _, frame, _ in build_issuer_families(Warehouse(), 'X'))
+    assert families['fmp_income_mcap_annual']['revenue'].to_list() == [.2]
+    assert not any(name.startswith('ft_ratios_') for name in families)
