@@ -20,6 +20,13 @@ def issuer_event_observations(warehouse,symbol,*,start='1900-01-01',end='2026-09
         frame=warehouse.read_fundamentals(symbol,section=section,start=start,end=end)
         if frame.is_empty():continue
         if section=='ownership_government_trades':
+            # Some stored panels contain only dated, all-missing placeholders.
+            # They are not government-trade observations and have no disclosure date.
+            frame=frame.filter(pl.any_horizontal([
+                pl.col(c).cast(pl.String).str.to_lowercase().is_in(['nan','']).not_().fill_null(False)
+                for c in ('transaction_type','amount')
+            ]))
+            if frame.is_empty():continue
             kind=pl.col('transaction_type').cast(pl.String).str.to_lowercase()
             amounts=pl.col('amount').cast(pl.String).str.replace_all(r'[$,]','').str.extract_all(r'\d+').list.eval(pl.element().cast(pl.Float64))
             values=[kind.str.contains('purchase').cast(pl.Float32),kind.str.contains('sale').cast(pl.Float32),amounts.list.first(),amounts.list.last()]
