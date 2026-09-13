@@ -80,3 +80,13 @@ def test_absent_optional_ratio_history_does_not_drop_issuer_features():
     families = dict((name, frame) for name, _, frame, _ in build_issuer_families(Warehouse(), 'X'))
     assert families['fmp_income_mcap_annual']['revenue'].to_list() == [.2]
     assert not any(name.startswith('ft_ratios_') for name in families)
+
+
+def test_government_all_missing_placeholders_are_not_events():
+    class Warehouse:
+        def read_fundamentals(self, symbol, *, section, **kwargs):
+            if section != 'ownership_government_trades':
+                return pl.DataFrame()
+            return pl.DataFrame({'transaction_date': [datetime(2017,9,8)],
+                                 'transaction_type': [float('nan')], 'amount': [None]})
+    assert list(issuer_event_observations(Warehouse(), 'ASML')) == []
