@@ -69,6 +69,36 @@ def fmp_trading_days_for_year(
     return result
 
 
+def fmp_trading_days_for_range(
+    start: datetime,
+    end: datetime,
+    *,
+    warehouse: Warehouse,
+    calendar_symbol: str = "SPY",
+) -> tuple[datetime, ...]:
+    """Return FMP's actual US market dates intersecting a date range."""
+
+    if end < start:
+        return ()
+    dates: list[datetime] = []
+    for year in range(start.year, end.year + 1):
+        fmp_dates = fmp_trading_days_for_year(year, warehouse=warehouse, calendar_symbol=calendar_symbol)
+        dates.extend(fmp_dates)
+        # FMP price history can lag the requested end date. Extend only the
+        # uncovered tail with the official XNYS session calendar; this keeps
+        # FMP authoritative wherever the warehouse has coverage.
+        tail_start = max(fmp_dates) + timedelta(days=1) if fmp_dates else datetime(year, 1, 1)
+        if tail_start <= end and tail_start.year == year:
+            import exchange_calendars as xcals
+
+            calendar = xcals.get_calendar("XNYS")
+            sessions = calendar.sessions_in_range(
+                tail_start.date(), min(end, datetime(year, 12, 31)).date()
+            )
+            dates.extend(datetime.combine(session.date(), datetime.min.time()) for session in sessions)
+    return tuple(value for value in dates if start <= value <= end)
+
+
 def _is_us_option_symbol(symbol: str) -> bool:
     text = str(symbol).strip().upper()
     if not text:
@@ -375,7 +405,13 @@ def backfill_thetadata_options(
     results: list[dict[str, object]] = []
     total_symbols = len(target_symbols)
     today = datetime.now(timezone.utc).date()
-    requested_dates = [value for value in _business_days(start, end) if value.date() < today]
+    # Use stored FMP SPY dates rather than weekdays: weekdays include exchange
+    # holidays (for example, Friday 2026-07-03), which ThetaData correctly
+    # returns as an empty chain for every symbol.
+    requested_dates = [
+        value for value in fmp_trading_days_for_range(start, end, warehouse=warehouse)
+        if value.date() < today
+    ]
     requested_keys = [(symbol, snapshot_date) for snapshot_date in requested_dates for symbol in target_symbols]
 
     # Use the same resumable cache preflight as the historical range backfill,
