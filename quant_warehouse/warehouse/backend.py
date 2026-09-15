@@ -76,10 +76,12 @@ class ArcticBackend:
             if not lib.has_symbol(symbol):
                 return None
             read_kwargs = {}
+            filter_dates = date_range is not None and lib.get_description(symbol).sorted != "ASCENDING"
             if date_range is not None:
-                read_kwargs["date_range"] = date_range
+                if not filter_dates:
+                    read_kwargs["date_range"] = date_range
             if columns is not None:
-                read_kwargs["columns"] = columns
+                read_kwargs["columns"] = list(dict.fromkeys([*columns, "date"])) if filter_dates else columns
             read_kwargs["output_format"] = output_format
             try:
                 version = lib.read(symbol, **read_kwargs)
@@ -90,6 +92,14 @@ class ArcticBackend:
             df = version.data
             if df is None or df.is_empty():
                 return None
+            if filter_dates:
+                start, end = date_range
+                if start is not None:
+                    df = df.filter(pl.col("date") >= start)
+                if end is not None:
+                    df = df.filter(pl.col("date") <= end)
+                if columns is not None:
+                    df = df.select(columns)
             return df.sort("date") if "date" in df.columns else df
 
     def write(
@@ -109,7 +119,9 @@ class ArcticBackend:
             # all reads remain Polars, so the storage-library adapter never
             # crosses the public API.
             write_frame = df.to_pandas()
-            if "date" in df.columns:
+            # Partially dated source panels must preserve unknown dates. ArcticDB
+            # rejects NaT in its time index, so keep such panels row-indexed.
+            if "date" in df.columns and df["date"].null_count() == 0:
                 write_frame = write_frame.set_index("date")
                 write_frame.index.name = "date"
             lib.write(

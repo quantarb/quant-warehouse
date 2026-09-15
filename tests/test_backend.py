@@ -30,6 +30,19 @@ def test_arctic_backend_roundtrip(tmp_path: Path):
     assert out.filter(pl.col("date") == datetime(2024, 1, 2))["close"][0] == 101.0
 
 
+def test_partially_dated_panel_preserves_undated_rows_and_supports_date_reads(tmp_path):
+    backend = ArcticBackend(_config(tmp_path).arctic_uri)
+    frame = pl.DataFrame({'date': [None, datetime(2024, 1, 2), datetime(2024, 2, 1)],
+                          'amount': [10., 20., 30.]})
+    backend.write('events', 'ABC__fmp', frame)
+    out = backend.read('events', 'ABC__fmp')
+    assert out.height == 3 and out['date'].null_count() == 1
+    selected = backend.read('events', 'ABC__fmp',
+                            date_range=(datetime(2024, 1, 1), datetime(2024, 1, 31)),
+                            columns=['amount'])
+    assert selected.to_dicts() == [{'amount': 20.}]
+
+
 def test_open_backend_uses_arctic(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("QW_HOME", str(tmp_path / "home"))
     backend = open_backend(WarehouseConfig.from_env())

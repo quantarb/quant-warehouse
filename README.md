@@ -146,7 +146,7 @@ Arrow, so it avoids loading unrelated history and fields into the dataframe laye
 
 ## Design rules
 
-1. **ArcticDB is canonical for historical series** — prices, ETF prices, macro series, fundamentals, event pairs, features, calendars, and ThetaData option chains are stored in ArcticDB libraries.
+1. **ArcticDB is canonical for historical series** — prices, ETF prices, macro series, fundamentals, event pairs, features, calendars, and ThetaData option chains are stored in ArcticDB libraries. Panels with unknown observation dates retain those rows using a row index; bounded date reads filter known dates without inventing dates for older records.
 2. **SQLite is metadata only** — the catalog tracks gap-fill state, columns present, date ranges, and profile metadata.
 3. **Parquet/CSV are export artifacts only** — reports and derived ML datasets may be written to files, but historical series loaders must read/write ArcticDB.
 4. **Silver fundamentals stay sparse** — `period_ending` index, one Arctic symbol per `TICKER__provider`.
