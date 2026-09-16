@@ -182,3 +182,5 @@ changing the stored timezone or inventing reporting lags.
 
 
 Expanded multi-rate observations: FMP helpers `feature_engineering/broad_observations.py` and `event_observations.py` preserve individual numeric fields, historical fiscal-period ratios/growth, recorded event availability, and transaction dates separately. OpenBB result conversion now constructs Polars directly, retaining panel identities/text and mixed date/datetime histories. Ratio/metric refreshes explicitly exclude TTM-only responses and request full historical limits. Event inputs use publication/disclosure dates; downstream supervised transaction labels use event dates. Existing corrupted snapshots may require a backed-up replacement refresh; merging a date-less legacy panel with a dated panel is not yet a complete migration.
+
+The single-k FMP Oracle trade solver uses a cached Numba CPU kernel. Its scalar dynamic-programming recurrence, profit threshold, tie breaks, and reconstructed trade dates match the previous Torch solver; it avoids repeated scalar CUDA synchronization during annual target generation. Multi-k batched solvers retain their existing implementation.
