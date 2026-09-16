@@ -5,6 +5,8 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Literal, Mapping, Optional, Sequence, Tuple
 
 import torch
+import numpy as np
+from numba import njit
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 import polars as pl
@@ -41,50 +43,49 @@ def _profit_pct(side: Side, entry: float, exit: float) -> float:
         return 0.0
     return (exit - entry) / entry if side == "long" else (entry - exit) / entry
 
-def _solve_one_side_torch(entry_prices: Sequence[float], exit_prices: Sequence[float], k: int, min_profit_pct: float):
-    """Torch DP solver used for the numerical strategy kernel."""
-    ep = torch.as_tensor(entry_prices, dtype=torch.float64, device=DEVICE)
-    xp = torch.as_tensor(exit_prices, dtype=torch.float64, device=DEVICE)
-    n = int(ep.numel())
-    cash_val = torch.zeros(k + 1, dtype=torch.float64, device=DEVICE)
-    hold_val = torch.full((k + 1,), -torch.inf, dtype=torch.float64, device=DEVICE)
-    hold_entry_day = torch.full((k + 1,), -1, dtype=torch.int64, device=DEVICE)
-    hold_entry_px = torch.zeros(k + 1, dtype=torch.float64, device=DEVICE)
-    cash_action = torch.zeros((n, k + 1), dtype=torch.int64, device=DEVICE)
-    cash_entry_day = torch.zeros((n, k + 1), dtype=torch.int64, device=DEVICE)
+@njit(cache=True, nogil=True)
+def _solve_one_side_numba(ep, xp, k, min_profit_pct):
+    """Same scalar DP and tie breaks, without per-scalar CUDA synchronization."""
+    n = len(ep)
+    cash_val = np.zeros(k + 1, dtype=np.float64)
+    hold_val = np.full(k + 1, -np.inf, dtype=np.float64)
+    hold_entry_day = np.full(k + 1, -1, dtype=np.int64)
+    hold_entry_px = np.zeros(k + 1, dtype=np.float64)
+    cash_action = np.zeros((n, k + 1), dtype=np.int64)
+    cash_entry_day = np.zeros((n, k + 1), dtype=np.int64)
     for i in range(n):
         for t in range(1, k + 1):
-            if float(hold_val[t]) > float(-torch.inf):
-                denom = float(abs(hold_entry_px[t]))
-                pct = (float(xp[i]) - float(hold_entry_px[t])) / denom if denom > 0.0 else 0.0
+            if hold_val[t] > -np.inf:
+                denom = abs(hold_entry_px[t])
+                pct = (xp[i] - hold_entry_px[t]) / denom if denom > 0.0 else 0.0
                 if pct >= min_profit_pct:
                     candidate = hold_val[t] + xp[i]
-                    if float(candidate) > float(cash_val[t]) + 1e-12:
+                    if candidate > cash_val[t] + 1e-12:
                         cash_val[t] = candidate
                         cash_action[i, t] = 1
                         cash_entry_day[i, t] = hold_entry_day[t]
         for t in range(1, k + 1):
             candidate = cash_val[t - 1] - ep[i]
-            if float(candidate) > float(hold_val[t]):
+            if candidate > hold_val[t]:
                 hold_val[t] = candidate
                 hold_entry_day[t] = i
                 hold_entry_px[t] = ep[i]
-    best_t = int(torch.argmax(cash_val).item())
-    trades: list[tuple[int, int]] = []
-    t, i = best_t, n - 1
-    while t > 0 and i >= 0 and len(trades) < k:
-        if int(cash_action[i, t]) == 0:
+    t, i = int(np.argmax(cash_val)), n - 1
+    trades = np.empty((k, 2), dtype=np.int64)
+    count = 0
+    while t > 0 and i >= 0 and count < k:
+        if cash_action[i, t] == 0:
             i -= 1
             continue
-        entry_i = int(cash_entry_day[i, t])
+        entry_i = cash_entry_day[i, t]
         if entry_i < i:
-            trades.append((entry_i, i))
+            trades[count, 0], trades[count, 1] = entry_i, i
+            count += 1
             t -= 1
             i = entry_i - 1
         else:
             i -= 1
-    trades.reverse()
-    return torch.tensor(trades, dtype=torch.int64, device=DEVICE).tolist(), len(trades)
+    return trades[:count][::-1].copy(), count
 
 
 def _solve_one_side_all_k_torch(entry_prices: Sequence[float], exit_prices: Sequence[float], max_k: int, min_profit_pct: float):
@@ -280,10 +281,10 @@ def solve_optimal_trades_generic(
         ep = entry_prices
         xp = exit_prices
 
-    # Torch owns the numerical DP kernel; Trade retains row-oriented metadata
+    # Numba owns this small sequential DP; Trade retains row-oriented metadata
     # for callers that need the selected entry and exit observations.
-    trades_arr, n_trades = _solve_one_side_torch(
-        ep, xp, k=k, min_profit_pct=min_profit_pct,
+    trades_arr, n_trades = _solve_one_side_numba(
+        np.asarray(ep, dtype=np.float64), np.asarray(xp, dtype=np.float64), k=k, min_profit_pct=min_profit_pct,
     )
 
     out: List[Trade] = []

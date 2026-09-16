@@ -13,6 +13,7 @@ authors = [{ name = "Quant Warehouse" }]
 keywords = ["quant", "finance", "openbb", "arcticdb", "feature-store", "point-in-time"]
 dependencies = [
     "numpy>=2.0,<2.5",
+    "numba>=0.64,<1",
     "polars>=1.0,<2",
     "torch>=2.0,<3",
     "protobuf<7",

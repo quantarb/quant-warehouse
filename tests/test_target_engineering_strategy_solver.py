@@ -88,3 +88,28 @@ def test_batched_torch_solver_matches_individual_sequences() -> None:
     for index, (entry_prices, exit_prices) in enumerate(sequences):
         individual = _solve_one_side_all_k_torch(entry_prices, exit_prices, max_k=3, min_profit_pct=0.05)
         assert batched[index] == individual
+
+
+
+def test_compiled_scalar_solver_preserves_original_trade_paths():
+    import json
+    from pathlib import Path
+    import numpy as np
+    from quant_warehouse.platforms.data_providers.fmp.target_engineering.strategy_solver import _solve_one_side_numba
+    # Golden paths captured from the original scalar Torch solver, not the
+    # separate multi-k solver (which has different reconstruction behavior).
+    expected = json.loads((Path(__file__).parent/'fixtures/oracle_scalar_paths.json').read_text())
+    rng = np.random.default_rng(7)
+    actual = []
+    for n in (0, 1, 5, 32, 252):
+        for k in (1, 2, 5):
+            for sign in (1., -1.):
+                for threshold in (0., .01, .2):
+                    for tied in (False, True):
+                        ep = sign * rng.uniform(1,100,n)
+                        xp = ep + sign * rng.uniform(-10,10,n)
+                        if tied:
+                            ep, xp = np.round(ep), np.round(xp)
+                        trades, count = _solve_one_side_numba(ep,xp,k,threshold)
+                        actual.append([trades.tolist(), int(count)])
+    assert actual == expected
