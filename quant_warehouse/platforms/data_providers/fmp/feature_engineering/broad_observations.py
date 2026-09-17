@@ -14,6 +14,8 @@ DATE_FIELDS=('filing_date','accepted_date','published_date','observation_date','
 
 def dated(frame, *, column=None):
     if frame.is_empty():return pl.DataFrame(schema={'date':pl.Datetime('ns')})
+    if column is not None and column not in frame.columns:
+        raise ValueError(f'Source has no observation date column {column!r}; available columns: {frame.columns}')
     candidates=[column] if column else [c for c in DATE_FIELDS if c in frame.columns and
         (frame.schema[c].is_temporal() or frame.schema[c]==pl.String)]
     if not candidates:raise ValueError('Source has no usable observation date')
