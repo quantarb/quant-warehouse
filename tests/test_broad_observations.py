@@ -1,5 +1,6 @@
 from datetime import datetime
 import polars as pl
+import pytest
 from quant_warehouse.platforms.data_providers.fmp.feature_engineering.broad_observations import dated,news_features,safe_divide
 from quant_warehouse.platforms.data_providers.fmp.feature_engineering.event_observations import issuer_event_observations
 
@@ -90,3 +91,35 @@ def test_government_all_missing_placeholders_are_not_events():
             return pl.DataFrame({'transaction_date': [datetime(2017,9,8)],
                                  'transaction_type': [float('nan')], 'amount': [None]})
     assert list(issuer_event_observations(Warehouse(), 'ASML')) == []
+
+
+def test_government_missing_disclosure_does_not_use_transaction_date_or_stop_other_events():
+    class Warehouse:
+        def read_fundamentals(self, symbol, *, section, **kwargs):
+            if section == 'ownership_government_trades':
+                return pl.DataFrame({'transaction_date': [datetime(2024, 1, 1)],
+                                     'transaction_type': ['Purchase'], 'amount': ['$1,001 - $15,000']})
+            if section == 'historical_splits':
+                return pl.DataFrame({'date': [datetime(2024, 2, 1)], 'numerator': [2.], 'denominator': [1.]})
+            return pl.DataFrame()
+    with pytest.warns(RuntimeWarning, match='A: skipping 1 government-trade observations without a disclosure date'):
+        observations = list(issuer_event_observations(Warehouse(), 'A'))
+    assert len(observations) == 1
+    assert observations[0][0] == 'historical_splits'
+
+
+def test_government_openbb_date_preserves_disclosure_time():
+    class Warehouse:
+        def read_fundamentals(self, symbol, *, section, **kwargs):
+            if section != 'ownership_government_trades':
+                return pl.DataFrame()
+            return pl.DataFrame({'date': [datetime(2024, 2, 1)], 'transaction_date': [datetime(2024, 1, 1)],
+                                 'transaction_type': ['Purchase'], 'amount': ['$1,001 - $15,000']})
+    _, frame = next(issuer_event_observations(Warehouse(), 'A'))
+    assert frame['date'][0] == datetime(2024, 2, 1)
+    assert frame['event_date'][0] == datetime(2024, 1, 1)
+
+
+def test_explicit_missing_date_column_reports_source_schema():
+    with pytest.raises(ValueError, match="Source has no observation date column 'date'"):
+        dated(pl.DataFrame({'transaction_date': [datetime(2024, 1, 1)]}), column='date')
