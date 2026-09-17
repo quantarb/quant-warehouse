@@ -123,3 +123,29 @@ def test_government_openbb_date_preserves_disclosure_time():
 def test_explicit_missing_date_column_reports_source_schema():
     with pytest.raises(ValueError, match="Source has no observation date column 'date'"):
         dated(pl.DataFrame({'transaction_date': [datetime(2024, 1, 1)]}), column='date')
+
+
+@pytest.mark.parametrize('date_column,amount_column,adjusted_column', [
+    ('date', 'dividend', 'adj_dividend'),
+    ('ex_dividend_date', 'amount', 'adjusted_amount'),
+])
+def test_dividend_events_preserve_ex_date_and_amounts(date_column, amount_column, adjusted_column):
+    class Warehouse:
+        def read_fundamentals(self, symbol, *, section, **kwargs):
+            if section != 'dividends':
+                return pl.DataFrame()
+            return pl.DataFrame({
+                date_column: [datetime(2024, 3, 1)],
+                'record_date': [datetime(2024, 3, 4)],
+                'payment_date': [datetime(2024, 3, 15)],
+                'declaration_date': [datetime(2024, 2, 1)],
+                amount_column: [0.5], adjusted_column: [0.25],
+                'yield': [1.], 'frequency': ['Quarterly'],
+            })
+    section, frame = next(issuer_event_observations(Warehouse(), 'A'))
+    assert section == 'dividends'
+    assert frame['target_family'][0] == 'equity.calendar.dividend'
+    assert frame['date'][0] == datetime(2024, 3, 1)
+    assert frame['event_date'][0] == datetime(2024, 3, 1)
+    assert frame['signal_value'][0] == 0.5
+    assert frame['text_0'][0] == 0.25

@@ -52,6 +52,11 @@ def issuer_event_observations(warehouse,symbol,*,start='1900-01-01',end='2026-09
                             [pl.col(c) for c in ['price_target','adj_price_target','price_when_posted']])
         elif section=='dividends':
             # Ex-date observations are known by EOD even where announcement history is missing.
+            # Stored FMP fields use date/dividend/adj_dividend; OpenBB model
+            # fields use ex_dividend_date/amount/adjusted_amount.
+            frame=frame.rename({source:target for source,target in (
+                ('date','ex_dividend_date'),('dividend','amount'),('adj_dividend','adjusted_amount')
+            ) if source in frame.columns and target not in frame.columns})
             out=event_frame(frame,symbol,'equity.calendar.dividend','ex_dividend_date',[pl.col('amount').cast(pl.String),pl.col('adjusted_amount')])
         else:
             out=event_frame(frame,symbol,'equity.calendar.splits','date',[pl.col('numerator'),pl.col('denominator')])
