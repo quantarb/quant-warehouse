@@ -560,3 +560,17 @@ def test_price_backfill_skips_when_fresh():
     )
     assert needs is False
     assert reason == "recent_attempt"
+
+
+def test_quarterly_catalog_state_does_not_hide_missing_annual_history():
+    end = expected_latest_price_date()
+    state = SectionState(symbol='AAPL', section='income_quarter', provider='fmp',
+                         min_date='1900-01-01', max_date=end.isoformat(), row_count=100,
+                         columns_present=('revenue',), last_fetched_at=datetime.now(timezone.utc).isoformat())
+    catalog = FakeCatalog({('AAPL', 'income_quarter', 'fmp'): state})
+    quarter = historical_fetch_plan(catalog, 'AAPL', 'income', 'fmp', period='quarter', target_end_date=end)
+    annual = historical_fetch_plan(catalog, 'AAPL', 'income', 'fmp', period='annual', target_end_date=end)
+    assert quarter.needs_refresh is False
+    assert annual.needs_refresh is True and annual.reason == 'missing'
+    assert fundamental_refresh_needs_update(catalog, 'AAPL', 'income', 'fmp', period='quarter')[0] is False
+    assert backfill_fundamental_needs_update(catalog, 'AAPL', 'income', 'fmp', period='annual') == (True, 'missing')
