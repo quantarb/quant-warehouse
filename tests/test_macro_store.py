@@ -108,3 +108,32 @@ def test_warehouse_macro_facade_matches_polars_store_signature():
     warehouse.macro=Store()
     assert warehouse.read_macro_panel(['GDP']).height==1
     assert warehouse.read_macro_calendar().height==1
+
+
+def test_refresh_treasury_keeps_date_as_index_and_only_stores_rate_series(tmp_path, monkeypatch):
+    home = tmp_path / 'qw'
+    config = WarehouseConfig(home=home, arctic_uri=f"lmdb://{home / 'arctic'}", catalog_path=home / 'catalog.sqlite')
+    backend = FakeBackend()
+    store = MacroStore(config=config, backend=backend, catalog=CatalogStore(config.catalog_path))
+    wide = pl.DataFrame({'date': [date(2024, 1, 1)], 'year10': [4.], 'month1': [5.]})
+    monkeypatch.setattr('quant_warehouse.warehouse.macro.fetch_treasury_rates_wide', lambda **kwargs: wide)
+    result = store.refresh_treasury_rates(start_date='1900-01-01')
+    assert result['series_count'] == 2
+    assert set(result['rows_by_series']) == {'macro__ust_year10', 'macro__ust_month1'}
+    assert all(frame.columns == ['date', 'value'] for frame in backend.frames.values())
+    state = store.catalog.get(symbol='TREASURY_CURVE', section='macro_treasury', provider='fmp')
+    assert 'date' in state.columns_present
+    assert 'macro__ust_date' not in state.columns_present
+
+
+def test_refresh_yield_curve_preserves_bundle_date(tmp_path, monkeypatch):
+    home = tmp_path / 'qw'
+    config = WarehouseConfig(home=home, arctic_uri=f"lmdb://{home / 'arctic'}", catalog_path=home / 'catalog.sqlite')
+    backend = FakeBackend()
+    store = MacroStore(config=config, backend=backend, catalog=CatalogStore(config.catalog_path))
+    wide = pl.DataFrame({'date': [date(2024, 1, 1)], 'year10': [4.]})
+    monkeypatch.setattr('quant_warehouse.warehouse.macro.fetch_yield_curve_history', lambda **kwargs: wide)
+    result = store.refresh_yield_curve_history(start_date='2024-01-01', end_date='2024-01-01')
+    assert result['series_count'] == 1
+    bundle = next(frame for frame in backend.frames.values() if 'macro__yc_year10' in frame.columns)
+    assert bundle.columns == ['date', 'macro__yc_year10']

@@ -129,7 +129,7 @@ class MacroStore:
             end_date=end_date,
         )
         updated: dict[str, int] = {}
-        for column in [col for col in wide.columns]:
+        for column in [col for col in wide.columns if col != "date"]:
             code = treasury_series_code(column)
             series_frame = wide.select(["date", column]).rename({column: "value"})
             storage_symbol = symbol_provider_key(code, provider)
@@ -155,7 +155,7 @@ class MacroStore:
             symbol=TREASURY_BUNDLE_SYMBOL,
             section=MACRO_TREASURY_SECTION,
             provider=provider,
-            frame=wide.rename(columns={column: treasury_series_code(column) for column in wide.columns}),
+            frame=wide.rename({column: treasury_series_code(column) for column in wide.columns if column != "date"}),
         )
         return {
             "provider": provider,
@@ -207,7 +207,7 @@ class MacroStore:
         )
         wide = merge_upsert(existing_bundle, incoming)
         updated: dict[str, int] = {}
-        for column in [col for col in wide.columns]:
+        for column in [col for col in wide.columns if col != "date"]:
             code = yield_curve_series_code(column)
             series_frame = wide.select(["date", column]).rename({column: "value"})
             storage_symbol = symbol_provider_key(code, provider)
@@ -233,13 +233,13 @@ class MacroStore:
             self.backend.write(
                 yield_curve_library,
                 bundle_symbol,
-                wide.rename(columns={column: yield_curve_series_code(column) for column in wide.columns}),
+                wide.rename({column: yield_curve_series_code(column) for column in wide.columns if column != "date"}),
             )
         self._upsert_catalog_state(
             symbol=YIELD_CURVE_BUNDLE_SYMBOL,
             section=MACRO_YIELD_CURVE_SECTION,
             provider=provider,
-            frame=wide.rename(columns={column: yield_curve_series_code(column) for column in wide.columns}),
+            frame=wide.rename({column: yield_curve_series_code(column) for column in wide.columns if column != "date"}),
         )
         return {
             "provider": provider,
