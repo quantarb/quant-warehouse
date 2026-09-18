@@ -39,3 +39,27 @@ def test_normalize_risk_premium_frame_preserves_country_rows():
     out = normalize_risk_premium_frame(raw)
     assert out.height == 2
     assert set(out["country"]) == {"United States", "Canada"}
+
+
+def test_economic_empty_response_is_not_a_refresh_failure(monkeypatch):
+    import sys
+    from types import SimpleNamespace
+    from quant_warehouse.ingest.macro_fetch import fetch_economic_indicator_series
+    def empty(**kwargs):
+        raise RuntimeError('[Empty] -> No economic indicator observations returned.')
+    monkeypatch.setattr('quant_warehouse.ingest.macro_fetch.configure_openbb_credentials', lambda: None)
+    monkeypatch.setitem(sys.modules, 'openbb', SimpleNamespace(obb=SimpleNamespace(economy=SimpleNamespace(indicators=empty))))
+    assert fetch_economic_indicator_series('GDP').is_empty()
+
+
+def test_economic_authentication_failures_are_not_hidden(monkeypatch):
+    import sys
+    import pytest
+    from types import SimpleNamespace
+    from quant_warehouse.ingest.macro_fetch import fetch_economic_indicator_series
+    def unauthorized(**kwargs):
+        raise RuntimeError('Unauthorized request')
+    monkeypatch.setattr('quant_warehouse.ingest.macro_fetch.configure_openbb_credentials', lambda: None)
+    monkeypatch.setitem(sys.modules, 'openbb', SimpleNamespace(obb=SimpleNamespace(economy=SimpleNamespace(indicators=unauthorized))))
+    with pytest.raises(RuntimeError, match='Unauthorized'):
+        fetch_economic_indicator_series('GDP')

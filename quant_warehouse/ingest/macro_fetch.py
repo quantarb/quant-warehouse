@@ -8,6 +8,7 @@ import polars as pl
 
 from quant_warehouse.ingest.credentials import configure_openbb_credentials
 from quant_warehouse.ingest.normalize import clip_to_min_historical_date
+from quant_warehouse.ingest.openbb_fetch import _is_empty_fetch_error
 from quant_warehouse.warehouse.sections import MIN_HISTORICAL_DATE
 
 def _as_polars(value: Any) -> pl.DataFrame:
@@ -55,7 +56,12 @@ def fetch_economic_indicator_series(name: str, *, provider: str = "fmp", start_d
     kwargs: dict[str, Any] = {"symbol": str(name).strip(), "provider": "fmp"}
     if start_date: kwargs["start_date"] = str(start_date)[:10]
     if end_date: kwargs["end_date"] = str(end_date)[:10]
-    result = obb.economy.indicators(**kwargs)
+    try:
+        result = obb.economy.indicators(**kwargs)
+    except Exception as exc:
+        if _is_empty_fetch_error(exc):
+            return pl.DataFrame()
+        raise
     return _records_to_frame(result.to_polars())
 
 
