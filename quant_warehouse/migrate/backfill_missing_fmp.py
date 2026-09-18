@@ -266,6 +266,10 @@ def backfill_missing_fmp_historical(
         progress_logger=progress_logger,
     )
     summary["equity"] = _summarize_results(equity_results)
+    summary["equity_errors"] = [row for row in equity_results if row.get("status") == "error"]
+    if summary["equity_errors"] and callable(progress_logger):
+        for row in summary["equity_errors"][:10]:
+            progress_logger(f"Refresh error {row['symbol']}/{row['section']}: {row.get('error', 'unknown error')}")
 
     etf_symbols = (
         list(dict.fromkeys(str(symbol).strip().upper() for symbol in etf_symbols if str(symbol).strip()))
