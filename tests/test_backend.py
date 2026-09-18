@@ -112,3 +112,13 @@ def test_provider_routing_backend_separates_provider_roots(tmp_path: Path):
     assert fmp_backend.read("fmp_equity_prices", "AAPL__fmp") is not None
     assert yfinance_backend.read("yfinance_equity_prices", "AAPL__yfinance") is not None
     assert default_backend.read("fmp_equity_prices", "AAPL__fmp") is None
+
+
+def test_unnamed_legacy_time_index_restores_observation_dates(tmp_path):
+    backend = ArcticBackend(_config(tmp_path).arctic_uri)
+    stored = _sample_frame().to_pandas().set_index('date')
+    stored.index.name = None
+    backend._library('dividends').write('TEST__fmp', stored)
+    out = backend.read('dividends', 'TEST__fmp')
+    assert out['date'].to_list() == _sample_frame()['date'].to_list()
+    assert out['close'].to_list() == [100., 101.]
