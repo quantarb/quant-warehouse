@@ -149,3 +149,27 @@ def test_dividend_events_preserve_ex_date_and_amounts(date_column, amount_column
     assert frame['event_date'][0] == datetime(2024, 3, 1)
     assert frame['signal_value'][0] == 0.5
     assert frame['text_0'][0] == 0.25
+
+
+def test_issuer_refresh_sections_cover_every_fundamental_reader():
+    from quant_warehouse.platforms.data_providers.fmp.sections import fmp_issuer_model_sections
+    from quant_warehouse.platforms.data_providers.fmp.feature_engineering.broad_observations import build_issuer_families
+    from quant_warehouse.warehouse.sections import fundamental_period_for_section
+    reads = set()
+    class Warehouse:
+        def read_fundamentals(self, symbol, *, section, **kwargs):
+            reads.add(section)
+            if section == 'historical_market_cap':
+                return pl.DataFrame({'date': [datetime(2024, 1, 1)], 'market_cap': [100.]})
+            return pl.DataFrame()
+        def read_news(self, *args, **kwargs):
+            return pl.DataFrame()
+    warehouse = Warehouse()
+    list(build_issuer_families(warehouse, 'TEST'))
+    list(issuer_event_observations(warehouse, 'TEST'))
+    quarter = set(fmp_issuer_model_sections('quarter'))
+    annual = set(fmp_issuer_model_sections('annual'))
+    assert reads <= quarter
+    assert {'historical_market_cap', 'ownership_insider_trading', 'ownership_government_trades', 'estimates_price_target', 'esg_score'} <= quarter
+    assert annual == {section for section in quarter if fundamental_period_for_section(section, preferred='annual') == 'annual'}
+    assert 'estimates_historical' not in annual

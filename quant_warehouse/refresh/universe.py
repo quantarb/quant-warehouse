@@ -251,6 +251,7 @@ def _process_symbol_fundamentals(
                     symbol,
                     section,
                     provider,
+                    period=period,
                     staleness_days=staleness_days,
                     skip_recent_hours=skip_recent_hours,
                     is_etf=is_etf,
@@ -261,6 +262,7 @@ def _process_symbol_fundamentals(
                     symbol,
                     section,
                     provider,
+                    period=period,
                     staleness_days=staleness_days,
                     skip_recent_hours=skip_recent_hours,
                 )
@@ -269,6 +271,7 @@ def _process_symbol_fundamentals(
                 symbol,
                 section,
                 provider,
+                period=period,
                 staleness_days=staleness_days,
                 skip_recent_hours=skip_recent_hours,
                 is_etf=is_etf,

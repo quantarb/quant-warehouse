@@ -11,6 +11,7 @@ from quant_warehouse.catalog.listing_date import equity_historical_floor
 from quant_warehouse.catalog.store import CatalogStore, SectionState
 from quant_warehouse.warehouse.sections import (
     ALL_FUNDAMENTAL_SECTIONS,
+    fundamental_period_for_section,
     DATE_WINDOW_SECTIONS,
     DEFAULT_ECONOMIC_SERIES,
     MACRO_TREASURY_SECTION,
@@ -174,6 +175,7 @@ def historical_fetch_plan(
     provider: str,
     *,
     target_end_date: date | None = None,
+    period: str | None = None,
     staleness_days: int = 90,
     skip_recent_hours: float = 24.0,
     is_etf: bool = False,
@@ -188,7 +190,9 @@ def historical_fetch_plan(
         else _equity_history_start_date(catalog, symbol)
     )
     threshold_days = _section_staleness_days(section, staleness_days=staleness_days)
-    state = catalog.get(symbol=symbol, section=section, provider=provider)
+    effective_period = fundamental_period_for_section(section, preferred=period) if period is not None else None
+    stored_section = f"{section}_{effective_period}" if effective_period else section
+    state = catalog.get(symbol=symbol, section=stored_section, provider=provider)
 
     if state is None or int(state.row_count) <= 0:
         return HistoricalFetchPlan(True, "full", "missing", (), target_start, target_end)
@@ -399,10 +403,13 @@ def fundamental_refresh_needs_update(
     section: str,
     provider: str,
     *,
+    period: str | None = None,
     staleness_days: int = 90,
     skip_recent_hours: float = 24.0,
 ) -> tuple[bool, str]:
-    state = catalog.get(symbol=symbol.strip().upper(), section=section, provider=provider)
+    effective_period = fundamental_period_for_section(section, preferred=period) if period is not None else None
+    stored_section = f"{section}_{effective_period}" if effective_period else section
+    state = catalog.get(symbol=symbol.strip().upper(), section=stored_section, provider=provider)
     if state is None or int(state.row_count) <= 0:
         return True, "missing"
     max_date = _parse_date(state.max_date)
@@ -528,6 +535,7 @@ def backfill_fundamental_needs_update(
     section: str,
     provider: str,
     *,
+    period: str | None = None,
     staleness_days: int = 90,
     skip_recent_hours: float = 24.0,
     is_etf: bool = False,
@@ -538,6 +546,7 @@ def backfill_fundamental_needs_update(
         symbol,
         section,
         provider,
+        period=period,
         staleness_days=staleness_days,
         skip_recent_hours=skip_recent_hours,
         is_etf=is_etf,
