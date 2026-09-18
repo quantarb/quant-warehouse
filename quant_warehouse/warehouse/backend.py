@@ -92,6 +92,15 @@ class ArcticBackend:
             df = version.data
             if df is None or df.is_empty():
                 return None
+            # ArcticDB's Polars reader can expose pandas NaT as the minimum
+            # int64 timestamp instead of a null. Restore the missing dates.
+            timestamp_columns = [name for name, dtype in df.schema.items()
+                                 if isinstance(dtype, pl.Datetime)]
+            df = df.with_columns(
+                pl.when(pl.col(name).cast(pl.Int64) == -(2**63))
+                .then(pl.lit(None, dtype=df.schema[name])).otherwise(pl.col(name)).alias(name)
+                for name in timestamp_columns
+            )
             if filter_dates:
                 start, end = date_range
                 if start is not None:
@@ -118,7 +127,16 @@ class ArcticBackend:
             # Keep that conversion isolated here; all warehouse callers and
             # all reads remain Polars, so the storage-library adapter never
             # crosses the public API.
-            write_frame = df.to_pandas()
+            from quant_warehouse.ingest.normalize import INDEX_CANDIDATES
+
+            # All-missing source dates have no inferred Polars dtype. Without
+            # an explicit date type pandas emits an object column, forcing
+            # ArcticDB to inspect every null and log an inference message.
+            # Preserve the column and its missing values as typed timestamps.
+            empty_dates = [name for name in INDEX_CANDIDATES
+                           if name in df.columns and df[name].null_count() == df.height]
+            storage_frame = df.with_columns(pl.col(name).cast(pl.Datetime("ns")) for name in empty_dates)
+            write_frame = storage_frame.to_pandas()
             # Partially dated source panels must preserve unknown dates. ArcticDB
             # rejects NaT in its time index, so keep such panels row-indexed.
             if "date" in df.columns and df["date"].null_count() == 0:
