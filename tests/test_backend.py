@@ -2,6 +2,7 @@ from pathlib import Path
 from datetime import datetime
 
 import polars as pl
+import pytest
 
 from quant_warehouse.config import WarehouseConfig
 from quant_warehouse.warehouse.backend import ArcticBackend, ProviderRoutingBackend, open_backend
@@ -41,6 +42,28 @@ def test_partially_dated_panel_preserves_undated_rows_and_supports_date_reads(tm
                             date_range=(datetime(2024, 1, 1), datetime(2024, 1, 31)),
                             columns=['amount'])
     assert selected.to_dicts() == [{'amount': 20.}]
+
+
+@pytest.mark.parametrize('date_dtype', [pl.Null, pl.String, pl.Datetime('ns')])
+def test_all_missing_filing_dates_are_stored_without_object_inference(tmp_path, monkeypatch, date_dtype):
+    import arcticdb.version_store._normalization as normalization
+    original = normalization.get_sample_from_non_empty_arr
+    def sample(array, name):
+        assert name != 'filing_date', 'Missing filing dates must not use object inference'
+        return original(array, name)
+    monkeypatch.setattr(normalization, 'get_sample_from_non_empty_arr', sample)
+    backend = ArcticBackend(_config(tmp_path).arctic_uri)
+    frame = _sample_frame().with_columns(pl.Series('filing_date', [None, None], dtype=date_dtype))
+    backend.write('statements', 'AAPL__fmp', frame)
+    out = backend.read('statements', 'AAPL__fmp')
+    assert out.height == frame.height
+    assert out['filing_date'].to_list() == [None, None]
+    assert out['close'].to_list() == frame['close'].to_list()
+    assert out['date'].to_list() == frame['date'].to_list()
+    # A later refresh can populate the same date field without losing rows.
+    updated = frame.with_columns(pl.Series('filing_date', [None, datetime(2024, 1, 3)]))
+    backend.write('statements', 'AAPL__fmp', updated)
+    assert backend.read('statements', 'AAPL__fmp')['filing_date'].to_list() == [None, datetime(2024, 1, 3)]
 
 
 def test_open_backend_uses_arctic(tmp_path: Path, monkeypatch):
