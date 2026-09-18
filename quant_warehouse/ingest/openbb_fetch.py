@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import Any
+from time import sleep
 
 import polars as pl
 
@@ -115,6 +116,20 @@ def _call_route(route: str, *, symbol: str | None, provider: str, **kwargs: Any)
     return obj(**call_kwargs)
 
 
+def _call_route_with_retries(route: str, *, symbol: str, provider: str, **kwargs: Any):
+    """Retry transient transport failures, retaining all other provider errors."""
+    for attempt in range(3):
+        try:
+            return _call_route(route, symbol=symbol, provider=provider, **kwargs)
+        except Exception as exc:
+            transport_failure = isinstance(exc, (TimeoutError, ConnectionError)) or any(
+                name in str(exc) for name in ("TimeoutError", "ClientConnectorError", "ServerDisconnectedError")
+            )
+            if not transport_failure or attempt == 2:
+                raise
+            sleep(0.5 * (2 ** attempt))
+
+
 def fetch_openbb(
     section: str,
     *,
@@ -128,7 +143,7 @@ def fetch_openbb(
 
     call_kwargs = dict(kwargs)
     try:
-        result = _call_route(route, symbol=symbol, provider=provider, **call_kwargs)
+        result = _call_route_with_retries(route, symbol=symbol, provider=provider, **call_kwargs)
     except Exception as exc:
         if _is_empty_fetch_error(exc):
             return OpenBBFetchResult(

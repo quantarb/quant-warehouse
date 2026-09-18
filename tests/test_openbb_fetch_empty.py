@@ -55,3 +55,31 @@ def test_record_conversion_handles_mixed_dates_without_pandas(monkeypatch):
     monkeypatch.setattr('quant_warehouse.ingest.openbb_fetch._call_route',lambda *a,**k:Result())
     frame=fetch_openbb('estimates_price_target',symbol='A',provider='fmp').df
     assert frame['published_date'].to_list()==[datetime(2020,1,1),datetime(2020,1,2)]
+
+
+def test_transient_transport_failure_retries_without_changing_request(monkeypatch):
+    from quant_warehouse.ingest import openbb_fetch
+    calls = []
+    result = object()
+    def call(route, **kwargs):
+        calls.append((route, kwargs))
+        if len(calls) < 3:
+            raise RuntimeError('[Unexpected Error] -> TimeoutError ->')
+        return result
+    monkeypatch.setattr(openbb_fetch, '_call_route', call)
+    monkeypatch.setattr(openbb_fetch, 'sleep', lambda seconds: None)
+    assert openbb_fetch._call_route_with_retries('equity.fundamental.income', symbol='AAPL', provider='fmp', limit=1000) is result
+    assert len(calls) == 3 and calls[0] == calls[1] == calls[2]
+
+
+def test_provider_validation_errors_are_not_retried(monkeypatch):
+    import pytest
+    from quant_warehouse.ingest import openbb_fetch
+    calls = []
+    def call(*args, **kwargs):
+        calls.append(kwargs)
+        raise ValueError('Invalid data model')
+    monkeypatch.setattr(openbb_fetch, '_call_route', call)
+    with pytest.raises(ValueError, match='Invalid data model'):
+        openbb_fetch._call_route_with_retries('equity.fundamental.income', symbol='AAPL', provider='fmp')
+    assert len(calls) == 1
