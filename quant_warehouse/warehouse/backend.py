@@ -92,6 +92,10 @@ class ArcticBackend:
             df = version.data
             if df is None or df.is_empty():
                 return None
+            # Older datasets used an unnamed time index. ArcticDB exposes it
+            # as __index__; restore that observation date before normalization.
+            if "__index__" in df.columns and "date" not in df.columns and isinstance(df.schema["__index__"], pl.Datetime):
+                df = df.rename({"__index__": "date"})
             # ArcticDB's Polars reader can expose pandas NaT as the minimum
             # int64 timestamp instead of a null. Restore the missing dates.
             timestamp_columns = [name for name, dtype in df.schema.items()
