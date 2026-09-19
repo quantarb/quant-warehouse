@@ -41,8 +41,18 @@ def _to_snake(name: str) -> str:
 
 def _date_expr(frame: pl.DataFrame, column: str) -> pl.Expr:
     if frame.schema[column] == pl.String:
-        return pl.col(column).str.to_datetime(strict=False)
-    return pl.col(column).cast(pl.Datetime, strict=False)
+        value = pl.col(column).str.to_datetime(strict=False, time_unit="us")
+    else:
+        value = pl.col(column).cast(pl.Datetime("us"), strict=False)
+    # Nanosecond timestamps cannot represent years before 1678. Some FMP
+    # event routes use year 1/12 values as missing-date sentinels; keep the
+    # event and null only that invalid date field.
+    return (
+        pl.when(value.dt.year().is_between(1678, 2261))
+        .then(value)
+        .otherwise(None)
+        .cast(pl.Datetime("ns"))
+    )
 
 
 def _floor_expr(min_date: str | None) -> datetime:
@@ -134,10 +144,10 @@ def coerce_object_dates(frame: pl.DataFrame) -> pl.DataFrame:
     expressions = []
     for column, dtype in frame.schema.items():
         name = str(column).lower()
-        if dtype == pl.Date:
-            expressions.append(pl.col(column).cast(pl.Datetime).alias(column))
+        if (dtype == pl.Date or isinstance(dtype, pl.Datetime)) and ("date" in name or name.endswith("_at")):
+            expressions.append(_date_expr(frame, column).alias(column))
         elif dtype == pl.String and ("date" in name or name.endswith("_at")):
-            expressions.append(pl.col(column).str.to_datetime(strict=False).alias(column))
+            expressions.append(_date_expr(frame, column).alias(column))
     return frame.with_columns(expressions) if expressions else frame
 
 
