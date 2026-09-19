@@ -66,6 +66,31 @@ def test_all_missing_filing_dates_are_stored_without_object_inference(tmp_path, 
     assert backend.read('statements', 'AAPL__fmp')['filing_date'].to_list() == [None, datetime(2024, 1, 3)]
 
 
+def test_all_missing_payload_columns_bypass_object_inference_and_restore_schema(tmp_path, monkeypatch):
+    import arcticdb.version_store._normalization as normalization
+    original = normalization.get_sample_from_non_empty_arr
+    def sample(array, name):
+        if name in {'filing_url', 'action'}:
+            assert any(value is not None for value in array), 'Empty payloads must not use object inference'
+        return original(array, name)
+    monkeypatch.setattr(normalization, 'get_sample_from_non_empty_arr', sample)
+    backend = ArcticBackend(_config(tmp_path).arctic_uri)
+    frame = _sample_frame().with_columns(
+        pl.lit(None).alias('filing_url'),
+        pl.Series('action', [None, None], dtype=pl.String),
+    )
+    backend.write('events', 'HON__fmp', frame)
+    out = backend.read('events', 'HON__fmp')
+    assert out.columns == frame.columns
+    assert out.select('filing_url', 'action').null_count().row(0) == (2, 2)
+    selected = backend.read('events', 'HON__fmp', columns=['action', 'close'])
+    assert selected.columns == ['action', 'close']
+    assert selected['action'].null_count() == 2
+    populated = frame.with_columns(pl.Series('action', [None, 'Buy']))
+    backend.write('events', 'HON__fmp', populated)
+    assert backend.read('events', 'HON__fmp')['action'].to_list() == [None, 'Buy']
+
+
 def test_open_backend_uses_arctic(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("QW_HOME", str(tmp_path / "home"))
     backend = open_backend(WarehouseConfig.from_env())

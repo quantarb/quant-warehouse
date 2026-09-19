@@ -11,6 +11,8 @@ from quant_warehouse.config import WarehouseConfig
 
 StorageKind = Literal["arctic"]
 FrameFormat = Literal["polars"]
+_EMPTY_COLUMNS_METADATA = "quant_warehouse_empty_columns"
+_COLUMN_ORDER_METADATA = "quant_warehouse_column_order"
 
 
 class StorageBackend(Protocol):
@@ -76,12 +78,20 @@ class ArcticBackend:
             if not lib.has_symbol(symbol):
                 return None
             read_kwargs = {}
+            stored_metadata = None
+            if columns is not None:
+                metadata_item = lib.read_metadata(symbol)
+                stored_metadata = getattr(metadata_item, "metadata", None) or {}
+                empty_columns = set(stored_metadata.get(_EMPTY_COLUMNS_METADATA, ()))
+                physical_columns = [name for name in columns if name not in empty_columns]
+            else:
+                physical_columns = None
             filter_dates = date_range is not None and lib.get_description(symbol).sorted != "ASCENDING"
             if date_range is not None:
                 if not filter_dates:
                     read_kwargs["date_range"] = date_range
             if columns is not None:
-                read_kwargs["columns"] = list(dict.fromkeys([*columns, "date"])) if filter_dates else columns
+                read_kwargs["columns"] = list(dict.fromkeys([*physical_columns, "date"])) if filter_dates else physical_columns
             read_kwargs["output_format"] = output_format
             try:
                 version = lib.read(symbol, **read_kwargs)
@@ -92,6 +102,11 @@ class ArcticBackend:
             df = version.data
             if df is None or df.is_empty():
                 return None
+            stored_metadata = stored_metadata or getattr(version, "metadata", None) or {}
+            empty_columns = stored_metadata.get(_EMPTY_COLUMNS_METADATA, ())
+            requested_empty = [name for name in empty_columns if columns is None or name in columns]
+            if requested_empty:
+                df = df.with_columns(pl.lit(None).alias(name) for name in requested_empty)
             # Older datasets used an unnamed time index. ArcticDB exposes it
             # as __index__; restore that observation date before normalization.
             if "__index__" in df.columns and "date" not in df.columns and isinstance(df.schema["__index__"], pl.Datetime):
@@ -113,6 +128,11 @@ class ArcticBackend:
                     df = df.filter(pl.col("date") <= end)
                 if columns is not None:
                     df = df.select(columns)
+            elif columns is not None:
+                df = df.select(columns)
+            elif stored_metadata.get(_COLUMN_ORDER_METADATA):
+                order = [name for name in stored_metadata[_COLUMN_ORDER_METADATA] if name in df.columns]
+                df = df.select(order)
             return df.sort("date") if "date" in df.columns else df
 
     def write(
@@ -139,7 +159,12 @@ class ArcticBackend:
             # Preserve the column and its missing values as typed timestamps.
             empty_dates = [name for name in INDEX_CANDIDATES
                            if name in df.columns and df[name].null_count() == df.height]
-            storage_frame = df.with_columns(pl.col(name).cast(pl.Datetime("ns")) for name in empty_dates)
+            empty_payload = [name for name in df.columns
+                             if name not in INDEX_CANDIDATES and df[name].null_count() == df.height]
+            storage_frame = (
+                df.drop(empty_payload)
+                .with_columns(pl.col(name).cast(pl.Datetime("ns")) for name in empty_dates)
+            )
             write_frame = storage_frame.to_pandas()
             # Partially dated source panels must preserve unknown dates. ArcticDB
             # rejects NaT in its time index, so keep such panels row-indexed.
@@ -149,6 +174,10 @@ class ArcticBackend:
             lib.write(
                 symbol,
                 write_frame.sort_index(),
+                metadata={
+                    _EMPTY_COLUMNS_METADATA: empty_payload,
+                    _COLUMN_ORDER_METADATA: df.columns,
+                },
                 prune_previous_versions=prune_previous_versions,
             )
 
