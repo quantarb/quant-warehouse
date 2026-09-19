@@ -72,6 +72,22 @@ def test_transient_transport_failure_retries_without_changing_request(monkeypatc
     assert len(calls) == 3 and calls[0] == calls[1] == calls[2]
 
 
+def test_transient_transport_failure_uses_five_bounded_attempts(monkeypatch):
+    import pytest
+    from quant_warehouse.ingest import openbb_fetch
+    calls = []
+    delays = []
+    def call(*args, **kwargs):
+        calls.append(kwargs)
+        raise RuntimeError('[Unexpected Error] -> ClientConnectorError ->')
+    monkeypatch.setattr(openbb_fetch, '_call_route', call)
+    monkeypatch.setattr(openbb_fetch, 'sleep', delays.append)
+    with pytest.raises(RuntimeError, match='ClientConnectorError'):
+        openbb_fetch._call_route_with_retries('equity.fundamental.income', symbol='AAPL', provider='fmp')
+    assert len(calls) == 5
+    assert delays == [1.0, 2.0, 4.0, 8.0]
+
+
 def test_provider_validation_errors_are_not_retried(monkeypatch):
     import pytest
     from quant_warehouse.ingest import openbb_fetch

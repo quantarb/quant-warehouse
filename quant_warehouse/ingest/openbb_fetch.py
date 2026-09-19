@@ -118,16 +118,17 @@ def _call_route(route: str, *, symbol: str | None, provider: str, **kwargs: Any)
 
 def _call_route_with_retries(route: str, *, symbol: str, provider: str, **kwargs: Any):
     """Retry transient transport failures, retaining all other provider errors."""
-    for attempt in range(3):
+    attempts = 5
+    for attempt in range(attempts):
         try:
             return _call_route(route, symbol=symbol, provider=provider, **kwargs)
         except Exception as exc:
             transport_failure = isinstance(exc, (TimeoutError, ConnectionError)) or any(
                 name in str(exc) for name in ("TimeoutError", "ClientConnectorError", "ServerDisconnectedError")
             )
-            if not transport_failure or attempt == 2:
+            if not transport_failure or attempt == attempts - 1:
                 raise
-            sleep(0.5 * (2 ** attempt))
+            sleep(1.0 * (2 ** attempt))
 
 
 def fetch_openbb(

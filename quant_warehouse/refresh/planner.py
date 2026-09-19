@@ -194,7 +194,13 @@ def historical_fetch_plan(
     stored_section = f"{section}_{effective_period}" if effective_period else section
     state = catalog.get(symbol=symbol, section=stored_section, provider=provider)
 
-    if state is None or int(state.row_count) <= 0:
+    if state is None:
+        return HistoricalFetchPlan(True, "full", "missing", (), target_start, target_end)
+    hours = _hours_since(_parse_timestamp(state.last_fetched_at))
+    recent_attempt = hours is not None and hours < max(0.0, float(skip_recent_hours))
+    if int(state.row_count) <= 0:
+        if recent_attempt:
+            return HistoricalFetchPlan(False, "skip", "recent_empty_attempt", (), target_start, target_end)
         return HistoricalFetchPlan(True, "full", "missing", (), target_start, target_end)
     if _is_below_min_historical_date(state.min_date):
         return HistoricalFetchPlan(True, "full", "below_min_historical_date", (), target_start, target_end)
@@ -203,8 +209,6 @@ def historical_fetch_plan(
 
     min_date = _parse_date(state.min_date)
     max_date = _parse_date(state.max_date)
-    hours = _hours_since(_parse_timestamp(state.last_fetched_at))
-    recent_attempt = hours is not None and hours < max(0.0, float(skip_recent_hours))
     has_date_window = _supports_date_window(section)
 
     if section in SNAPSHOT_FUNDAMENTAL_SECTIONS and section not in DATE_WINDOW_SECTIONS:
@@ -382,7 +386,12 @@ def price_refresh_needs_update(
 ) -> tuple[bool, str]:
     target_end_date = target_end_date or expected_latest_price_date()
     state = catalog.get(symbol=symbol.strip().upper(), section=section, provider=provider)
-    if state is None or int(state.row_count) <= 0:
+    if state is None:
+        return True, "missing"
+    hours = _hours_since(_parse_timestamp(state.last_fetched_at))
+    if int(state.row_count) <= 0:
+        if hours is not None and hours < max(0.0, float(skip_recent_hours)):
+            return False, "recent_empty_attempt"
         return True, "missing"
     if _is_below_min_historical_date(state.min_date):
         return True, "below_min_historical_date"
@@ -391,7 +400,6 @@ def price_refresh_needs_update(
         return True, "missing_max_date"
     if max_date < target_end_date:
         return True, "stale_max_date"
-    hours = _hours_since(_parse_timestamp(state.last_fetched_at))
     if hours is not None and hours < max(0.0, float(skip_recent_hours)):
         return False, "recent_attempt"
     return False, "fresh"
@@ -410,7 +418,12 @@ def fundamental_refresh_needs_update(
     effective_period = fundamental_period_for_section(section, preferred=period) if period is not None else None
     stored_section = f"{section}_{effective_period}" if effective_period else section
     state = catalog.get(symbol=symbol.strip().upper(), section=stored_section, provider=provider)
-    if state is None or int(state.row_count) <= 0:
+    if state is None:
+        return True, "missing"
+    hours = _hours_since(_parse_timestamp(state.last_fetched_at))
+    if int(state.row_count) <= 0:
+        if hours is not None and hours < max(0.0, float(skip_recent_hours)):
+            return False, "recent_empty_attempt"
         return True, "missing"
     max_date = _parse_date(state.max_date)
     if max_date is None:
@@ -418,7 +431,6 @@ def fundamental_refresh_needs_update(
     age_days = (datetime.now(timezone.utc).date() - max_date).days
     if age_days > max(1, int(staleness_days)):
         return True, "stale_max_date"
-    hours = _hours_since(_parse_timestamp(state.last_fetched_at))
     if hours is not None and hours < max(0.0, float(skip_recent_hours)):
         return False, "recent_attempt"
     return False, "fresh"
