@@ -189,6 +189,23 @@ def test_backfill_fundamental_upgrades_collapsed_panel_schema():
     assert reason == "upgrade_panel_schema"
 
 
+def test_recent_empty_fundamental_response_is_not_immediately_refetched():
+    state = SectionState(
+        symbol="OC", section="historical_splits", provider="fmp",
+        min_date=None, max_date=None, row_count=0, columns_present=(),
+        last_fetched_at=datetime.now(timezone.utc).isoformat(),
+    )
+    catalog = FakeCatalog({("OC", "historical_splits", "fmp"): state})
+    plan = historical_fetch_plan(
+        catalog, "OC", "historical_splits", "fmp", skip_recent_hours=24.0,
+    )
+    assert plan.needs_refresh is False
+    assert plan.reason == "recent_empty_attempt"
+    assert fundamental_refresh_needs_update(
+        catalog, "OC", "historical_splits", "fmp", skip_recent_hours=24.0,
+    ) == (False, "recent_empty_attempt")
+
+
 def test_nport_disclosure_skips_when_history_is_complete():
     catalog = FakeCatalog(
         {
