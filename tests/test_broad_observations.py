@@ -47,6 +47,22 @@ def test_event_normalization_and_merge_preserve_same_day_analysts():
     assert merged.height==2
 
 
+@pytest.mark.parametrize('bad_date', [datetime(1, 1, 1), datetime(12, 2, 17)])
+def test_panel_normalization_nulls_out_of_range_vendor_dates_without_dropping_event(bad_date):
+    from quant_warehouse.ingest.normalize import normalize_panel_frame
+    frame = pl.DataFrame({
+        'filing_date': [datetime(2024, 3, 1)],
+        'transaction_date': [bad_date],
+        'transaction_type': ['P-Purchase'],
+        'securities_transacted': [10.],
+    })
+    normalized = normalize_panel_frame(frame, provider='fmp')
+    assert normalized.height == 1
+    assert normalized['filing_date'][0] == datetime(2024, 3, 1)
+    assert normalized['transaction_date'][0] is None
+    assert normalized['transaction_type'][0] == 'P-Purchase'
+
+
 def test_unknown_insider_direction_remains_missing_with_numeric_null_columns():
     class Warehouse:
         def read_fundamentals(self, symbol, *, section, **kwargs):
