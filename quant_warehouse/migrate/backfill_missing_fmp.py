@@ -63,7 +63,7 @@ def _symbols_needing_price_refresh(
     *,
     provider: str,
     section: str,
-    skip_recent_hours: float,
+    skip_recent_hours: float | None,
     is_etf: bool = False,
 ) -> list[str]:
     target_end = expected_latest_price_date()
@@ -99,7 +99,7 @@ def _symbols_needing_fundamental_refresh(
     sections: Sequence[str],
     period: str | None = None,
     staleness_days: int,
-    skip_recent_hours: float,
+    skip_recent_hours: float | None,
     is_etf: bool = False,
 ) -> list[str]:
     out: list[str] = []
@@ -140,6 +140,7 @@ def backfill_missing_fmp_historical(
     max_etf_symbols: int | None = None,
     staleness_days: int = 90,
     skip_recent_hours: float = 24.0,
+    skip_if_fetched_today: bool = False,
     max_workers: int = 8,
     progress_logger: ProgressLogger = None,
 ) -> dict[str, object]:
@@ -164,8 +165,10 @@ def backfill_missing_fmp_historical(
         "include_prices": include_prices,
         "staleness_days": staleness_days,
         "skip_recent_hours": skip_recent_hours,
+        "skip_if_fetched_today": bool(skip_if_fetched_today),
         "max_workers": max(1, int(max_workers)),
     }
+    effective_skip_recent_hours = None if skip_if_fetched_today else skip_recent_hours
 
     should_refresh_macro = force_macro
     if not should_refresh_macro:
@@ -176,7 +179,7 @@ def backfill_missing_fmp_historical(
                 warehouse.catalog,
                 provider=equity_provider,
                 history_start_date=datetime.fromisoformat(str(macro_start_text)[:10]).date(),
-                skip_recent_hours=skip_recent_hours,
+                skip_recent_hours=effective_skip_recent_hours,
             )
 
     if should_refresh_macro:
@@ -193,7 +196,7 @@ def backfill_missing_fmp_historical(
                 warehouse,
                 provider=equity_provider,
                 macro_start_date=macro_start_text,
-                skip_recent_hours=skip_recent_hours,
+                skip_recent_hours=effective_skip_recent_hours,
                 progress_logger=progress_logger,
             )
     else:
@@ -219,7 +222,7 @@ def backfill_missing_fmp_historical(
             equity_symbols,
             provider=equity_provider,
             section="prices",
-            skip_recent_hours=skip_recent_hours,
+            skip_recent_hours=effective_skip_recent_hours,
             is_etf=False,
         )
         if callable(progress_logger):
@@ -234,7 +237,7 @@ def backfill_missing_fmp_historical(
                 providers=[equity_provider],
                 backfill_skip=True,
                 price_start_date=MIN_HISTORICAL_DATE,
-                skip_recent_hours=skip_recent_hours,
+                skip_recent_hours=effective_skip_recent_hours,
                 max_workers=max_workers,
                 progress_logger=progress_logger,
             )
@@ -247,7 +250,7 @@ def backfill_missing_fmp_historical(
         sections=section_list,
         period=normalized_period,
         staleness_days=staleness_days,
-        skip_recent_hours=skip_recent_hours,
+        skip_recent_hours=effective_skip_recent_hours,
         is_etf=False,
     )
     if callable(progress_logger):
@@ -263,7 +266,7 @@ def backfill_missing_fmp_historical(
         providers=[equity_provider],
         period=normalized_period,
         staleness_days=staleness_days,
-        skip_recent_hours=skip_recent_hours,
+        skip_recent_hours=effective_skip_recent_hours,
         backfill_skip=True,
         max_workers=max_workers,
         progress_logger=progress_logger,
@@ -294,7 +297,7 @@ def backfill_missing_fmp_historical(
             etf_symbols,
             provider=etf_provider,
             section="etf_prices",
-            skip_recent_hours=skip_recent_hours,
+            skip_recent_hours=effective_skip_recent_hours,
             is_etf=True,
         )
         if callable(progress_logger):
@@ -310,7 +313,7 @@ def backfill_missing_fmp_historical(
                 etf_symbols=set(etf_price_symbols),
                 backfill_skip=True,
                 price_start_date=MIN_HISTORICAL_DATE,
-                skip_recent_hours=skip_recent_hours,
+                skip_recent_hours=effective_skip_recent_hours,
                 max_workers=max_workers,
                 progress_logger=progress_logger,
             )
@@ -327,7 +330,7 @@ def backfill_missing_fmp_historical(
         provider=etf_provider,
         start_year=nport_start_year,
         staleness_days=staleness_days,
-        skip_recent_hours=skip_recent_hours,
+        skip_recent_hours=effective_skip_recent_hours,
         max_workers=max_workers,
         progress_logger=progress_logger,
     )

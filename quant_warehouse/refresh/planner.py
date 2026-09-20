@@ -177,7 +177,7 @@ def historical_fetch_plan(
     target_end_date: date | None = None,
     period: str | None = None,
     staleness_days: int = 90,
-    skip_recent_hours: float = 24.0,
+    skip_recent_hours: float | None = 24.0,
     is_etf: bool = False,
 ) -> HistoricalFetchPlan:
     """Plan tail/head/full/skip refreshes using catalog min/max dates."""
@@ -196,8 +196,9 @@ def historical_fetch_plan(
 
     if state is None:
         return HistoricalFetchPlan(True, "full", "missing", (), target_start, target_end)
-    hours = _hours_since(_parse_timestamp(state.last_fetched_at))
-    recent_attempt = hours is not None and hours < max(0.0, float(skip_recent_hours))
+    recent_attempt = _is_recent_attempt(
+        _parse_timestamp(state.last_fetched_at), skip_recent_hours=skip_recent_hours
+    )
     if int(state.row_count) <= 0:
         if recent_attempt:
             return HistoricalFetchPlan(False, "skip", "recent_empty_attempt", (), target_start, target_end)
@@ -375,22 +376,42 @@ def _hours_since(timestamp: datetime | None, *, now: datetime | None = None) -> 
     return (now_utc - timestamp).total_seconds() / 3600.0
 
 
+def _is_recent_attempt(
+    timestamp: datetime | None,
+    *,
+    skip_recent_hours: float | None,
+    now: datetime | None = None,
+) -> bool:
+    """Treat ``None`` as once per local calendar date; numbers remain rolling hours."""
+    if timestamp is None:
+        return False
+    if skip_recent_hours is None:
+        local_now = (now or datetime.now().astimezone()).astimezone()
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
+        return timestamp.astimezone(local_now.tzinfo).date() == local_now.date()
+    hours = _hours_since(timestamp, now=now)
+    return hours is not None and hours < max(0.0, float(skip_recent_hours))
+
+
 def price_refresh_needs_update(
     catalog: CatalogStore,
     symbol: str,
     provider: str,
     *,
     target_end_date: date | None = None,
-    skip_recent_hours: float = 24.0,
+    skip_recent_hours: float | None = 24.0,
     section: str = "prices",
 ) -> tuple[bool, str]:
     target_end_date = target_end_date or expected_latest_price_date()
     state = catalog.get(symbol=symbol.strip().upper(), section=section, provider=provider)
     if state is None:
         return True, "missing"
-    hours = _hours_since(_parse_timestamp(state.last_fetched_at))
+    recent_attempt = _is_recent_attempt(
+        _parse_timestamp(state.last_fetched_at), skip_recent_hours=skip_recent_hours
+    )
     if int(state.row_count) <= 0:
-        if hours is not None and hours < max(0.0, float(skip_recent_hours)):
+        if recent_attempt:
             return False, "recent_empty_attempt"
         return True, "missing"
     if _is_below_min_historical_date(state.min_date):
@@ -400,7 +421,7 @@ def price_refresh_needs_update(
         return True, "missing_max_date"
     if max_date < target_end_date:
         return True, "stale_max_date"
-    if hours is not None and hours < max(0.0, float(skip_recent_hours)):
+    if recent_attempt:
         return False, "recent_attempt"
     return False, "fresh"
 
@@ -413,16 +434,18 @@ def fundamental_refresh_needs_update(
     *,
     period: str | None = None,
     staleness_days: int = 90,
-    skip_recent_hours: float = 24.0,
+    skip_recent_hours: float | None = 24.0,
 ) -> tuple[bool, str]:
     effective_period = fundamental_period_for_section(section, preferred=period) if period is not None else None
     stored_section = f"{section}_{effective_period}" if effective_period else section
     state = catalog.get(symbol=symbol.strip().upper(), section=stored_section, provider=provider)
     if state is None:
         return True, "missing"
-    hours = _hours_since(_parse_timestamp(state.last_fetched_at))
+    recent_attempt = _is_recent_attempt(
+        _parse_timestamp(state.last_fetched_at), skip_recent_hours=skip_recent_hours
+    )
     if int(state.row_count) <= 0:
-        if hours is not None and hours < max(0.0, float(skip_recent_hours)):
+        if recent_attempt:
             return False, "recent_empty_attempt"
         return True, "missing"
     max_date = _parse_date(state.max_date)
@@ -431,7 +454,7 @@ def fundamental_refresh_needs_update(
     age_days = (datetime.now(timezone.utc).date() - max_date).days
     if age_days > max(1, int(staleness_days)):
         return True, "stale_max_date"
-    if hours is not None and hours < max(0.0, float(skip_recent_hours)):
+    if recent_attempt:
         return False, "recent_attempt"
     return False, "fresh"
 
@@ -453,7 +476,7 @@ def price_backfill_needs_update(
     provider: str,
     *,
     target_end_date: date | None = None,
-    skip_recent_hours: float = 24.0,
+    skip_recent_hours: float | None = 24.0,
     section: str = "prices",
     is_etf: bool = False,
 ) -> tuple[bool, str]:
@@ -499,14 +522,19 @@ def macro_refresh_needs_update(
     *,
     target_end_date: date | None = None,
     history_start_date: date | None = None,
-    skip_recent_hours: float = 24.0,
+    skip_recent_hours: float | None = 24.0,
 ) -> tuple[bool, str]:
     target_end_date = target_end_date or expected_latest_price_date()
     state = catalog.get(symbol=symbol.strip().upper(), section=section, provider=provider)
-    if state is None or int(state.row_count) <= 0:
+    if state is None:
         return True, "missing"
-    hours = _hours_since(_parse_timestamp(state.last_fetched_at))
-    recent_attempt = hours is not None and hours < max(0.0, float(skip_recent_hours))
+    recent_attempt = _is_recent_attempt(
+        _parse_timestamp(state.last_fetched_at), skip_recent_hours=skip_recent_hours
+    )
+    if int(state.row_count) <= 0:
+        if recent_attempt:
+            return False, "recent_empty_attempt"
+        return True, "missing"
     if history_start_date is not None:
         min_date = _parse_date(state.min_date)
         if min_date is not None and min_date > history_start_date:
@@ -549,7 +577,7 @@ def backfill_fundamental_needs_update(
     *,
     period: str | None = None,
     staleness_days: int = 90,
-    skip_recent_hours: float = 24.0,
+    skip_recent_hours: float | None = 24.0,
     is_etf: bool = False,
 ) -> tuple[bool, str]:
     """Skip fundamentals already present unless stale or stored with a collapsed panel schema."""
@@ -573,7 +601,7 @@ def nport_disclosure_needs_update(
     *,
     start_year: int = 2019,
     staleness_days: int = 90,
-    skip_recent_hours: float = 24.0,
+    skip_recent_hours: float | None = 24.0,
 ) -> tuple[bool, str]:
     """Skip ETF N-PORT panels that already span the requested history window."""
     state = catalog.get(
@@ -581,8 +609,17 @@ def nport_disclosure_needs_update(
         section="etf_nport_disclosure",
         provider=provider,
     )
-    if state is None or int(state.row_count) <= 0:
+    if state is None:
         return True, "missing"
+    if int(state.row_count) <= 0:
+        return fundamental_refresh_needs_update(
+            catalog,
+            symbol,
+            "etf_nport_disclosure",
+            provider,
+            staleness_days=staleness_days,
+            skip_recent_hours=skip_recent_hours,
+        )
     if _is_below_min_historical_date(state.min_date):
         return True, "below_min_historical_date"
     if not _panel_has_dimension_column(state, section="etf_nport_disclosure"):
@@ -608,7 +645,7 @@ def macro_backfill_needs_update(
     include_treasury_rates: bool = True,
     target_end_date: date | None = None,
     history_start_date: date | None = None,
-    skip_recent_hours: float = 24.0,
+    skip_recent_hours: float | None = 24.0,
 ) -> bool:
     """Return True when any macro series still needs a backfill refresh."""
     target_end_date = target_end_date or expected_latest_price_date()
