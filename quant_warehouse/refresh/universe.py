@@ -52,7 +52,7 @@ def _process_symbol_prices(
     target_end_date: date,
     start_text: str,
     etf_set: set[str],
-    skip_recent_hours: float,
+    skip_recent_hours: float | None,
     backfill_skip: bool,
 ) -> list[dict[str, object]]:
     is_etf = symbol in etf_set
@@ -181,7 +181,7 @@ def refresh_universe_prices(
     providers: Sequence[str],
     target_end_date: date | None = None,
     etf_symbols: set[str] | None = None,
-    skip_recent_hours: float = 24.0,
+    skip_recent_hours: float | None = 24.0,
     backfill_skip: bool = False,
     price_start_date: str = MIN_HISTORICAL_DATE,
     max_symbols: int | None = None,
@@ -221,7 +221,7 @@ def _process_symbol_fundamentals(
     period: str,
     etf_set: set[str],
     staleness_days: int,
-    skip_recent_hours: float,
+    skip_recent_hours: float | None,
     force_sections: frozenset[str] | None,
     backfill_skip: bool,
     start_text: str,
@@ -352,7 +352,7 @@ def refresh_universe_fundamentals(
     period: str = "quarter",
     etf_symbols: set[str] | None = None,
     staleness_days: int = 90,
-    skip_recent_hours: float = 24.0,
+    skip_recent_hours: float | None = 24.0,
     force_sections: frozenset[str] | None = None,
     backfill_skip: bool = False,
     max_symbols: int | None = None,
@@ -392,7 +392,7 @@ def refresh_universe_macro(
     provider: str = "fmp",
     target_end_date: date | None = None,
     macro_start_date: str = MIN_HISTORICAL_DATE,
-    skip_recent_hours: float = 24.0,
+    skip_recent_hours: float | None = 24.0,
     progress_logger: ProgressLogger = None,
 ) -> list[dict[str, object]]:
     target_end_date = target_end_date or expected_latest_price_date()
@@ -602,7 +602,7 @@ def refresh_symbol_nport_disclosure(
     provider: str,
     start_year: int,
     staleness_days: int,
-    skip_recent_hours: float,
+    skip_recent_hours: float | None,
 ) -> dict[str, object]:
     needs_refresh, reason = nport_disclosure_needs_update(
         warehouse.catalog,
@@ -639,7 +639,7 @@ def refresh_universe_nport_disclosure(
     provider: str,
     start_year: int,
     staleness_days: int = 90,
-    skip_recent_hours: float = 24.0,
+    skip_recent_hours: float | None = 24.0,
     max_symbols: int | None = None,
     max_workers: int = 1,
     progress_logger: ProgressLogger = None,

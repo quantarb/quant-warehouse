@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 
 from quant_warehouse.catalog.store import SectionState
@@ -203,6 +203,53 @@ def test_recent_empty_fundamental_response_is_not_immediately_refetched():
     assert plan.reason == "recent_empty_attempt"
     assert fundamental_refresh_needs_update(
         catalog, "OC", "historical_splits", "fmp", skip_recent_hours=24.0,
+    ) == (False, "recent_empty_attempt")
+
+
+def test_empty_response_is_skipped_only_on_the_same_local_date():
+    local_now = datetime.now().astimezone()
+    yesterday = local_now.date() - timedelta(days=1)
+    fetched_at = datetime.combine(
+        yesterday, datetime.max.time(), tzinfo=local_now.tzinfo
+    ).isoformat()
+    state = SectionState(
+        symbol="OC", section="historical_splits", provider="fmp",
+        min_date=None, max_date=None, row_count=0, columns_present=(),
+        last_fetched_at=fetched_at,
+    )
+    catalog = FakeCatalog({("OC", "historical_splits", "fmp"): state})
+
+    assert fundamental_refresh_needs_update(
+        catalog, "OC", "historical_splits", "fmp", skip_recent_hours=None,
+    ) == (True, "missing")
+    assert fundamental_refresh_needs_update(
+        catalog, "OC", "historical_splits", "fmp", skip_recent_hours=24.0,
+    ) == (False, "recent_empty_attempt")
+
+
+def test_empty_response_is_skipped_when_fetched_today():
+    state = SectionState(
+        symbol="OC", section="historical_splits", provider="fmp",
+        min_date=None, max_date=None, row_count=0, columns_present=(),
+        last_fetched_at=datetime.now().astimezone().isoformat(),
+    )
+    catalog = FakeCatalog({("OC", "historical_splits", "fmp"): state})
+
+    assert fundamental_refresh_needs_update(
+        catalog, "OC", "historical_splits", "fmp", skip_recent_hours=None,
+    ) == (False, "recent_empty_attempt")
+
+
+def test_empty_macro_response_is_skipped_when_fetched_today():
+    state = SectionState(
+        symbol="GDP", section="macro_economic", provider="fmp",
+        min_date=None, max_date=None, row_count=0, columns_present=(),
+        last_fetched_at=datetime.now().astimezone().isoformat(),
+    )
+    catalog = FakeCatalog({("GDP", "macro_economic", "fmp"): state})
+
+    assert macro_refresh_needs_update(
+        catalog, "GDP", "macro_economic", "fmp", skip_recent_hours=None,
     ) == (False, "recent_empty_attempt")
 
 

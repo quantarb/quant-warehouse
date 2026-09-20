@@ -121,3 +121,40 @@ def test_backfill_missing_fmp_prefilters_fresh_symbols(monkeypatch, tmp_path):
     assert summary["equity"]["total"] == 1
     assert any("refreshing equity prices for 1 stale symbols (3 scoped)" in message for message in logs)
     assert any("refreshing equity fundamentals for 1 stale symbols (3 scoped)" in message for message in logs)
+
+
+def test_backfill_uses_same_date_guard_for_every_dataset(monkeypatch, tmp_path):
+    received: list[float | None] = []
+    warehouse = SimpleNamespace(
+        config=SimpleNamespace(catalog_path=tmp_path / "catalog.sqlite"),
+        catalog=SimpleNamespace(),
+    )
+
+    def record_macro(*_args, **kwargs):
+        received.append(kwargs["skip_recent_hours"])
+        return False
+
+    def record_symbols(_warehouse, _symbols, **kwargs):
+        received.append(kwargs["skip_recent_hours"])
+        return []
+
+    def record_refresh(_warehouse, _symbols=(), **kwargs):
+        received.append(kwargs["skip_recent_hours"])
+        return []
+
+    monkeypatch.setattr(backfill_missing_fmp, "macro_backfill_needs_update", record_macro)
+    monkeypatch.setattr(backfill_missing_fmp, "_symbols_needing_price_refresh", record_symbols)
+    monkeypatch.setattr(backfill_missing_fmp, "_symbols_needing_fundamental_refresh", record_symbols)
+    monkeypatch.setattr(backfill_missing_fmp, "refresh_universe_prices", record_refresh)
+    monkeypatch.setattr(backfill_missing_fmp, "refresh_universe_fundamentals", record_refresh)
+    monkeypatch.setattr(backfill_missing_fmp, "refresh_universe_nport_disclosure", record_refresh)
+
+    summary = backfill_missing_fmp_historical(
+        warehouse=warehouse,
+        equity_symbols=("AAPL",),
+        etf_symbols=(),
+        skip_if_fetched_today=True,
+    )
+
+    assert received and all(value is None for value in received)
+    assert summary["skip_if_fetched_today"] is True
