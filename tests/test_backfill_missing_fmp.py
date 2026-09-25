@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-
+from quant_warehouse.catalog.store import CatalogStore
 from quant_warehouse.migrate import backfill_missing_fmp
 from quant_warehouse.migrate.backfill_missing_fmp import backfill_missing_fmp_historical
 
@@ -119,8 +119,8 @@ def test_backfill_missing_fmp_prefilters_fresh_symbols(monkeypatch, tmp_path):
     assert calls["fundamentals"] == ["AAPL"]
     assert summary["equity_prices"]["total"] == 1
     assert summary["equity"]["total"] == 1
-    assert any("refreshing equity prices for 1 stale symbols (3 scoped)" in message for message in logs)
-    assert any("refreshing equity fundamentals for 1 stale symbols (3 scoped)" in message for message in logs)
+    assert any("refreshing equity prices for 1 stale symbols (3 scoped; 2 filtered)" in message for message in logs)
+    assert any("refreshing equity fundamentals for 1 stale symbols (3 scoped; 2 filtered)" in message for message in logs)
 
 
 def test_backfill_uses_same_date_guard_for_every_dataset(monkeypatch, tmp_path):
@@ -158,3 +158,29 @@ def test_backfill_uses_same_date_guard_for_every_dataset(monkeypatch, tmp_path):
 
     assert received and all(value is None for value in received)
     assert summary["skip_if_fetched_today"] is True
+
+
+def test_same_date_guard_filters_a_symbol_after_any_fundamental_attempt(tmp_path):
+    catalog = CatalogStore(tmp_path / "catalog.sqlite")
+    catalog.upsert(
+        symbol="AAPL",
+        section="dividends",
+        provider="fmp",
+        min_date="2020-01-01",
+        max_date="2026-09-01",
+        row_count=10,
+        columns_present=["dividend"],
+    )
+    warehouse = SimpleNamespace(catalog=catalog)
+
+    symbols = backfill_missing_fmp._symbols_needing_fundamental_refresh(
+        warehouse,
+        ["AAPL", "MSFT"],
+        provider="fmp",
+        sections=["income", "dividends"],
+        period="quarter",
+        staleness_days=90,
+        skip_recent_hours=None,
+    )
+
+    assert symbols == ["MSFT"]

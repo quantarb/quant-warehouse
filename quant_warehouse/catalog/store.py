@@ -85,6 +85,13 @@ class CatalogStore:
                     last_fetched_at TEXT,
                     PRIMARY KEY (symbol, section, provider)
                 );
+                CREATE TABLE IF NOT EXISTS section_refresh_attempt (
+                    symbol TEXT NOT NULL,
+                    section TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    last_attempted_at TEXT NOT NULL,
+                    PRIMARY KEY (symbol, section, provider)
+                );
                 CREATE TABLE IF NOT EXISTS symbol_profile (
                     symbol TEXT NOT NULL,
                     provider TEXT NOT NULL,
@@ -184,6 +191,85 @@ class CatalogStore:
             columns_present=tuple(json.loads(row["columns_json"] or "[]")),
             last_fetched_at=row["last_fetched_at"],
         )
+
+    def recently_attempted_symbols(
+        self,
+        *,
+        symbols: Sequence[str],
+        sections: Sequence[str],
+        provider: str,
+        since: datetime,
+    ) -> set[str]:
+        """Return scoped symbols with a section fetch recorded at or after ``since``."""
+        normalized_symbols = list(
+            dict.fromkeys(str(symbol).strip().upper() for symbol in symbols if str(symbol).strip())
+        )
+        normalized_sections = list(
+            dict.fromkeys(str(section).strip() for section in sections if str(section).strip())
+        )
+        if not normalized_symbols or not normalized_sections:
+            return set()
+        if since.tzinfo is None:
+            since = since.replace(tzinfo=timezone.utc)
+        since_text = since.astimezone(timezone.utc).isoformat()
+        # Keep each statement below SQLite's common 999-variable limit.
+        chunk_size = max(1, 900 - len(normalized_sections))
+        attempted: set[str] = set()
+        section_placeholders = ",".join("?" for _ in normalized_sections)
+        with self._connect() as conn:
+            for offset in range(0, len(normalized_symbols), chunk_size):
+                symbol_chunk = normalized_symbols[offset : offset + chunk_size]
+                symbol_placeholders = ",".join("?" for _ in symbol_chunk)
+                params = [
+                    str(provider).strip().lower(),
+                    *normalized_sections,
+                    *symbol_chunk,
+                    since_text,
+                ]
+                rows = conn.execute(
+                    f"""
+                    SELECT DISTINCT symbol
+                    FROM section_state
+                    WHERE provider=?
+                      AND section IN ({section_placeholders})
+                      AND symbol IN ({symbol_placeholders})
+                      AND datetime(last_fetched_at) >= datetime(?)
+                    """,
+                    params,
+                ).fetchall()
+                attempted.update(str(row["symbol"]).strip().upper() for row in rows)
+                rows = conn.execute(
+                    f"""
+                    SELECT DISTINCT symbol
+                    FROM section_refresh_attempt
+                    WHERE provider=?
+                      AND section IN ({section_placeholders})
+                      AND symbol IN ({symbol_placeholders})
+                      AND datetime(last_attempted_at) >= datetime(?)
+                    """,
+                    params,
+                ).fetchall()
+                attempted.update(str(row["symbol"]).strip().upper() for row in rows)
+        return attempted
+
+    def record_refresh_attempt(self, *, symbol: str, section: str, provider: str) -> None:
+        attempted_at = datetime.now(timezone.utc).isoformat()
+        with self._storage_guard():
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO section_refresh_attempt (symbol, section, provider, last_attempted_at)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(symbol, section, provider) DO UPDATE SET
+                        last_attempted_at=excluded.last_attempted_at
+                    """,
+                    (
+                        str(symbol).strip().upper(),
+                        str(section).strip(),
+                        str(provider).strip().lower(),
+                        attempted_at,
+                    ),
+                )
 
     def upsert_profile(
         self,

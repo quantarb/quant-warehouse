@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import polars as pl
-
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Sequence
@@ -203,6 +201,8 @@ def historical_fetch_plan(
         if recent_attempt:
             return HistoricalFetchPlan(False, "skip", "recent_empty_attempt", (), target_start, target_end)
         return HistoricalFetchPlan(True, "full", "missing", (), target_start, target_end)
+    if skip_recent_hours is None and recent_attempt:
+        return HistoricalFetchPlan(False, "skip", "recent_attempt", (), target_start, target_end)
     if _is_below_min_historical_date(state.min_date):
         return HistoricalFetchPlan(True, "full", "below_min_historical_date", (), target_start, target_end)
     if section in PANEL_FUNDAMENTAL_SECTIONS and not _panel_has_dimension_column(state, section=section):
@@ -414,6 +414,8 @@ def price_refresh_needs_update(
         if recent_attempt:
             return False, "recent_empty_attempt"
         return True, "missing"
+    if skip_recent_hours is None and recent_attempt:
+        return False, "recent_attempt"
     if _is_below_min_historical_date(state.min_date):
         return True, "below_min_historical_date"
     max_date = _parse_date(state.max_date)
@@ -448,6 +450,8 @@ def fundamental_refresh_needs_update(
         if recent_attempt:
             return False, "recent_empty_attempt"
         return True, "missing"
+    if skip_recent_hours is None and recent_attempt:
+        return False, "recent_attempt"
     max_date = _parse_date(state.max_date)
     if max_date is None:
         return True, "missing_max_date"
@@ -535,6 +539,8 @@ def macro_refresh_needs_update(
         if recent_attempt:
             return False, "recent_empty_attempt"
         return True, "missing"
+    if skip_recent_hours is None and recent_attempt:
+        return False, "recent_attempt"
     if history_start_date is not None:
         min_date = _parse_date(state.min_date)
         if min_date is not None and min_date > history_start_date:

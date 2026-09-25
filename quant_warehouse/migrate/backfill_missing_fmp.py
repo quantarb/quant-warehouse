@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import polars as pl
-
 import json
 import sqlite3
 from datetime import datetime, timezone
@@ -57,6 +55,26 @@ def _catalog_symbols(catalog_path: Path, *, section: str, provider: str) -> list
     return [str(row[0]).strip().upper() for row in rows if row and row[0]]
 
 
+def _attempted_today_symbols(
+    warehouse: Warehouse,
+    symbols: Sequence[str],
+    *,
+    provider: str,
+    sections: Sequence[str],
+    skip_recent_hours: float | None,
+) -> set[str]:
+    if skip_recent_hours is not None:
+        return set()
+    local_now = datetime.now().astimezone()
+    local_midnight = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    return warehouse.catalog.recently_attempted_symbols(
+        symbols=symbols,
+        sections=sections,
+        provider=provider,
+        since=local_midnight,
+    )
+
+
 def _symbols_needing_price_refresh(
     warehouse: Warehouse,
     symbols: Sequence[str],
@@ -67,8 +85,17 @@ def _symbols_needing_price_refresh(
     is_etf: bool = False,
 ) -> list[str]:
     target_end = expected_latest_price_date()
+    attempted_today = _attempted_today_symbols(
+        warehouse,
+        symbols,
+        provider=provider,
+        sections=[section],
+        skip_recent_hours=skip_recent_hours,
+    )
     out: list[str] = []
     for symbol in symbols:
+        if symbol in attempted_today:
+            continue
         if symbol_has_fresh_prices(
             warehouse.catalog,
             symbol,
@@ -102,8 +129,21 @@ def _symbols_needing_fundamental_refresh(
     skip_recent_hours: float | None,
     is_etf: bool = False,
 ) -> list[str]:
+    stored_sections = []
+    for section in sections:
+        effective_period = fundamental_period_for_section(section, preferred=period) if period else None
+        stored_sections.append(f"{section}_{effective_period}" if effective_period else section)
+    attempted_today = _attempted_today_symbols(
+        warehouse,
+        symbols,
+        provider=provider,
+        sections=stored_sections,
+        skip_recent_hours=skip_recent_hours,
+    )
     out: list[str] = []
     for symbol in symbols:
+        if symbol in attempted_today:
+            continue
         for section in sections:
             needs_refresh, _reason = backfill_fundamental_needs_update(
                 warehouse.catalog,
@@ -228,7 +268,8 @@ def backfill_missing_fmp_historical(
         if callable(progress_logger):
             progress_logger(
                 f"Backfill: refreshing equity prices for {len(equity_price_symbols):,} stale symbols "
-                f"({len(equity_symbols):,} scoped) via FMP"
+                f"({len(equity_symbols):,} scoped; "
+                f"{len(equity_symbols) - len(equity_price_symbols):,} filtered) via FMP"
             )
         summary["equity_prices"] = _summarize_results(
             refresh_universe_prices(
@@ -256,7 +297,8 @@ def backfill_missing_fmp_historical(
     if callable(progress_logger):
         progress_logger(
             f"Backfill: refreshing equity fundamentals for {len(equity_refresh_symbols):,} stale symbols "
-            f"({len(equity_symbols):,} scoped) | "
+            f"({len(equity_symbols):,} scoped; "
+            f"{len(equity_symbols) - len(equity_refresh_symbols):,} filtered) | "
             f"sections={','.join(section_list)} | preferred_period={normalized_period}"
         )
     equity_results = refresh_universe_fundamentals(
@@ -303,7 +345,8 @@ def backfill_missing_fmp_historical(
         if callable(progress_logger):
             progress_logger(
                 f"Backfill: refreshing ETF prices for {len(etf_price_symbols):,} stale symbols "
-                f"({len(etf_symbols):,} scoped) via FMP"
+                f"({len(etf_symbols):,} scoped; "
+                f"{len(etf_symbols) - len(etf_price_symbols):,} filtered) via FMP"
             )
         summary["etf_prices"] = _summarize_results(
             refresh_universe_prices(

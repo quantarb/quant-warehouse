@@ -189,6 +189,34 @@ def test_backfill_fundamental_upgrades_collapsed_panel_schema():
     assert reason == "upgrade_panel_schema"
 
 
+def test_same_date_guard_precedes_panel_schema_upgrade():
+    catalog = FakeCatalog(
+        {
+            ("AAPL", "revenue_per_segment", "fmp"): SectionState(
+                symbol="AAPL",
+                section="revenue_per_segment",
+                provider="fmp",
+                min_date="2020-01-01",
+                max_date="2026-03-31",
+                row_count=16,
+                columns_present=("revenue",),
+                last_fetched_at=datetime.now(timezone.utc).isoformat(),
+            )
+        }
+    )
+
+    needs, reason = backfill_fundamental_needs_update(
+        catalog,  # type: ignore[arg-type]
+        "AAPL",
+        "revenue_per_segment",
+        "fmp",
+        skip_recent_hours=None,
+    )
+
+    assert needs is False
+    assert reason == "recent_attempt"
+
+
 def test_recent_empty_fundamental_response_is_not_immediately_refetched():
     state = SectionState(
         symbol="OC", section="historical_splits", provider="fmp",

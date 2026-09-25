@@ -46,6 +46,7 @@ class FakeWarehouse:
 class FakeCatalog:
     def __init__(self, states: dict[tuple[str, str, str], SectionState] | None = None) -> None:
         self.states = dict(states or {})
+        self.attempts: list[tuple[str, str, str]] = []
 
     def get(self, *, symbol: str, section: str, provider: str) -> SectionState | None:
         return self.states.get((symbol.upper(), section, provider))
@@ -55,6 +56,9 @@ class FakeCatalog:
 
     def resolve_equity_ipo_date(self, symbol: str):
         return None
+
+    def record_refresh_attempt(self, *, symbol: str, section: str, provider: str) -> None:
+        self.attempts.append((symbol, section, provider))
 
 
 def test_refresh_universe_prices_skips_when_any_provider_fresh():
@@ -131,4 +135,5 @@ def test_refresh_universe_prices_falls_back_to_second_provider():
         skip_recent_hours=0,
     )
     assert warehouse.refresh_calls == [("STALE", "fmp"), ("STALE", "yfinance")]
+    assert catalog.attempts == [("STALE", "prices", "fmp"), ("STALE", "prices", "yfinance")]
     assert results[-1]["status"] == "still_stale"

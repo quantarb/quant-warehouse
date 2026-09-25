@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import polars as pl
-
 from datetime import date
 from typing import Callable, Sequence
 
@@ -31,6 +29,7 @@ from quant_warehouse.warehouse.sections import (
     EQUITY_FUNDAMENTAL_SECTIONS,
     ETF_FUNDAMENTAL_SECTIONS,
     MIN_HISTORICAL_DATE,
+    fundamental_period_for_section,
 )
 
 
@@ -136,6 +135,11 @@ def _process_symbol_prices(
                 "providers": [provider],
                 **fetch_kwargs_from_plan(plan, default_start=symbol_start),
             }
+            warehouse.catalog.record_refresh_attempt(
+                symbol=symbol,
+                section=price_section,
+                provider=provider,
+            )
             if is_etf:
                 stats = warehouse.etf.refresh_prices(symbol, **refresh_kwargs)
             else:
@@ -299,6 +303,13 @@ def _process_symbol_fundamentals(
             try:
                 default_start = warehouse.catalog.equity_historical_start(symbol) if not is_etf else start_text
                 refresh_kwargs = fetch_kwargs_from_plan(plan, default_start=default_start)
+                effective_period = fundamental_period_for_section(section, preferred=period)
+                stored_section = f"{section}_{effective_period}" if effective_period else section
+                warehouse.catalog.record_refresh_attempt(
+                    symbol=symbol,
+                    section=stored_section,
+                    provider=provider,
+                )
                 if is_etf:
                     stats = warehouse.etf.refresh_fundamentals(
                         symbol,
