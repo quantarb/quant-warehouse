@@ -71,6 +71,7 @@ def resolve_universe_from_catalog(
         exchanges=tuple(str(value).strip().upper() for value in (exchanges or ()) if str(value).strip()),
         exclude_etf=bool(exclude_pooled_vehicles),
         exclude_fund=bool(exclude_pooled_vehicles),
+        supported_equities_only=bool(exclude_pooled_vehicles),
         limit=limit,
     )
     return tuple(profile.symbol for profile in profiles)

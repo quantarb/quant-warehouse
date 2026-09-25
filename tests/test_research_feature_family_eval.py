@@ -6,12 +6,13 @@ import math
 
 import polars as pl
 
+from quant_warehouse.catalog.equity_universe import supported_equity_reason
+from quant_warehouse.research_tools import feature_family_eval as family_eval
 from quant_warehouse.research_tools.feature_family_eval import (
     FamilyEvaluationConfig,
     _add_cross_symbol_context_features,
     _add_macro_context_features,
     _add_time_calendar_features,
-    _is_supported_equity_record,
     cap_features_by_quality,
     evaluate_feature_families,
 )
@@ -115,10 +116,32 @@ def test_evaluate_feature_families_returns_family_summaries() -> None:
 
 
 def test_supported_equity_record_rejects_pooled_vehicle_payloads() -> None:
-    assert _is_supported_equity_record("SPY", {"is_etf": True}) == (False, "asset_class: etf")
-    assert _is_supported_equity_record("VFIAX", {"quote_type": "MUTUALFUND"}) == (False, "asset_class: fund")
-    assert _is_supported_equity_record("ABALX", {"is_fund": False}) == (False, "asset_class: fund_symbol_pattern")
-    assert _is_supported_equity_record("AAPL", {"is_fund": False, "is_etf": False}) == (True, "ok")
+    assert supported_equity_reason("SPY", {"is_etf": True}) == (False, "asset_class: etf")
+    assert supported_equity_reason("VFIAX", {"quote_type": "MUTUALFUND"}) == (False, "asset_class: fund")
+    assert supported_equity_reason("ABALX", {"is_fund": False}) == (False, "asset_class: fund_symbol_pattern")
+    assert supported_equity_reason("ABC", {"isActivelyTrading": False}) == (False, "listing: inactive")
+    assert supported_equity_reason("FITB-PA", {"isActivelyTrading": True}) == (False, "asset_class: unsupported_symbol")
+    assert supported_equity_reason("XYZ", {"name": "Example 5.5% Senior Notes", "is_active": True}) == (False, "asset_class: unsupported_security")
+    assert supported_equity_reason("BRK-A", {"is_fund": False, "actively_trading": True}) == (True, "ok")
+    assert supported_equity_reason("AAPL", {"is_fund": False, "is_etf": False}) == (True, "ok")
+
+
+def test_screened_universe_excludes_inactive_funds_and_unsupported_securities(monkeypatch) -> None:
+    frame = pl.DataFrame([
+        {"symbol": "AAPL", "name": "Apple Inc.", "market_cap": 100e9, "actively_trading": True},
+        {"symbol": "ABALX", "name": "American Balanced A", "market_cap": 100e9, "actively_trading": True},
+        {"symbol": "OLD", "name": "Old Company", "market_cap": 100e9, "actively_trading": False},
+        {"symbol": "BANK-PA", "name": "Bank Preferred Shares", "market_cap": 100e9, "actively_trading": True},
+    ])
+    monkeypatch.setattr(family_eval, "fetch_equity_screener", lambda query: (frame, "test"))
+
+    symbols, _raw, eligibility, source = family_eval.screen_fmp_equity_universe(
+        FamilyEvaluationConfig(market_cap_min=10_000_000_000), warehouse=object(),
+    )
+
+    assert symbols == ("AAPL",)
+    assert source == "test"
+    assert set(eligibility.filter(~pl.col("eligible"))["symbol"]) == {"ABALX", "OLD", "BANK-PA"}
 
 
 def test_context_feature_families_are_added_without_vendor_calls() -> None:

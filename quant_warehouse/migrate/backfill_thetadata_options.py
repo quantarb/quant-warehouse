@@ -119,6 +119,7 @@ def list_market_cap_symbols(
         country="US" if us_only else None,
         exclude_etf=True,
         exclude_fund=True,
+        supported_equities_only=True,
     )
     symbols = [profile.symbol for profile in profiles if str(profile.symbol).strip()]
     if require_prices:

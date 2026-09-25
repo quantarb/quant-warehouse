@@ -155,3 +155,30 @@ def test_resolve_universe_from_catalog_filters_market_cap_and_exchange(tmp_path:
         exchanges=("NASDAQ",),
     )
     assert symbols == ("BIG",)
+
+
+def test_query_symbol_profiles_can_require_supported_active_equities(tmp_path: Path):
+    store = CatalogStore(tmp_path / "catalog.sqlite")
+    records = {
+        "AAPL": {"name": "Apple Inc.", "actively_trading": True},
+        "ABALX": {"name": "American Funds American Balanced A", "actively_trading": True},
+        "OLD": {"name": "Old Company", "actively_trading": False},
+        "BANK-PA": {"name": "Bank Preferred Shares", "actively_trading": True},
+    }
+    for symbol, fields in records.items():
+        store.upsert_profile(
+            symbol=symbol,
+            provider="fmp",
+            source_provider="fmp_screener",
+            payload={
+                "symbol": symbol, "market_cap": 20_000_000_000,
+                "exchange": "NASDAQ", "country": "US", **fields,
+            },
+        )
+
+    profiles = store.query_symbol_profiles(
+        provider="fmp", min_market_cap=10_000_000_000,
+        country="US", exchanges=("NASDAQ",), supported_equities_only=True,
+    )
+
+    assert [profile.symbol for profile in profiles] == ["AAPL"]

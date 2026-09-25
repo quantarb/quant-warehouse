@@ -6,6 +6,7 @@ from typing import Iterable
 
 import polars as pl
 
+from quant_warehouse.catalog.equity_universe import supported_equity_reason
 from quant_warehouse.ingest.screener_fetch import ScreenerQuery, fetch_equity_screener
 from quant_warehouse.warehouse.api import Warehouse
 
@@ -50,20 +51,13 @@ def screen_fmp_equity_universe(config: FamilyEvaluationConfig, *, warehouse: War
     frame = frame.with_columns(pl.col("symbol").cast(pl.String).str.strip_chars().str.to_uppercase())
     if "market_cap" in frame.columns: frame = frame.filter(pl.col("market_cap").cast(pl.Float64, strict=False) >= config.market_cap_min)
     frame = frame.unique("symbol")
-    eligibility = frame.select(["symbol"]).with_columns(pl.lit(True).alias("eligible"), pl.lit("ok").alias("reason"))
+    eligibility = pl.DataFrame([
+        {"symbol": row["symbol"], "eligible": eligible, "reason": reason}
+        for row in frame.to_dicts()
+        for eligible, reason in [supported_equity_reason(row["symbol"], row)]
+    ])
     symbols = tuple(eligibility.filter(pl.col("eligible"))["symbol"].to_list())
     return symbols, frame, eligibility, source
-
-
-def _is_supported_equity_record(symbol: str, record: dict[str, object]) -> tuple[bool, str]:
-    if _truthy(record.get("is_etf")) or _clean(record.get("quote_type")) == "etf": return False, "asset_class: etf"
-    if _truthy(record.get("is_fund")) or _clean(record.get("quote_type")) in {"fund", "mutualfund", "mutual_fund"}: return False, "asset_class: fund"
-    if len(str(symbol).strip()) == 5 and str(symbol).upper().endswith("X"): return False, "asset_class: fund_symbol_pattern"
-    return True, "ok"
-
-
-def _clean(value: object) -> str: return "" if value is None else str(value).strip().lower().replace(" ", "_").replace("-", "_")
-def _truthy(value: object) -> bool: return str(value or "").strip().lower() in {"1", "true", "yes", "y"}
 
 
 def build_fundamental_feature_panel(symbols: Iterable[str], config: FamilyEvaluationConfig, *, warehouse: Warehouse | None = None, strategy_sources: Iterable[str] | None = None, observation_dates: pl.DataFrame | None = None, broadcast_to_target: bool = True, fundamental_period: str | None = None, family_suffix: str | None = None) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame, dict[str, float]]:

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Iterable, Sequence
 
 from quant_warehouse.catalog.country import country_matches_filter, normalize_country_code
+from quant_warehouse.catalog.equity_universe import supported_equity_reason
 from quant_warehouse.catalog.listing_date import equity_historical_floor_text, listing_date_from_record
 
 
@@ -327,6 +328,7 @@ class CatalogStore:
         exchanges: Sequence[str] | None = None,
         exclude_etf: bool = False,
         exclude_fund: bool = False,
+        supported_equities_only: bool = False,
         limit: int | None = None,
     ) -> list[SymbolProfile]:
         clauses: list[str] = []
@@ -376,6 +378,14 @@ class CatalogStore:
                     continue
                 filtered.append(profile)
             profiles = filtered
+        if supported_equities_only:
+            profiles = [
+                profile for profile in profiles
+                if supported_equity_reason(profile.symbol, {
+                    **dict(profile.payload or {}),
+                    "company_name": profile.company_name,
+                })[0]
+            ]
         return profiles
 
     def get_etf_profile(self, *, symbol: str, provider: str) -> SymbolProfile | None:
