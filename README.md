@@ -186,3 +186,11 @@ Expanded multi-rate observations: FMP helpers `feature_engineering/broad_observa
 The single-k FMP Oracle trade solver uses a cached Numba CPU kernel. Its scalar dynamic-programming recurrence, profit threshold, tie breaks, and reconstructed trade dates match the previous Torch solver; it avoids repeated scalar CUDA synchronization during annual target generation. Multi-k batched solvers retain their existing implementation.
 
 The multirate issuer notebook uses `platforms.data_providers.fmp.sections.fmp_issuer_model_sections(period)` with `backfill_missing_fmp_historical`. Its quarterly pass includes every fundamental source read by the issuer feature and event builders, including historical market cap, ESG scores, insider trades, government trades, and price targets. The annual pass includes only annual datasets, while quarterly financial estimates remain on the quarterly pass. Refresh planning checks the physical `section_quarter` and `section_annual` catalog entries independently. Company news remains a separate news-store dataset.
+
+ArcticDB table-column audits can call
+`warehouse.backend.column_non_null_counts(library, symbol)` to count populated
+values across every row of a stored symbol. A zero count identifies an all-null
+or all-NaN column. Time-indexed tables use ArcticDB count aggregation;
+row-indexed tables use bounded reads. Warehouse metadata contributes omitted
+all-null columns. The query does not change stored data; empty strings and zero
+values count as populated.

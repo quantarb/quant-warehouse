@@ -28,6 +28,8 @@ class StorageBackend(Protocol):
         output_format: FrameFormat = "polars",
     ) -> pl.DataFrame | None: ...
 
+    def column_non_null_counts(self, library: str, symbol: str) -> dict[str, int]: ...
+
     def write(
         self,
         library: str,
@@ -134,6 +136,43 @@ class ArcticBackend:
                 order = [name for name in stored_metadata[_COLUMN_ORDER_METADATA] if name in df.columns]
                 df = df.select(order)
             return df.sort("date") if "date" in df.columns else df
+
+    def column_non_null_counts(self, library: str, symbol: str) -> dict[str, int]:
+        """Count populated values in the complete stored table, without mutation.
+
+        Time-indexed tables use ArcticDB aggregation; row-indexed tables use
+        bounded reads. Warehouse metadata restores physically omitted null columns.
+        """
+        from arcticdb import QueryBuilder
+
+        with self._storage_guard():
+            lib = self._library(library)
+            if not lib.has_symbol(symbol):
+                raise KeyError(symbol)
+            description = lib.get_description(symbol)
+            metadata = lib.read_metadata(symbol).metadata or {}
+            columns = [column.name for column in description.columns]
+            counts = {name: 0 for name in columns}
+            if description.row_count and columns:
+                if description.index_type == "index" and description.sorted == "ASCENDING":
+                    query = QueryBuilder().resample("36500D").agg({name: "count" for name in columns})
+                    result = lib.read(symbol, query_builder=query, output_format="polars").data
+                    counts.update({name: int(result[name].sum() or 0) for name in columns})
+                else:
+                    for first in range(0, description.row_count, 100_000):
+                        frame = lib.read(symbol, columns=columns,
+                            row_range=(first, min(first + 100_000, description.row_count)),
+                            output_format="polars").data
+                        for name in columns:
+                            values = frame[name]
+                            if isinstance(values.dtype, pl.Datetime):
+                                values = values.filter(values.cast(pl.Int64) != -(2**63))
+                            if values.dtype.is_float():
+                                values = values.fill_nan(None)
+                            counts[name] += len(values) - values.null_count()
+            counts.update({column.name: int(description.row_count) for column in description.index})
+            counts.update({name: 0 for name in metadata.get(_EMPTY_COLUMNS_METADATA, ())})
+            return counts
 
     def write(
         self,
@@ -255,6 +294,9 @@ class ProviderRoutingBackend:
             columns=columns,
             output_format=output_format,
         )
+
+    def column_non_null_counts(self, library: str, symbol: str) -> dict[str, int]:
+        return self._backend_for_library(library).column_non_null_counts(library, symbol)
 
     def write(
         self,

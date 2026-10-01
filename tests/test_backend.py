@@ -147,3 +147,17 @@ def test_unnamed_legacy_time_index_restores_observation_dates(tmp_path):
     out = backend.read('dividends', 'TEST__fmp')
     assert out['date'].to_list() == _sample_frame()['date'].to_list()
     assert out['close'].to_list() == [100., 101.]
+
+
+@pytest.mark.parametrize('dated', [True, False])
+def test_column_counts_include_nan_null_and_omitted_columns(tmp_path, dated):
+    backend = ArcticBackend(_config(tmp_path).arctic_uri)
+    frame = pl.DataFrame({'date': [datetime(2024, 1, 1), datetime(2024, 1, 2)] if dated else [None, datetime(2024, 1, 2)],
+        'value': [1., float('nan')], 'nan_only': [float('nan'), float('nan')],
+        'null_only': [None, None], 'text': ['hello', None]})
+    backend.write('events', 'TEST', frame)
+    counts = backend.column_non_null_counts('events', 'TEST')
+    assert counts['value'] == 1
+    assert counts['nan_only'] == counts['null_only'] == 0
+    assert counts['text'] == 1
+    assert counts['date'] == (2 if dated else 1)
