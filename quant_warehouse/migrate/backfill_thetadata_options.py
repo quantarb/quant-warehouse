@@ -11,6 +11,7 @@ from typing import Any, Callable, Literal, Mapping, MutableSet, Sequence
 
 
 from quant_warehouse.config import WarehouseConfig
+from quant_warehouse.ingest.openbb_fetch import OpenBBResultFormatError
 from quant_warehouse.platforms.data_providers.thetadata.options import (
     THETADATA_OPTION_HISTORY_ENDPOINT,
     THETADATA_RICH_OPTION_COLUMNS,
@@ -455,6 +456,8 @@ def backfill_thetadata_options(
                     f"[thetadata-options] {status} {probe_index}/{len(probe_symbols)} "
                     f"{symbol} {probe_date.date()} contracts={manifest.get('contracts_total')}"
                 )
+        except OpenBBResultFormatError:
+            raise
         except Exception as exc:
             if callable(progress_logger):
                 progress_logger(f"[thetadata-options] probe error {symbol} {probe_date.date()}: {exc}")
@@ -483,7 +486,7 @@ def backfill_thetadata_options(
                 progress_logger(
                     f"[thetadata-options] {symbol} {year}: "
                     f"{symbol_downloaded_days.get(symbol, 0)} trading days downloaded, "
-                    f"{symbol_missing_days.get(symbol, 0)} days left; "
+                    f"{symbol_missing_days.get(symbol, 0)} requests left; "
                     f"downloading {symbol} {snapshot_date.date()} "
                     f"({download_index}/{total_downloads})"
                 )
@@ -520,11 +523,13 @@ def backfill_thetadata_options(
                 progress_logger(
                     f"[thetadata-options] {symbol} {snapshot_date.year}: "
                     f"{symbol_downloaded_days.get(symbol, 0)} trading days downloaded, "
-                    f"{max(0, symbol_missing_days.get(symbol, 0) - 1)} days left; "
+                    f"{max(0, symbol_missing_days.get(symbol, 0) - 1)} requests left; "
                     f"finished {symbol} {snapshot_date.date()} "
                     f"contracts={manifest.get('contracts_total')}"
                 )
             symbol_missing_days[symbol] = max(0, symbol_missing_days.get(symbol, 0) - 1)
+        except OpenBBResultFormatError:
+            raise
         except Exception as exc:
             results.append({
                 "symbol": symbol,
@@ -536,7 +541,7 @@ def backfill_thetadata_options(
                 progress_logger(
                     f"[thetadata-options] {symbol} {snapshot_date.year}: "
                     f"{symbol_downloaded_days.get(symbol, 0)} trading days downloaded, "
-                    f"{max(0, symbol_missing_days.get(symbol, 0) - 1)} days left; "
+                    f"{max(0, symbol_missing_days.get(symbol, 0) - 1)} requests left; "
                     f"error {symbol} {snapshot_date.date()}: {exc}"
                 )
             symbol_missing_days[symbol] = max(0, symbol_missing_days.get(symbol, 0) - 1)

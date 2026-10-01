@@ -191,15 +191,29 @@ def fetch_route_dataframe(
     return _records_frame(_result_records(result))
 
 
+class OpenBBResultFormatError(TypeError):
+    """OpenBB returned an unsupported result shape; further downloads cannot proceed."""
+
+
 def _result_records(result):
-    records=[]
-    for item in list(getattr(result, "results", None) or []):
+    """Read native OpenBB row lists or a model that serializes a whole chain."""
+    payload = getattr(result, "results", None)
+    if payload is None:
+        return []
+    if hasattr(payload, "model_dump"):
+        payload = payload.model_dump()
+    if isinstance(payload, dict):
+        payload = [payload]
+    if not isinstance(payload, (list, tuple)):
+        raise OpenBBResultFormatError("OpenBB results must contain structured row records")
+    records = []
+    for item in payload:
         if hasattr(item, "model_dump"):
-            records.append(item.model_dump())
-        elif isinstance(item, dict):
+            item = item.model_dump()
+        if isinstance(item, dict):
             records.append(dict(item))
         else:
-            raise TypeError("OpenBB results must contain structured row records")
+            raise OpenBBResultFormatError("OpenBB results must contain structured row records")
     return records
 
 

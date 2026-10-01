@@ -99,3 +99,44 @@ def test_provider_validation_errors_are_not_retried(monkeypatch):
     with pytest.raises(ValueError, match='Invalid data model'):
         openbb_fetch._call_route_with_retries('equity.fundamental.income', symbol='AAPL', provider='fmp')
     assert len(calls) == 1
+
+
+def test_single_theta_chain_model_serializes_to_rows_without_losing_contracts(monkeypatch):
+    from types import SimpleNamespace
+    from openbb_thetadata.models.options_chains import ThetaDataOptionsChainsData
+    chain = ThetaDataOptionsChainsData.model_validate({
+        "contract_symbol": ["AAPL261016C00200000", "AAPL261016P00200000"],
+        "underlying_symbol": ["AAPL", "AAPL"],
+        "expiration": ["2026-10-16", "2026-10-16"],
+        "strike": [200., 200.], "option_type": ["call", "put"],
+        "bid": [None, 0.], "ask": [0., None],
+    })
+    monkeypatch.setattr('quant_warehouse.ingest.openbb_fetch._call_route',
+                        lambda *a, **k: SimpleNamespace(results=chain, provider='thetadata'))
+    fetched = fetch_openbb('options_eod', symbol='AAPL', provider='thetadata')
+    assert fetched.df.height == 2
+    assert fetched.df['contract_symbol'].to_list() == chain.contract_symbol
+    assert fetched.df['option_type'].to_list() == ['call', 'put']
+    assert fetched.df['bid'].to_list() == [None, 0.]
+    assert fetched.df['ask'].to_list() == [0., None]
+
+
+def test_native_openbb_row_models_single_row_and_empty_results():
+    from types import SimpleNamespace
+    from pydantic import BaseModel
+    from quant_warehouse.ingest.openbb_fetch import _result_records
+    class Row(BaseModel):
+        symbol: str
+    assert _result_records(SimpleNamespace(results=[Row(symbol='A')])) == [{'symbol': 'A'}]
+    assert _result_records(SimpleNamespace(results=Row(symbol='A'))) == [{'symbol': 'A'}]
+    assert _result_records(SimpleNamespace(results=None)) == []
+    assert _result_records(SimpleNamespace(results=[])) == []
+
+
+def test_malformed_results_raise_explicit_format_error():
+    from types import SimpleNamespace
+    import pytest
+    from quant_warehouse.ingest.openbb_fetch import _result_records, OpenBBResultFormatError
+    for payload in ('bad', [('symbol', 'A')], [123]):
+        with pytest.raises(OpenBBResultFormatError):
+            _result_records(SimpleNamespace(results=payload))

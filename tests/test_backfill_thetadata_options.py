@@ -392,3 +392,35 @@ def test_backfill_thetadata_options_for_oracle_trades_removes_symbol_after_empty
     ]
     assert summary["trade_windows_skipped"] == 2
     assert summary["download_spec"]["empty_symbol_probe_limit"] == 1
+
+
+def test_full_chain_backfill_stops_on_response_format_error(monkeypatch):
+    import importlib
+    import pytest
+    from quant_warehouse.ingest.openbb_fetch import OpenBBResultFormatError
+    module = importlib.import_module('quant_warehouse.migrate.backfill_thetadata_options')
+    monkeypatch.setattr(module, 'resolve_backfill_symbols', lambda *a, **k: ['AAPL', 'MSFT'])
+    calls = []
+    def fail(*args, **kwargs):
+        calls.append(args)
+        raise OpenBBResultFormatError('unsupported result')
+    monkeypatch.setattr(module, 'download_option_snapshots_for_range', fail)
+    with pytest.raises(OpenBBResultFormatError):
+        module.backfill_thetadata_options(warehouse=object(), start_date='2025-01-02',
+            end_date='2025-01-03', skip_existing=False, request_sleep=0)
+    assert len(calls) == 1
+
+
+def test_failed_download_is_reported_as_request_progress_not_download_progress(monkeypatch):
+    import importlib
+    module = importlib.import_module('quant_warehouse.migrate.backfill_thetadata_options')
+    monkeypatch.setattr(module, 'resolve_backfill_symbols', lambda *a, **k: ['AAPL'])
+    def fail(*a, **k):
+        raise RuntimeError('connection failed')
+    monkeypatch.setattr(module, 'download_option_snapshots_for_range', fail)
+    messages = []
+    summary = module.backfill_thetadata_options(warehouse=object(), start_date='2025-01-02',
+        end_date='2025-01-02', skip_existing=False, request_sleep=0, progress_logger=messages.append)
+    assert summary['dates_downloaded'] == 0
+    assert summary['symbols_failed'] == 1
+    assert any('0 trading days downloaded, 0 requests left; error' in m for m in messages)
