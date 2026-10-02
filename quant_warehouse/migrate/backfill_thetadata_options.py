@@ -7,6 +7,7 @@ import sys
 import time
 from datetime import date as date_type, datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 from typing import Any, Callable, Literal, Mapping, MutableSet, Sequence
 
 
@@ -33,6 +34,13 @@ MARKET_CAP_TIERS: dict[str, float] = {
     "100b": 100_000_000_000,
     "10b": 10_000_000_000,
 }
+
+def _completed_option_dates(start: datetime, end: datetime, *, now: datetime | None = None) -> list[datetime]:
+    """Historical full-chain requests exclude the provider's current US trading day."""
+    current = now or datetime.now(timezone.utc)
+    today = current.astimezone(ZoneInfo("America/New_York")).date()
+    return [value for value in _business_days(start, end) if value.date() < today]
+
 
 def _day(value: object) -> datetime:
     if isinstance(value, datetime):
@@ -376,8 +384,7 @@ def backfill_thetadata_options(
     started_at = datetime.now(timezone.utc).isoformat()
     results: list[dict[str, object]] = []
     total_symbols = len(target_symbols)
-    today = datetime.now(timezone.utc).date()
-    requested_dates = [value for value in _business_days(start, end) if value.date() < today]
+    requested_dates = _completed_option_dates(start, end)
     requested_keys = [(symbol, snapshot_date) for snapshot_date in requested_dates for symbol in target_symbols]
 
     # Use the same resumable cache preflight as the historical range backfill,
@@ -627,7 +634,7 @@ def backfill_thetadata_options_for_oracle_trades(
     cached_dates_by_symbol = (
         _cached_endpoint_dates_by_symbol(trade_windows) if skip_existing and not overwrite else {}
     )
-    today = _day(datetime.now(timezone.utc).date())
+    today = _day(datetime.now(ZoneInfo("America/New_York")).date())
 
     records = trade_windows.to_dicts()
     endpoint_keys: list[tuple[str, datetime]] = []
@@ -989,7 +996,7 @@ def backfill_thetadata_options_for_oracle_trade_ranges(
     if windows.is_empty():
         return {"status": "empty_trades", "dates_requested": 0, "dates_downloaded": 0}
 
-    today = _day(datetime.now(timezone.utc).date())
+    today = _day(datetime.now(ZoneInfo("America/New_York")).date())
     valid_trading_days = (
         {_day(value) for value in trading_days}
         if trading_days is not None

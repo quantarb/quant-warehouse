@@ -424,3 +424,12 @@ def test_failed_download_is_reported_as_request_progress_not_download_progress(m
     assert summary['dates_downloaded'] == 0
     assert summary['symbols_failed'] == 1
     assert any('0 trading days downloaded, 0 requests left; error' in m for m in messages)
+
+
+def test_completed_option_dates_use_new_york_day_across_utc_rollover():
+    from datetime import timezone
+    from quant_warehouse.migrate.backfill_thetadata_options import _completed_option_dates
+    start, end = datetime(2026, 9, 30), datetime(2026, 10, 2)
+    # UTC October 2 is still October 1 in New York: October 1 is not historical.
+    assert _completed_option_dates(start, end, now=datetime(2026, 10, 2, 1, tzinfo=timezone.utc)) == [start]
+    assert _completed_option_dates(start, end, now=datetime(2026, 10, 2, 12, tzinfo=timezone.utc)) == [start, datetime(2026, 10, 1)]
