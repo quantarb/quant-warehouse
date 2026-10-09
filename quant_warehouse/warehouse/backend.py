@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+from io import BytesIO
 from contextlib import nullcontext
 from typing import Literal, Protocol
 
@@ -13,6 +14,42 @@ StorageKind = Literal["arctic"]
 FrameFormat = Literal["polars"]
 _EMPTY_COLUMNS_METADATA = "quant_warehouse_empty_columns"
 _COLUMN_ORDER_METADATA = "quant_warehouse_column_order"
+_EMPTY_PAYLOAD_DETAILS_METADATA = "quant_warehouse_empty_payload_details"
+_EMPTY_PAYLOAD_SCHEMA_METADATA = "quant_warehouse_empty_payload_schema"
+_REMOVED_EMPTY_METADATA = "quant_warehouse_removed_empty_columns"
+
+
+def empty_payload_columns(frame: pl.DataFrame, *, key_columns: tuple[str, ...] = ()) -> list[str]:
+    """Find wholly missing payloads; keys and zero-row schemas are never removed.
+
+    Missing means null/NaT, float NaN, or the exact empty string. Whitespace,
+    infinity, zero, false, and nested/container values are meaningful values.
+    """
+    from quant_warehouse.ingest.normalize import INDEX_CANDIDATES, PANEL_DIMENSION_COLUMNS
+
+    protected = set(INDEX_CANDIDATES) | set(PANEL_DIMENSION_COLUMNS) | set(key_columns) | {
+        "__index__", "contract_symbol", "underlying_symbol", "expiration", "strike", "option_type",
+        "id", "cik", "event_id", "security_id", "instrument_id", "company_id",
+        "period", "fiscal_year", "calendar_year", "quarter",
+        "created_at", "updated_at", "published_at", "quote_timestamp", "snapshot_date", "eod_date",
+    }
+    if not frame.height:
+        return []
+    expressions = []
+    for name, dtype in frame.schema.items():
+        if name in protected:
+            continue
+        missing = pl.col(name).is_null()
+        if dtype.is_float():
+            missing = missing | pl.col(name).is_nan()
+        elif dtype.base_type() in {pl.String, pl.Categorical, pl.Enum}:
+            missing = missing | (pl.col(name).cast(pl.String) == "")
+        expressions.append(missing.all().alias(name))
+    if not expressions:
+        return []
+    # Audit all columns in one vectorized operation instead of one eager query
+    # per floating/string column. This remains a full-value audit, without sampling.
+    return [name for name, empty in frame.select(expressions).row(0, named=True).items() if empty]
 
 
 class StorageBackend(Protocol):
@@ -26,6 +63,7 @@ class StorageBackend(Protocol):
         date_range: tuple[datetime | None, datetime | None] | None = None,
         columns: list[str] | None = None,
         output_format: FrameFormat = "polars",
+        include_empty_columns: bool = True,
     ) -> pl.DataFrame | None: ...
 
     def column_non_null_counts(self, library: str, symbol: str) -> dict[str, int]: ...
@@ -37,6 +75,7 @@ class StorageBackend(Protocol):
         df: pl.DataFrame,
         *,
         prune_previous_versions: bool = True,
+        key_columns: tuple[str, ...] = (),
     ) -> None: ...
 
 
@@ -74,6 +113,7 @@ class ArcticBackend:
         date_range: tuple[datetime | None, datetime | None] | None = None,
         columns: list[str] | None = None,
         output_format: FrameFormat = "polars",
+        include_empty_columns: bool = True,
     ) -> pl.DataFrame | None:
         with self._storage_guard():
             lib = self._library(library)
@@ -84,7 +124,8 @@ class ArcticBackend:
             if columns is not None:
                 metadata_item = lib.read_metadata(symbol)
                 stored_metadata = getattr(metadata_item, "metadata", None) or {}
-                empty_columns = set(stored_metadata.get(_EMPTY_COLUMNS_METADATA, ()))
+                empty_columns = (set(stored_metadata.get(_EMPTY_COLUMNS_METADATA, ()))
+                                 | set(stored_metadata.get(_REMOVED_EMPTY_METADATA, ())))
                 physical_columns = [name for name in columns if name not in empty_columns]
             else:
                 physical_columns = None
@@ -105,10 +146,19 @@ class ArcticBackend:
             if df is None or df.is_empty():
                 return None
             stored_metadata = stored_metadata or getattr(version, "metadata", None) or {}
-            empty_columns = stored_metadata.get(_EMPTY_COLUMNS_METADATA, ())
-            requested_empty = [name for name in empty_columns if columns is None or name in columns]
+            empty_columns = list(stored_metadata.get(_EMPTY_COLUMNS_METADATA, ()))
+            if columns is not None:
+                empty_columns = list(dict.fromkeys([*empty_columns,
+                                      *stored_metadata.get(_REMOVED_EMPTY_METADATA, ())]))
+            # Explicit selections override clean-schema mode for fixed-schema callers.
+            requested_empty = [name for name in empty_columns
+                               if (columns is not None and name in columns)
+                               or (columns is None and include_empty_columns)]
             if requested_empty:
-                df = df.with_columns(pl.lit(None).alias(name) for name in requested_empty)
+                schema_bytes = stored_metadata.get(_EMPTY_PAYLOAD_SCHEMA_METADATA)
+                empty_schema = pl.read_ipc(BytesIO(schema_bytes)).schema if schema_bytes else {}
+                df = df.with_columns(pl.lit(None, dtype=empty_schema.get(name, pl.Null)).alias(name)
+                                     for name in requested_empty)
             # Older datasets used an unnamed time index. ArcticDB exposes it
             # as __index__; restore that observation date before normalization.
             if "__index__" in df.columns and "date" not in df.columns and isinstance(df.schema["__index__"], pl.Datetime):
@@ -181,6 +231,7 @@ class ArcticBackend:
         df: pl.DataFrame,
         *,
         prune_previous_versions: bool = True,
+        key_columns: tuple[str, ...] = (),
     ) -> None:
         if df.is_empty():
             return
@@ -198,8 +249,18 @@ class ArcticBackend:
             # Preserve the column and its missing values as typed timestamps.
             empty_dates = [name for name in INDEX_CANDIDATES
                            if name in df.columns and df[name].null_count() == df.height]
-            empty_payload = [name for name in df.columns
-                             if name not in INDEX_CANDIDATES and df[name].null_count() == df.height]
+            empty_payload = empty_payload_columns(df, key_columns=key_columns)
+            # Missing payload values are canonically restored as null. Keep their
+            # original dtype/counts as provenance without retaining row-sized data.
+            empty_details = {
+                name: {
+                    "dtype": str(df.schema[name]),
+                    "null_count": df[name].null_count(),
+                    "nan_count": int(df[name].is_nan().sum()) if df.schema[name].is_float() else 0,
+                    "empty_string_count": int((df[name] == "").sum()) if df.schema[name].base_type() in {pl.String, pl.Categorical, pl.Enum} else 0,
+                }
+                for name in empty_payload
+            }
             storage_frame = (
                 df.drop(empty_payload)
                 .with_columns(pl.col(name).cast(pl.Datetime("ns")) for name in empty_dates)
@@ -210,12 +271,32 @@ class ArcticBackend:
             if "date" in df.columns and df["date"].null_count() == 0:
                 write_frame = write_frame.set_index("date")
                 write_frame.index.name = "date"
+            prior_metadata = lib.read_metadata(symbol).metadata if lib.has_symbol(symbol) else None
+            retained_metadata = (dict(prior_metadata) if isinstance(prior_metadata, dict)
+                                 else {"quant_warehouse_source_metadata": prior_metadata}
+                                 if prior_metadata is not None else {})
+            removed = retained_metadata.get(_REMOVED_EMPTY_METADATA, ())
+            clean_schema = "quant_warehouse_empty_column_cleanup" in retained_metadata
+            removed = [name for name in removed if name not in df.columns or name in empty_payload]
+            if clean_schema:
+                removed = list(dict.fromkeys([*removed, *empty_payload]))
+            retained_metadata[_REMOVED_EMPTY_METADATA] = removed
+            prior_schema_bytes = retained_metadata.get(_EMPTY_PAYLOAD_SCHEMA_METADATA)
+            prior_schema = pl.read_ipc(BytesIO(prior_schema_bytes)).schema if prior_schema_bytes else {}
+            empty_schema = {name: dtype for name, dtype in prior_schema.items() if name in removed}
+            empty_schema.update({name: df.schema[name] for name in empty_payload})
+            retained_details = {name: details for name, details in retained_metadata.get(
+                _EMPTY_PAYLOAD_DETAILS_METADATA, {}).items() if name in removed}
+            retained_details.update(empty_details)
             lib.write(
                 symbol,
                 write_frame.sort_index(),
                 metadata={
-                    _EMPTY_COLUMNS_METADATA: empty_payload,
-                    _COLUMN_ORDER_METADATA: df.columns,
+                    **retained_metadata,
+                    _EMPTY_COLUMNS_METADATA: [] if clean_schema else empty_payload,
+                    _COLUMN_ORDER_METADATA: [n for n in df.columns if n not in removed],
+                    _EMPTY_PAYLOAD_DETAILS_METADATA: retained_details,
+                    _EMPTY_PAYLOAD_SCHEMA_METADATA: pl.DataFrame(schema=empty_schema).write_ipc(None).getvalue(),
                 },
                 prune_previous_versions=prune_previous_versions,
             )
@@ -286,6 +367,7 @@ class ProviderRoutingBackend:
         date_range: tuple[datetime | None, datetime | None] | None = None,
         columns: list[str] | None = None,
         output_format: FrameFormat = "polars",
+        include_empty_columns: bool = True,
     ) -> pl.DataFrame | None:
         return self._backend_for_library(library).read(
             library,
@@ -293,6 +375,7 @@ class ProviderRoutingBackend:
             date_range=date_range,
             columns=columns,
             output_format=output_format,
+            include_empty_columns=include_empty_columns,
         )
 
     def column_non_null_counts(self, library: str, symbol: str) -> dict[str, int]:
@@ -305,12 +388,14 @@ class ProviderRoutingBackend:
         df: pl.DataFrame,
         *,
         prune_previous_versions: bool = True,
+        key_columns: tuple[str, ...] = (),
     ) -> None:
         self._backend_for_library(library).write(
             library,
             symbol,
             df,
             prune_previous_versions=prune_previous_versions,
+            key_columns=key_columns,
         )
 
     def list_symbols(self, library: str) -> list[str]:
