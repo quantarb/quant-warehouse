@@ -27,11 +27,19 @@ _EVENT_PAYLOAD_SCHEMA = {
 
 
 def _required_event_payloads(frame, section):
-    return frame.with_columns(
-        pl.lit(None, dtype=dtype).alias(name)
-        for name, dtype in _EVENT_PAYLOAD_SCHEMA.get(section, {}).items()
-        if name not in frame.columns
-    )
+    expressions = []
+    for name, dtype in _EVENT_PAYLOAD_SCHEMA.get(section, {}).items():
+        if name not in frame.columns:
+            expressions.append(pl.lit(None, dtype=dtype).alias(name))
+            continue
+        expression = pl.col(name)
+        stored_dtype = frame.schema[name]
+        if stored_dtype.is_float():
+            expression = expression.fill_nan(None)
+        elif stored_dtype.base_type() in {pl.String, pl.Categorical, pl.Enum}:
+            expression = pl.when(expression.cast(pl.String) == "").then(None).otherwise(expression)
+        expressions.append(expression.alias(name))
+    return frame.with_columns(expressions)
 
 
 def event_frame(frame, symbol, family, date_column, values, *, event_column=None):

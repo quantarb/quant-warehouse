@@ -123,3 +123,16 @@ def test_other_event_sections_missing_payloads_remain_unknown(section, date_fiel
     for channel in ["signal_value", *[f"text_{i}" for i in range(len(fields) - 1)]]:
         assert result[channel].to_list() == [None]
     assert result["date"].to_list() == [datetime(2024, 1, 9)]
+
+
+@pytest.mark.parametrize("section,field", [(s, f) for s, fields in SCHEMAS.items() for f in fields])
+@pytest.mark.parametrize("sentinel", [float("nan"), ""])
+def test_empty_raw_sentinel_matches_unknown_null_payload(section, field, sentinel):
+    frame = source(section)
+    raw_empty = frame.with_columns(pl.lit(sentinel).alias(field))
+    typed_null = frame.with_columns(pl.lit(None, dtype=SCHEMAS[section][field]).alias(field))
+    reconstructed = _required_event_payloads(raw_empty, section)
+    assert reconstructed[field].to_list() == [None]
+    actual, expected = output(raw_empty, section), output(typed_null, section)
+    assert len(actual) == len(expected) == 1
+    assert_frame_equal(actual[0][1], expected[0][1])
