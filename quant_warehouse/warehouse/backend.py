@@ -19,25 +19,30 @@ _EMPTY_PAYLOAD_SCHEMA_METADATA = "quant_warehouse_empty_payload_schema"
 _REMOVED_EMPTY_METADATA = "quant_warehouse_removed_empty_columns"
 
 
-def empty_payload_columns(frame: pl.DataFrame, *, key_columns: tuple[str, ...] = ()) -> list[str]:
+def empty_payload_columns(frame: pl.DataFrame, *, key_columns: tuple[str, ...] = (),
+                          payload_columns: tuple[str, ...] | None = None) -> list[str]:
     """Find wholly missing payloads; keys and zero-row schemas are never removed.
 
     Missing means null/NaT, float NaN, or the exact empty string. Whitespace,
     infinity, zero, false, and nested/container values are meaningful values.
     """
     from quant_warehouse.ingest.normalize import INDEX_CANDIDATES, PANEL_DIMENSION_COLUMNS
+    from quant_warehouse.warehouse.column_roles import REVIEWED_PAYLOAD_COLUMNS, retained_schema_reason
 
+    allowed = set(REVIEWED_PAYLOAD_COLUMNS if payload_columns is None else payload_columns)
     protected = set(INDEX_CANDIDATES) | set(PANEL_DIMENSION_COLUMNS) | set(key_columns) | {
         "__index__", "contract_symbol", "underlying_symbol", "expiration", "strike", "option_type",
         "id", "cik", "event_id", "security_id", "instrument_id", "company_id",
         "period", "fiscal_year", "calendar_year", "quarter",
         "created_at", "updated_at", "published_at", "quote_timestamp", "snapshot_date", "eod_date",
+        "event_date", "timestamp", "declaration_date", "published_time", "updated",
+        "maturity_date", "last_updated", "instrument_symbol",
     }
     if not frame.height:
         return []
     expressions = []
     for name, dtype in frame.schema.items():
-        if name in protected:
+        if name in protected or name not in allowed or retained_schema_reason(name, dtype):
             continue
         missing = pl.col(name).is_null()
         if dtype.is_float():
@@ -76,6 +81,7 @@ class StorageBackend(Protocol):
         *,
         prune_previous_versions: bool = True,
         key_columns: tuple[str, ...] = (),
+        payload_columns: tuple[str, ...] | None = None,
     ) -> None: ...
 
 
@@ -232,6 +238,7 @@ class ArcticBackend:
         *,
         prune_previous_versions: bool = True,
         key_columns: tuple[str, ...] = (),
+        payload_columns: tuple[str, ...] | None = None,
     ) -> None:
         if df.is_empty():
             return
@@ -249,7 +256,13 @@ class ArcticBackend:
             # Preserve the column and its missing values as typed timestamps.
             empty_dates = [name for name in INDEX_CANDIDATES
                            if name in df.columns and df[name].null_count() == df.height]
-            empty_payload = empty_payload_columns(df, key_columns=key_columns)
+            from quant_warehouse.warehouse.column_roles import REVIEWED_PAYLOAD_COLUMNS
+            prior_metadata = lib.read_metadata(symbol).metadata if lib.has_symbol(symbol) else None
+            prior_removed = (prior_metadata or {}).get(_REMOVED_EMPTY_METADATA, ()) if isinstance(prior_metadata, dict) else ()
+            eligible_payloads = set(REVIEWED_PAYLOAD_COLUMNS if payload_columns is None else payload_columns)
+            eligible_payloads.update(prior_removed)
+            empty_payload = empty_payload_columns(df, key_columns=key_columns,
+                                                  payload_columns=tuple(eligible_payloads))
             # Missing payload values are canonically restored as null. Keep their
             # original dtype/counts as provenance without retaining row-sized data.
             empty_details = {
@@ -271,7 +284,6 @@ class ArcticBackend:
             if "date" in df.columns and df["date"].null_count() == 0:
                 write_frame = write_frame.set_index("date")
                 write_frame.index.name = "date"
-            prior_metadata = lib.read_metadata(symbol).metadata if lib.has_symbol(symbol) else None
             retained_metadata = (dict(prior_metadata) if isinstance(prior_metadata, dict)
                                  else {"quant_warehouse_source_metadata": prior_metadata}
                                  if prior_metadata is not None else {})
@@ -389,6 +401,7 @@ class ProviderRoutingBackend:
         *,
         prune_previous_versions: bool = True,
         key_columns: tuple[str, ...] = (),
+        payload_columns: tuple[str, ...] | None = None,
     ) -> None:
         self._backend_for_library(library).write(
             library,
@@ -396,6 +409,7 @@ class ProviderRoutingBackend:
             df,
             prune_previous_versions=prune_previous_versions,
             key_columns=key_columns,
+            payload_columns=payload_columns,
         )
 
     def list_symbols(self, library: str) -> list[str]:

@@ -58,7 +58,12 @@ def _hash(frame: pd.DataFrame) -> str:
 
 
 def prepare_empty_column_cleanup(
-    library, symbol: str, *, max_rows: int = 100_000, key_columns: tuple[str, ...] = ()
+    library,
+    symbol: str,
+    *,
+    max_rows: int = 100_000,
+    key_columns: tuple[str, ...] = (),
+    payload_columns: tuple[str, ...] | None = None,
 ) -> EmptyColumnPlan:
     """Read and validate every value of one pinned version, bounded by max_rows.
 
@@ -82,14 +87,22 @@ def prepare_empty_column_cleanup(
     # Normalize missing sentinels only in the inspection frame. The original
     # pandas frame is retained verbatim for hashes, writes and rollback checks.
     frame = pl.from_pandas(original, nan_to_null=True)
-    physical = tuple(empty_payload_columns(frame, key_columns=key_columns))
+    physical = tuple(
+        empty_payload_columns(frame, key_columns=key_columns, payload_columns=payload_columns)
+    )
     omitted = metadata.get(_EMPTY_COLUMNS_METADATA, ())
     # Reject conflicting metadata rather than concealing physically populated data.
     if any(name in original.columns and name not in physical for name in omitted):
         raise ValueError("Empty-column metadata conflicts with retained physical fields")
     placeholders = pl.DataFrame({name: [None] for name in omitted if name not in original.columns})
     logical = (
-        tuple(empty_payload_columns(placeholders, key_columns=key_columns)) if len(original) else ()
+        tuple(
+            empty_payload_columns(
+                placeholders, key_columns=key_columns, payload_columns=payload_columns
+            )
+        )
+        if len(original)
+        else ()
     )
     removed = list(dict.fromkeys([*physical, *logical]))
     cleaned = original.drop(columns=list(physical)).copy()

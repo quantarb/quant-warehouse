@@ -10,6 +10,14 @@ from quant_warehouse.migrate.empty_columns import (
 from quant_warehouse.warehouse.backend import ArcticBackend
 
 
+def _prepare(library, symbol, **kwargs):
+    # These synthetic fixture names are explicitly declared payloads. The
+    # production default keeps names absent from its reviewed allowlist.
+    return prepare_empty_column_cleanup(
+        library, symbol, payload_columns=("number", "text", "blank", "blank_text"), **kwargs
+    )
+
+
 def _fixture():
     backend = ArcticBackend("mem://")
     lib = backend._library("events")
@@ -32,22 +40,29 @@ def _fixture():
 def test_dry_plan_full_validation_and_version_preserving_apply():
     backend, lib, original = _fixture()
     lib.snapshot("baseline")
-    plan = prepare_empty_column_cleanup(lib, "TEST", key_columns=("key",))
-    assert plan.physical_removed == ("number", "text", "optional_timestamp")
+    plan = _prepare(lib, "TEST", key_columns=("key",))
+    assert plan.physical_removed == ("number", "text")
     assert plan.rows == 2 and len(lib.list_versions("TEST")) == 1
     report = apply_empty_column_cleanup(lib, plan)
     assert report["new_version"] == 1 and report["original_version_retained"]
     assert lib.read_metadata("TEST").metadata["audit"] == {"source": "fixture"}
     assert set(lib.list_snapshots()) == {"baseline"}
     pd.testing.assert_frame_equal(lib.read("TEST", as_of="baseline").data, original)
-    assert backend.read("events", "TEST").columns == ["date", "value", "flag", "space", "key"]
+    assert backend.read("events", "TEST").columns == [
+        "date",
+        "value",
+        "flag",
+        "space",
+        "key",
+        "optional_timestamp",
+    ]
     selected = backend.read("events", "TEST", columns=["text", "number", "value"])
     assert selected.height == 2 and selected.columns == ["text", "number", "value"]
     assert selected.schema["text"] == pl.String and selected.schema["number"] == pl.Float64
     assert selected["text"].null_count() == 2
-    assert not apply_empty_column_cleanup(
-        lib, prepare_empty_column_cleanup(lib, "TEST", key_columns=("key",))
-    )["changed"]
+    assert not apply_empty_column_cleanup(lib, _prepare(lib, "TEST", key_columns=("key",)))[
+        "changed"
+    ]
 
 
 def test_logical_placeholder_removal_preserves_keys_and_provenance():
@@ -56,8 +71,14 @@ def test_logical_placeholder_removal_preserves_keys_and_provenance():
     frame = pl.DataFrame(
         {"date": [datetime(2024, 1, 1)], "value": [2.0], "blank": [""], "symbol": [None]}
     )
-    backend.write("events", "TEST", frame, prune_previous_versions=False)
-    plan = prepare_empty_column_cleanup(lib, "TEST")
+    backend.write(
+        "events",
+        "TEST",
+        frame,
+        prune_previous_versions=False,
+        payload_columns=("number", "text", "blank", "blank_text"),
+    )
+    plan = _prepare(lib, "TEST")
     assert plan.logical_removed == ("blank",) and plan.physical_removed == ()
     apply_empty_column_cleanup(lib, plan)
     assert backend.read("events", "TEST").columns == ["date", "value", "symbol"]
@@ -73,20 +94,20 @@ def test_logical_placeholder_removal_preserves_keys_and_provenance():
 def test_zero_row_schema_noop_and_bounded_validation():
     _, lib, _ = _fixture()
     with pytest.raises(ValueError, match="bounded audit limit"):
-        prepare_empty_column_cleanup(lib, "TEST", max_rows=1)
+        _prepare(lib, "TEST", max_rows=1)
     lib.write("EMPTY", pd.DataFrame({"number": pd.Series(dtype="float64")}))
-    plan = prepare_empty_column_cleanup(lib, "EMPTY")
+    plan = _prepare(lib, "EMPTY")
     assert not plan.physical_removed and not plan.logical_removed
     assert not apply_empty_column_cleanup(lib, plan)["changed"]
 
 
 def test_changed_source_and_changed_plan_refused():
     _, lib, original = _fixture()
-    plan = prepare_empty_column_cleanup(lib, "TEST")
+    plan = _prepare(lib, "TEST")
     lib.write("TEST", original, prune_previous_versions=False)
     with pytest.raises(RuntimeError, match="Source advanced"):
         apply_empty_column_cleanup(lib, plan)
-    plan = prepare_empty_column_cleanup(lib, "TEST")
+    plan = _prepare(lib, "TEST")
     plan.cleaned.loc[plan.cleaned.index[0], "value"] = 999
     with pytest.raises(RuntimeError, match="Plan changed"):
         apply_empty_column_cleanup(lib, plan)
@@ -95,7 +116,7 @@ def test_changed_source_and_changed_plan_refused():
 def test_missing_library_or_symbol_never_created():
     lib = Arctic("mem://").create_library("events")
     with pytest.raises(Exception):
-        prepare_empty_column_cleanup(lib, "MISSING")
+        _prepare(lib, "MISSING")
     assert lib.list_symbols() == []
 
 
@@ -106,7 +127,7 @@ def test_last_empty_payload_removal_retains_index_and_rows():
         {"blank": ["", ""]}, index=pd.DatetimeIndex(["2024-01-01", "2024-01-02"], name="date")
     )
     lib.write("TEST", original, prune_previous_versions=False)
-    plan = prepare_empty_column_cleanup(lib, "TEST")
+    plan = _prepare(lib, "TEST")
     apply_empty_column_cleanup(lib, plan)
     assert lib.read("TEST").data.shape == (2, 0)
     assert backend.read("events", "TEST").height == 2
@@ -115,7 +136,7 @@ def test_last_empty_payload_removal_retains_index_and_rows():
 
 def test_migrated_refresh_stays_clean_until_removed_field_has_real_values():
     backend, lib, _ = _fixture()
-    apply_empty_column_cleanup(lib, prepare_empty_column_cleanup(lib, "TEST", key_columns=("key",)))
+    apply_empty_column_cleanup(lib, _prepare(lib, "TEST", key_columns=("key",)))
     refreshed = pl.DataFrame(
         {
             "date": [datetime(2024, 1, 1), datetime(2024, 1, 2)],
@@ -123,14 +144,26 @@ def test_migrated_refresh_stays_clean_until_removed_field_has_real_values():
             "text": ["", None],
         }
     )
-    backend.write("events", "TEST", refreshed, prune_previous_versions=False)
+    backend.write(
+        "events",
+        "TEST",
+        refreshed,
+        prune_previous_versions=False,
+        payload_columns=("number", "text", "blank", "blank_text"),
+    )
     assert "text" not in backend.read("events", "TEST").columns
     assert backend.read("events", "TEST", columns=["text"]).height == 2
-    reconstructed = backend.read("events", "TEST", columns=["number", "optional_timestamp"])
-    assert reconstructed.schema == {"number": pl.Float64, "optional_timestamp": pl.Datetime("ns")}
+    reconstructed = backend.read("events", "TEST", columns=["number", "text"])
+    assert reconstructed.schema == {"number": pl.Float64, "text": pl.String}
     assert reconstructed.null_count().row(0) == (2, 2)
     refreshed = refreshed.with_columns(pl.Series("text", ["", "real"]))
-    backend.write("events", "TEST", refreshed, prune_previous_versions=False)
+    backend.write(
+        "events",
+        "TEST",
+        refreshed,
+        prune_previous_versions=False,
+        payload_columns=("number", "text", "blank", "blank_text"),
+    )
     assert backend.read("events", "TEST")["text"].to_list() == ["", "real"]
 
 
@@ -139,7 +172,7 @@ def test_last_payload_without_temporal_index_is_not_migrated():
     lib = backend._library("events")
     lib.write("TEST", pd.DataFrame({"blank": ["", ""]}), prune_previous_versions=False)
     with pytest.raises(ValueError, match="row-representation review"):
-        prepare_empty_column_cleanup(lib, "TEST")
+        _prepare(lib, "TEST")
     assert len(lib.list_versions("TEST")) == 1
 
 
@@ -151,10 +184,11 @@ def test_logical_only_cleanup_uses_metadata_version(monkeypatch):
         "TEST",
         pl.DataFrame({"date": [datetime(2024, 1, 1)], "value": [2.0], "blank": [""]}),
         prune_previous_versions=False,
+        payload_columns=("number", "text", "blank", "blank_text"),
     )
     source_metadata = lib.read_metadata("TEST").metadata
     lib.snapshot("before_logical_cleanup")
-    plan = prepare_empty_column_cleanup(lib, "TEST")
+    plan = _prepare(lib, "TEST")
 
     def forbidden(*args, **kwargs):
         raise AssertionError("Logical-only cleanup must not rewrite data")
@@ -176,7 +210,7 @@ def test_migrated_unnamed_time_index_remains_visible():
         index=pd.DatetimeIndex(["2024-01-01", "2024-01-02"]),
     )
     lib.write("TEST", frame, prune_previous_versions=False)
-    apply_empty_column_cleanup(lib, prepare_empty_column_cleanup(lib, "TEST"))
+    apply_empty_column_cleanup(lib, _prepare(lib, "TEST"))
     out = backend.read("events", "TEST")
     assert out.columns == ["date", "value"]
     assert out["date"].to_list() == [datetime(2024, 1, 1), datetime(2024, 1, 2)]
@@ -195,7 +229,7 @@ def test_existing_clean_schema_missing_unnamed_index_gets_metadata_repair():
         "audit": "retained",
     }
     lib.write("TEST", original, metadata=metadata, prune_previous_versions=False)
-    plan = prepare_empty_column_cleanup(lib, "TEST")
+    plan = _prepare(lib, "TEST")
     assert plan.index_order_repair and not plan.physical_removed and not plan.logical_removed
     result = apply_empty_column_cleanup(lib, plan)
     assert result["changed"] and result["new_version"] == 1
@@ -218,7 +252,7 @@ def test_text_columns_with_nan_sentinels_are_inspected_without_data_coercion():
     )
     lib.write("TEST", frame, prune_previous_versions=False)
     original = lib.read("TEST").data
-    plan = prepare_empty_column_cleanup(lib, "TEST")
+    plan = _prepare(lib, "TEST")
     assert plan.physical_removed == ("blank_text",)
     apply_empty_column_cleanup(lib, plan)
     pd.testing.assert_frame_equal(lib.read("TEST").data, original.drop(columns=["blank_text"]))
@@ -238,7 +272,7 @@ def test_logical_cleanup_preserves_unnamed_datetime_index_and_explicit_empty_sch
     }
     lib.write("TEST", original, metadata=metadata, prune_previous_versions=False)
     lib.snapshot("unnamed_before")
-    plan = prepare_empty_column_cleanup(lib, "TEST")
+    plan = _prepare(lib, "TEST")
     assert plan.logical_removed == ("blank",) and not plan.physical_removed
     apply_empty_column_cleanup(lib, plan)
     out = backend.read("events", "TEST")
@@ -250,3 +284,42 @@ def test_logical_cleanup_preserves_unnamed_datetime_index_and_explicit_empty_sch
     pd.testing.assert_frame_equal(lib.read("TEST", as_of="unnamed_before").data, original)
     assert lib.read_metadata("TEST", as_of=0).metadata == metadata
     assert lib.read_metadata("TEST").metadata["source"] == metadata["source"]
+
+
+def test_unreviewed_payload_is_retained_until_declared_and_roles_cannot_be_overridden():
+    backend = ArcticBackend("mem://")
+    lib = backend._library("events")
+    original = pd.DataFrame(
+        {
+            "new_metric": [float("nan"), float("nan")],
+            "published_epoch": [float("nan"), float("nan")],
+            "owner_name": [None, None],
+        },
+        index=pd.DatetimeIndex(["2024-01-01", "2024-01-02"], name="date"),
+    )
+    lib.write("TEST", original, prune_previous_versions=False)
+    default = prepare_empty_column_cleanup(lib, "TEST")
+    assert default.physical_removed == ("owner_name",)
+    declared = prepare_empty_column_cleanup(
+        lib, "TEST", payload_columns=("new_metric", "published_epoch", "owner_name")
+    )
+    assert declared.physical_removed == ("new_metric", "owner_name")
+    apply_empty_column_cleanup(lib, declared)
+    pd.testing.assert_frame_equal(
+        lib.read("TEST").data, original.drop(columns=["new_metric", "owner_name"])
+    )
+    pd.testing.assert_frame_equal(lib.read("TEST", as_of=0).data, original)
+
+
+def test_temporal_dtype_and_keys_are_retained_but_empty_financial_payload_is_removed():
+    from quant_warehouse.warehouse.backend import empty_payload_columns
+
+    frame = pl.DataFrame(
+        {"treasury_stock": [None], "net_income": [None], "custom_key": [None]},
+        schema={
+            "treasury_stock": pl.Datetime("ns"),
+            "net_income": pl.Float64,
+            "custom_key": pl.Float64,
+        },
+    )
+    assert empty_payload_columns(frame, payload_columns=tuple(frame.columns)) == ["net_income"]
