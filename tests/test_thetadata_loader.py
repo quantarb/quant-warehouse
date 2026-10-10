@@ -104,6 +104,7 @@ def test_split_snapshots_by_date_groups_rows() -> None:
 
 
 class _MemoryBackend:
+    kind = "memory"
     def __init__(self, initial: pl.DataFrame | None = None) -> None:
         self.frame = initial
         self.writes: list[tuple[str, str, pl.DataFrame, bool]] = []

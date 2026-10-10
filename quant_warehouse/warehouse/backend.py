@@ -313,6 +313,11 @@ class ArcticBackend:
                 prune_previous_versions=prune_previous_versions,
             )
 
+    def refresh_version_cache(self, library: str) -> None:
+        """Observe cross-process writes before a locked read/merge/write."""
+        with self._storage_guard():
+            self._library(library)._nvs.version_store.flush_version_map()
+
     def _storage_guard(self):
         return self._storage_lock or nullcontext()
 
@@ -370,6 +375,9 @@ class ProviderRoutingBackend:
             backend = ArcticBackend(uri, storage_lock=self._storage_lock)
             self._provider_backends[provider] = backend
         return backend
+
+    def refresh_version_cache(self, library: str) -> None:
+        self._backend_for_library(library).refresh_version_cache(library)
 
     def read(
         self,

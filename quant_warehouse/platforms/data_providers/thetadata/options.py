@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Any, Iterator, Literal, Mapping, Sequence
@@ -10,6 +11,8 @@ from quant_warehouse.config import WarehouseConfig
 from quant_warehouse.ingest.openbb_fetch import fetch_openbb
 from quant_warehouse.warehouse.backend import ArcticBackend, open_backend
 from quant_warehouse.warehouse.storage import read_provider_frame, provider_library
+
+from .write_coordination import option_store_write_lock
 
 Frame = pl.DataFrame
 
@@ -359,22 +362,25 @@ def write_option_chain_arctic(
     if frame is None or frame.is_empty():
         return _arctic_ref(symbol)
     backend = backend or open_backend(config or WarehouseConfig.from_env())
-    storage_symbol = option_chain_storage_symbol(symbol)
-    incoming = _prepare_option_chain_for_arctic(frame)
-    library = provider_library(OPTIONS_THETADATA_EOD_LIBRARY, OPTIONS_THETADATA_PROVIDER)
-    existing = (
-        read_provider_frame(
-            backend,
-            base_library=OPTIONS_THETADATA_EOD_LIBRARY,
-            provider=OPTIONS_THETADATA_PROVIDER,
-            symbol=storage_symbol,
+    with option_store_write_lock(backend):
+        storage_symbol = option_chain_storage_symbol(symbol)
+        incoming = _prepare_option_chain_for_arctic(frame)
+        library = provider_library(OPTIONS_THETADATA_EOD_LIBRARY, OPTIONS_THETADATA_PROVIDER)
+        if getattr(backend, 'kind', None) != 'memory':
+            backend.refresh_version_cache(library)
+        existing = (
+            read_provider_frame(
+                backend,
+                base_library=OPTIONS_THETADATA_EOD_LIBRARY,
+                provider=OPTIONS_THETADATA_PROVIDER,
+                symbol=storage_symbol,
+            )
+            if merge
+            else None
         )
-        if merge
-        else None
-    )
-    merged = _merge_option_chain_upsert(existing, incoming)
-    if not merged.is_empty():
-        backend.write(library, storage_symbol, merged, prune_previous_versions=prune_previous_versions)
+        merged = _merge_option_chain_upsert(existing, incoming)
+        if not merged.is_empty():
+            backend.write(library, storage_symbol, merged, prune_previous_versions=prune_previous_versions)
     return _arctic_ref(symbol)
 
 
@@ -435,41 +441,44 @@ def deduplicate_option_chain_arctic(
     if symbols is None:
         symbols = sorted(str(symbol) for symbol in backend.list_symbols(library))
     rows: list[dict[str, Any]] = []
-    for raw_symbol in symbols:
-        storage_symbol = option_chain_storage_symbol(raw_symbol)
-        frame = read_provider_frame(
-            backend,
-            base_library=OPTIONS_THETADATA_EOD_LIBRARY,
-            provider=OPTIONS_THETADATA_PROVIDER,
-            symbol=storage_symbol,
-        )
-        rows_before = 0 if frame is None or frame.is_empty() else int(len(frame))
-        if frame is None or frame.is_empty():
+    with (nullcontext() if dry_run else option_store_write_lock(backend)):
+        if not dry_run and getattr(backend, 'kind', None) != 'memory':
+            backend.refresh_version_cache(library)
+        for raw_symbol in symbols:
+            storage_symbol = option_chain_storage_symbol(raw_symbol)
+            frame = read_provider_frame(
+                backend,
+                base_library=OPTIONS_THETADATA_EOD_LIBRARY,
+                provider=OPTIONS_THETADATA_PROVIDER,
+                symbol=storage_symbol,
+            )
+            rows_before = 0 if frame is None or frame.is_empty() else int(len(frame))
+            if frame is None or frame.is_empty():
+                rows.append(
+                    {
+                        "symbol": storage_symbol,
+                        "rows_before": rows_before,
+                        "rows_after": 0,
+                        "duplicate_rows": 0,
+                        "rewritten": False,
+                    }
+                )
+                continue
+            prepared = _prepare_option_chain_for_arctic(frame)
+            rows_after = int(len(prepared))
+            duplicate_rows = max(0, rows_before - rows_after)
+            rewritten = bool(duplicate_rows and not dry_run)
+            if rewritten:
+                backend.write(library, storage_symbol, prepared, prune_previous_versions=True)
             rows.append(
                 {
                     "symbol": storage_symbol,
                     "rows_before": rows_before,
-                    "rows_after": 0,
-                    "duplicate_rows": 0,
-                    "rewritten": False,
+                    "rows_after": rows_after,
+                    "duplicate_rows": duplicate_rows,
+                    "rewritten": rewritten,
                 }
             )
-            continue
-        prepared = _prepare_option_chain_for_arctic(frame)
-        rows_after = int(len(prepared))
-        duplicate_rows = max(0, rows_before - rows_after)
-        rewritten = bool(duplicate_rows and not dry_run)
-        if rewritten:
-            backend.write(library, storage_symbol, prepared, prune_previous_versions=True)
-        rows.append(
-            {
-                "symbol": storage_symbol,
-                "rows_before": rows_before,
-                "rows_after": rows_after,
-                "duplicate_rows": duplicate_rows,
-                "rewritten": rewritten,
-            }
-        )
     return pl.DataFrame(rows).sort(["duplicate_rows", "symbol"], descending=[True, False])
 
 
