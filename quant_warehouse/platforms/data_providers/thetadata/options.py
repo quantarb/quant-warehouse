@@ -368,6 +368,10 @@ def write_option_chain_arctic(
         library = provider_library(OPTIONS_THETADATA_EOD_LIBRARY, OPTIONS_THETADATA_PROVIDER)
         if getattr(backend, 'kind', None) != 'memory':
             backend.refresh_version_cache(library)
+        if merge and getattr(backend, 'kind', None) != 'memory':
+            from .bounded_update import update_existing_dates
+            if update_existing_dates(backend, library, storage_symbol, incoming, _merge_option_chain_upsert):
+                return _arctic_ref(symbol)
         existing = (
             read_provider_frame(
                 backend,
