@@ -354,6 +354,7 @@ def write_option_chain_arctic(
     backend: ArcticBackend | None = None,
     config: WarehouseConfig | None = None,
     merge: bool = True,
+    prune_previous_versions: bool = False,
 ) -> str:
     if frame is None or frame.is_empty():
         return _arctic_ref(symbol)
@@ -373,7 +374,7 @@ def write_option_chain_arctic(
     )
     merged = _merge_option_chain_upsert(existing, incoming)
     if not merged.is_empty():
-        backend.write(library, storage_symbol, merged, prune_previous_versions=True)
+        backend.write(library, storage_symbol, merged, prune_previous_versions=prune_previous_versions)
     return _arctic_ref(symbol)
 
 
@@ -645,6 +646,7 @@ def load_thetadata_option_snapshots(
     use_cache: bool = True,
     download_spec: ThetaDataDownloadSpec | None = None,
     download_missing: bool = True,
+    prune_previous_versions: bool = False,
     **download_filters: Any,
 ) -> dict[datetime, Frame]:
     """Load EOD option snapshots keyed by date, using ArcticDB as the cache/store."""
@@ -681,7 +683,7 @@ def load_thetadata_option_snapshots(
         for ts, frame in split_snapshots_by_date(fetched).items():
             snapshots[ts] = frame
             if use_cache and not frame.is_empty() and arctic_backend is not None:
-                write_option_chain_arctic(symbol, frame, backend=arctic_backend)
+                write_option_chain_arctic(symbol, frame, backend=arctic_backend, prune_previous_versions=prune_previous_versions)
 
     return {ts: snapshots[ts] for ts in normalized_dates if ts in snapshots}
 
@@ -694,6 +696,7 @@ def download_option_snapshots_for_range(
     api_key: str | None = None,
     spec: ThetaDataDownloadSpec | None = None,
     overwrite: bool = False,
+    prune_previous_versions: bool = False,
     **download_filters: Any,
 ) -> dict[str, Any]:
     """Download and cache full daily ThetaData EOD option chains in ArcticDB."""
@@ -748,6 +751,7 @@ def download_option_snapshots_for_range(
         spec=download_spec,
         backend=arctic_backend,
         overwrite=overwrite,
+        prune_previous_versions=prune_previous_versions,
     )
     paths = [_arctic_ref(symbol)] if downloaded_dates or cached_dates else []
 
@@ -835,6 +839,7 @@ def _download_and_cache_snapshots(
     spec: ThetaDataDownloadSpec,
     backend: ArcticBackend | None,
     overwrite: bool,
+    prune_previous_versions: bool = False,
 ) -> tuple[set[datetime], int, list[str]]:
     downloaded_dates: set[datetime] = set()
     paths: list[str] = []
@@ -862,7 +867,7 @@ def _download_and_cache_snapshots(
         if backend is not None and chunk_frames:
             combined = pl.concat(chunk_frames, how="diagonal_relaxed")
             fetched_rows += len(combined)
-            paths.append(write_option_chain_arctic(symbol, combined, backend=backend, merge=True))
+            paths.append(write_option_chain_arctic(symbol, combined, backend=backend, merge=True, prune_previous_versions=prune_previous_versions))
 
     missing_dates = [ts for ts in requested_dates if ts not in downloaded_dates]
     for ts in missing_dates:
@@ -878,7 +883,7 @@ def _download_and_cache_snapshots(
         if backend is not None and day_frames:
             combined = pl.concat(day_frames, how="diagonal_relaxed")
             fetched_rows += len(combined)
-            paths.append(write_option_chain_arctic(symbol, combined, backend=backend, merge=True))
+            paths.append(write_option_chain_arctic(symbol, combined, backend=backend, merge=True, prune_previous_versions=prune_previous_versions))
 
     return downloaded_dates, fetched_rows, list(dict.fromkeys(paths))
 

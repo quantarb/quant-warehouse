@@ -147,7 +147,7 @@ def test_arctic_option_chain_roundtrip() -> None:
     expected_library = provider_library(OPTIONS_THETADATA_EOD_LIBRARY, OPTIONS_THETADATA_PROVIDER)
     assert write_option_chain_arctic("AAPL", frame, backend=backend) == f"arctic://{expected_library}/AAPL"
     assert backend.writes[0][0] == expected_library
-    assert backend.writes[0][3] is True
+    assert backend.writes[0][3] is False
     loaded = read_option_chain_arctic("AAPL", start_date="2025-01-06", end_date="2025-01-06", backend=backend)
     assert len(loaded) == 1
     assert loaded["contract_symbol"][0] == "AAPL_put_20250124_230"

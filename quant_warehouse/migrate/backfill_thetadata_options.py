@@ -353,6 +353,7 @@ def backfill_thetadata_options(
     offset: int = 0,
     skip_existing: bool = True,
     overwrite: bool = False,
+    prune_previous_versions: bool = False,
     request_sleep: float = 1.0,
     max_workers: int = 1,
     us_only: bool = True,
@@ -439,6 +440,7 @@ def backfill_thetadata_options(
                 probe_date,
                 spec=download_spec,
                 overwrite=overwrite,
+                prune_previous_versions=prune_previous_versions,
             )
             probed_keys.add((symbol, probe_date))
             is_empty = (
@@ -503,6 +505,7 @@ def backfill_thetadata_options(
                 snapshot_date,
                 spec=download_spec,
                 overwrite=overwrite,
+                prune_previous_versions=prune_previous_versions,
             )
             is_empty = (
                 int(manifest.get("snapshot_days") or 0) <= 0
@@ -599,6 +602,7 @@ def backfill_thetadata_options(
             "fallback_window_days": download_spec.fallback_window_days,
         },
         "storage_backend": "arctic",
+        "prune_previous_versions": prune_previous_versions,
         "max_workers": workers,
         "results": results,
     }
