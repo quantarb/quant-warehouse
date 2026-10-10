@@ -22,13 +22,18 @@ def update_existing_dates(backend, library, symbol, incoming, merge):
         first = incoming['snapshot_date'].min()
         last = incoming['snapshot_date'].max() + timedelta(days=1) - timedelta(microseconds=1)
         template = lib.read(symbol, row_range=(0, 1), output_format='polars').data
-        if '__index__' in template.columns:
+        index_name = desc.index[0].name
+        if index_name != 'date' and index_name in template.columns:
+            template = template.rename({index_name: 'date'})
+        elif '__index__' in template.columns:
             template = template.rename({'__index__': 'date'})
         physical = [c for c in template.columns if c != 'date']
         extra = [c for c in incoming.columns if c not in template.columns and incoming[c].null_count() < len(incoming)]
         if extra:
             raise ValueError('Bounded options update requires reviewed schema migration')
         existing = backend.read(library, symbol, date_range=(first, last))
+        if existing is not None and index_name != 'date' and index_name in existing.columns:
+            existing = existing.rename({index_name: 'date'})
         merged = merge(existing, incoming)
         # Match the existing static physical schema exactly. Missing fields are
         # null; never discard a populated field or change unrelated metadata.
@@ -39,7 +44,7 @@ def update_existing_dates(backend, library, symbol, incoming, merge):
         ])
         metadata = lib.read_metadata(symbol).metadata
         data = aligned.to_pandas().set_index('date').sort_index()
-        data.index.name = 'date'
+        data.index.name = index_name
         lib.update(symbol, data, date_range=(first, last), metadata=metadata,
                    prune_previous_versions=False)
         return True

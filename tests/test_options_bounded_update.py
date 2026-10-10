@@ -36,3 +36,17 @@ def test_new_populated_schema_field_fails_before_write(tmp_path):
  with pytest.raises(ValueError,match='schema migration'):
   opt.write_option_chain_arctic('V',frame('2026-10-09',[110.]).with_columns(pl.lit(1.).alias('unreviewed_payload')),backend=b)
  assert opt.read_option_chain_arctic('V',backend=b).height==1
+
+
+def test_legacy_named_timestamp_index_is_preserved(tmp_path):
+ b=ArcticBackend('lmdb://'+str(tmp_path/'store'))
+ library=provider_library(opt.OPTIONS_THETADATA_EOD_LIBRARY,'thetadata')
+ lib=b._library(library)
+ initial=opt._prepare_option_chain_for_arctic(frame('2026-10-08',[100.]))
+ data=initial.to_pandas().set_index('date');data.index.name='timestamp'
+ lib.write('V',data,metadata={'source':'legacy'},prune_previous_versions=False)
+ opt.write_option_chain_arctic('V',frame('2026-10-09',[110.]),backend=b)
+ assert lib.get_description('V').index[0].name=='timestamp'
+ assert len(lib.read('V').data)==2
+ assert lib.read_metadata('V').metadata=={'source':'legacy'}
+ assert len(lib.list_versions('V'))==2
